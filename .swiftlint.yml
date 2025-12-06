@@ -1,0 +1,56 @@
+# SwiftLint Configuration for Deck
+# 针对高质量 macOS 项目的宽松配置
+
+disabled_rules:
+  - trailing_whitespace       # 尾随空格
+  - trailing_newline          # 尾随换行
+  - todo                      # TODO 注释
+  - force_cast                # 强制类型转换 (as!)
+  - force_try                 # 强制 try (try!)
+  - identifier_name           # 变量名长度限制
+  - type_body_length          # 类型长度
+  - file_length               # 文件长度
+  - large_tuple               # 大元组
+  - nesting                   # 嵌套层级
+  - function_body_length      # 函数长度
+  - cyclomatic_complexity     # 圈复杂度
+  - line_length               # 行长度
+  - multiple_closures_with_trailing_closure
+  - opening_brace
+  - trailing_comma
+  - vertical_whitespace
+  - unused_closure_parameter
+  - shorthand_operator
+  - for_where                 # for-where 偏好
+  - legacy_constructor        # 旧构造器
+  - static_over_final_class   # static vs final class
+  - non_optional_string_data_conversion  # String -> Data 转换
+  - colon                     # 冒号间距
+  - control_statement         # 控制语句括号
+  - statement_position        # else/catch 位置
+  - redundant_optional_initialization  # 可选值初始化
+  - unused_optional_binding   # 未使用的可选绑定
+  - redundant_string_enum_value  # 冗余枚举字符串值
+
+# 不启用额外的 opt-in 规则，避免误报
+opt_in_rules: []
+
+excluded:
+  - DerivedData
+  - .build
+  - Pods
+  - Carthage
+  - vendor
+  - Package.swift
+  - DeckTests
+  - DeckUITests
+
+function_parameter_count:
+  warning: 8
+  error: 10
+
+type_name:
+  min_length: 2
+  max_length: 60
+
+reporter: "xcode"

@@ -1,0 +1,691 @@
+{
+  "_comment": "上下文感知配置文件 - 用户可自定义添加应用映射",
+  "_format": "bundleId -> [preferredType1, preferredType2, ...]",
+  "_types": [
+    "code",
+    "text",
+    "image",
+    "color",
+    "url",
+    "file"
+  ],
+  "apps": {
+    "com.apple.dt.Xcode": [
+      "code",
+      "text"
+    ],
+    "com.todesktop.230313mzl4w4u92": [
+      "code",
+      "text"
+    ],
+    "com.exafunction.windsurf": [
+      "code",
+      "text"
+    ],
+    "ai.codeium": [
+      "code",
+      "text"
+    ],
+    "com.sourcegraph.cody": [
+      "code",
+      "text"
+    ],
+    "dev.zed.Zed": [
+      "code",
+      "text"
+    ],
+    "com.microsoft.VSCode": [
+      "code",
+      "text"
+    ],
+    "com.microsoft.VSCodeInsiders": [
+      "code",
+      "text"
+    ],
+    "com.sublimetext": [
+      "code",
+      "text"
+    ],
+    "com.sublimehq.Sublime-Text": [
+      "code",
+      "text"
+    ],
+    "com.github.atom": [
+      "code",
+      "text"
+    ],
+    "io.brackets": [
+      "code",
+      "text"
+    ],
+    "com.panic.Nova": [
+      "code",
+      "text"
+    ],
+    "com.barebones.bbedit": [
+      "code",
+      "text"
+    ],
+    "com.macromates.TextMate": [
+      "code",
+      "text"
+    ],
+    "com.coteditor.CotEditor": [
+      "code",
+      "text"
+    ],
+    "org.vim": [
+      "code",
+      "text"
+    ],
+    "com.qvacua.VimR": [
+      "code",
+      "text"
+    ],
+    "com.jetbrains.fleet": [
+      "code",
+      "text"
+    ],
+    "co.zeit.hyper": [
+      "code",
+      "text"
+    ],
+    "com.googlecode.iterm2": [
+      "code",
+      "text"
+    ],
+    "com.apple.Terminal": [
+      "code",
+      "text"
+    ],
+    "io.alacritty": [
+      "code",
+      "text"
+    ],
+    "com.github.wez.wezterm": [
+      "code",
+      "text"
+    ],
+    "net.kovidgoyal.kitty": [
+      "code",
+      "text"
+    ],
+    "com.mitchellh.ghostty": [
+      "code",
+      "text"
+    ],
+    "dev.warp.Warp-Stable": [
+      "code",
+      "text"
+    ],
+    "com.google.antigravity": [
+      "code",
+      "text"
+    ],
+    "com.figma.Desktop": [
+      "color",
+      "image"
+    ],
+    "com.adobe.Photoshop": [
+      "color",
+      "image"
+    ],
+    "com.adobe.Illustrator": [
+      "color",
+      "image"
+    ],
+    "com.adobe.xd": [
+      "color",
+      "image"
+    ],
+    "com.adobe.InDesign": [
+      "color",
+      "image"
+    ],
+    "com.adobe.AfterEffects": [
+      "image",
+      "file"
+    ],
+    "com.adobe.PremierePro": [
+      "file",
+      "image"
+    ],
+    "com.adobe.Lightroom": [
+      "image",
+      "file"
+    ],
+    "com.bohemiancoding.sketch3": [
+      "color",
+      "image"
+    ],
+    "com.affinity.designer": [
+      "color",
+      "image"
+    ],
+    "com.affinity.photo": [
+      "color",
+      "image"
+    ],
+    "com.affinity.publisher": [
+      "color",
+      "image"
+    ],
+    "com.pixelmatorteam.pixelmator": [
+      "color",
+      "image"
+    ],
+    "com.pixelmatorteam.pixelmatorpro": [
+      "color",
+      "image"
+    ],
+    "com.canva.CanvaDesktop": [
+      "color",
+      "image"
+    ],
+    "com.framer.desktop": [
+      "color",
+      "image"
+    ],
+    "cc.blender.blender": [
+      "file",
+      "image"
+    ],
+    "com.icons8.Lunacy": [
+      "color",
+      "image"
+    ],
+    "com.danielgindi.Principle": [
+      "color",
+      "image"
+    ],
+    "com.facebook.origami-studio": [
+      "color",
+      "image"
+    ],
+    "com.sketchup.SketchUp": [
+      "color",
+      "image"
+    ],
+    "com.axure.AxureRP": [
+      "color",
+      "image"
+    ],
+    "com.blackmagic-design.resolve": [
+      "file",
+      "image"
+    ],
+    "com.apple.FinalCut": [
+      "file",
+      "image"
+    ],
+    "com.apple.motionapp": [
+      "file",
+      "image"
+    ],
+    "com.apple.Compressor": [
+      "file",
+      "image"
+    ],
+    "com.apple.ColorSyncUtility": [
+      "image",
+      "file"
+    ],
+    "com.apple.colorsync": [
+      "image",
+      "file"
+    ],
+    "com.adobe.AdobeAudition": [
+      "file",
+      "image"
+    ],
+    "com.apple.Safari": [
+      "url",
+      "text"
+    ],
+    "com.apple.SafariTechnologyPreview": [
+      "url",
+      "text"
+    ],
+    "com.google.Chrome": [
+      "url",
+      "text"
+    ],
+    "com.google.Chrome.canary": [
+      "url",
+      "text"
+    ],
+    "com.google.Chrome.beta": [
+      "url",
+      "text"
+    ],
+    "ai.perplexity.comet": [
+      "url",
+      "text"
+    ],
+    "org.mozilla.firefox": [
+      "url",
+      "text"
+    ],
+    "org.mozilla.firefoxdeveloperedition": [
+      "url",
+      "text"
+    ],
+    "com.microsoft.edgemac": [
+      "url",
+      "text"
+    ],
+    "com.microsoft.edgemac.Canary": [
+      "url",
+      "text"
+    ],
+    "com.brave.Browser": [
+      "url",
+      "text"
+    ],
+    "com.vivaldi.Vivaldi": [
+      "url",
+      "text"
+    ],
+    "com.operasoftware.Opera": [
+      "url",
+      "text"
+    ],
+    "com.operasoftware.OperaNext": [
+      "url",
+      "text"
+    ],
+    "company.thebrowser.Browser": [
+      "url",
+      "text"
+    ],
+    "org.chromium.Chromium": [
+      "url",
+      "text"
+    ],
+    "com.nickvision.Parabolic": [
+      "url",
+      "text"
+    ],
+    "com.apple.finder": [
+      "file",
+      "image"
+    ],
+    "com.cocoatech.PathFinder": [
+      "file",
+      "image"
+    ],
+    "com.binarynights.ForkLift-3": [
+      "file",
+      "image"
+    ],
+    "com.mowglii.files": [
+      "file",
+      "image"
+    ],
+    "com.app77.FileViewer": [
+      "file",
+      "image"
+    ],
+    "com.apple.Notes": [
+      "text",
+      "image"
+    ],
+    "md.obsidian": [
+      "text",
+      "code"
+    ],
+    "co.noteplan.NotePlan3": [
+      "text",
+      "code"
+    ],
+    "com.craft.craft": [
+      "text",
+      "image"
+    ],
+    "com.notion.Notion": [
+      "text",
+      "url"
+    ],
+    "abnerworks.Typora": [
+      "text",
+      "code"
+    ],
+    "com.ulysses.mac": [
+      "text"
+    ],
+    "com.apple.iWork.Pages": [
+      "text",
+      "image"
+    ],
+    "pro.writer.mac": [
+      "text"
+    ],
+    "com.logseq.logseq": [
+      "text",
+      "code"
+    ],
+    "net.daringfireball.byword": [
+      "text"
+    ],
+    "md.gentle.whisper": [
+      "text",
+      "code"
+    ],
+    "net.shinyfrog.bear": [
+      "text",
+      "image"
+    ],
+    "com.devon-technologies.think3": [
+      "text",
+      "file"
+    ],
+    "com.apple.MobileSMS": [
+      "text",
+      "image"
+    ],
+    "com.tinyspeck.slackmacgap": [
+      "text",
+      "image"
+    ],
+    "com.hnc.Discord": [
+      "text",
+      "image"
+    ],
+    "ru.keepcoder.Telegram": [
+      "text",
+      "image"
+    ],
+    "com.tencent.xinWeChat": [
+      "text",
+      "image"
+    ],
+    "com.tencent.qq": [
+      "text",
+      "image"
+    ],
+    "com.microsoft.teams": [
+      "text",
+      "file"
+    ],
+    "us.zoom.xos": [
+      "text",
+      "url"
+    ],
+    "com.apple.mail": [
+      "text",
+      "image"
+    ],
+    "com.readdle.smartemail-Mac": [
+      "text",
+      "image"
+    ],
+    "com.alibaba.dingtalk": [
+      "text",
+      "image"
+    ],
+    "com.bytedance.lark": [
+      "text",
+      "image"
+    ],
+    "com.tencent.wework": [
+      "text",
+      "image"
+    ],
+    "com.tencent.wemeet": [
+      "text",
+      "url"
+    ],
+    "com.apple.logic10": [
+      "file",
+      "text"
+    ],
+    "com.apple.garageband10": [
+      "file",
+      "text"
+    ],
+    "com.ableton.live": [
+      "file",
+      "text"
+    ],
+    "com.image-line.flstudio": [
+      "file",
+      "text"
+    ],
+    "com.avid.ProTools": [
+      "file",
+      "text"
+    ],
+    "com.avid.Sibelius": [
+      "file",
+      "text"
+    ],
+    "com.cockos.reaper": [
+      "file",
+      "text"
+    ],
+    "com.bitwig.BitwigStudio": [
+      "file",
+      "text"
+    ],
+    "com.propellerheads.reason": [
+      "file",
+      "text"
+    ],
+    "com.spotify.client": [
+      "text",
+      "url"
+    ],
+    "com.apple.Music": [
+      "text",
+      "url"
+    ],
+    "com.netease.163music": [
+      "text",
+      "url"
+    ],
+    "com.tencent.QQMusic": [
+      "text",
+      "url"
+    ],
+    "com.youdao.YoudaoDict": [
+      "text"
+    ],
+    "com.eusoft.eudic": [
+      "text"
+    ],
+    "com.colliderli.iina": [
+      "file",
+      "url"
+    ],
+    "org.videolan.vlc": [
+      "file",
+      "url"
+    ],
+    "com.adobe.Acrobat": [
+      "file",
+      "text"
+    ],
+    "com.adobe.Acrobat.Pro": [
+      "file",
+      "text"
+    ],
+    "com.adobe.Reader": [
+      "file",
+      "text"
+    ],
+    "com.readdle.PDFExpert-Mac": [
+      "file",
+      "text"
+    ],
+    "com.foxitsoftware.reader": [
+      "file",
+      "text"
+    ],
+    "pl.maketheweb.cleanshotx": [
+      "image",
+      "file"
+    ],
+    "com.xnipapp.xnip": [
+      "image",
+      "file"
+    ],
+    "com.TechSmith.Snagit": [
+      "image",
+      "file"
+    ],
+    "com.raycast.macos": [
+      "text",
+      "url"
+    ],
+    "com.runningwithcrayons.Alfred": [
+      "text",
+      "url"
+    ],
+    "com.1password.1password": [
+      "text"
+    ],
+    "com.bitwarden.desktop": [
+      "text"
+    ],
+    "com.getdropbox.dropbox": [
+      "file",
+      "url"
+    ],
+    "com.google.Drive": [
+      "file",
+      "url"
+    ],
+    "com.microsoft.OneDrive-mac": [
+      "file",
+      "url"
+    ],
+    "com.baidu.BaiduNetdisk": [
+      "file",
+      "url"
+    ],
+    "com.alicloud.smartdrive": [
+      "file",
+      "url"
+    ],
+    "com.github.GitHubClient": [
+      "code",
+      "text"
+    ],
+    "com.fournova.Tower": [
+      "code",
+      "text"
+    ],
+    "com.axosoft.gitkraken": [
+      "code",
+      "text"
+    ],
+    "com.sublimemerge": [
+      "code",
+      "text"
+    ],
+    "com.github.fork": [
+      "code",
+      "text"
+    ],
+    "com.panic.Transmit": [
+      "file",
+      "url"
+    ],
+    "ch.sudo.cyberduck": [
+      "file",
+      "url"
+    ],
+    "com.binarynights.ForkLift": [
+      "file",
+      "url"
+    ],
+    "com.omnigroup.OmniFocus": [
+      "text"
+    ],
+    "com.culturedcode.ThingsMac": [
+      "text"
+    ],
+    "com.todoist.mac.Todoist": [
+      "text"
+    ],
+    "com.parallels.desktop.console": [
+      "file",
+      "text"
+    ],
+    "com.vmware.fusion": [
+      "file",
+      "text"
+    ],
+    "org.virtualbox.app.VirtualBox": [
+      "file",
+      "text"
+    ],
+    "com.docker.docker": [
+      "code",
+      "text"
+    ],
+    "com.nssurge.surge-mac": [
+      "url",
+      "text"
+    ],
+    "com.github.clashx": [
+      "url",
+      "text"
+    ],
+    "com.west2online.ClashX": [
+      "url",
+      "text"
+    ],
+    "com.west2online.ClashXPro": [
+      "url",
+      "text"
+    ],
+    "com.qiuyuzhou.ShadowsocksX-NG": [
+      "url",
+      "text"
+    ],
+    "io.github.clash-verge-rev": [
+      "url",
+      "text"
+    ],
+    "com.microsoft.Excel": [
+      "text"
+    ],
+    "com.apple.iWork.Numbers": [
+      "text"
+    ],
+    "com.apple.iWork.Keynote": [
+      "image",
+      "text"
+    ],
+    "com.microsoft.Powerpoint": [
+      "image",
+      "text"
+    ],
+    "com.tableplus.TablePlus": [
+      "code",
+      "text"
+    ],
+    "com.sequelpro.SequelPro": [
+      "code",
+      "text"
+    ],
+    "com.postmanlabs.mac": [
+      "code",
+      "url"
+    ],
+    "com.insomnia.app": [
+      "code",
+      "url"
+    ],
+    "com.tinyapp.TableTool": [
+      "text"
+    ]
+  },
+  "prefixPatterns": {
+    "com.jetbrains": [
+      "code",
+      "text"
+    ]
+  }
+}

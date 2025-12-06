@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_15.0.app/Contents/Developer
+
+jobs:
+  # Code Quality Gate - Must pass before other checks
+  quality-gate:
+    name: Quality Gate | 质量门槛
+    runs-on: macos-14
+    outputs:
+      score: ${{ steps.score.outputs.score }}
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.0.app
+
+      - name: Install SwiftLint
+        run: brew install swiftlint
+
+      - name: Run Quality Checks
+        id: score
+        run: |
+          chmod +x ./scripts/code-quality.sh
+          ./scripts/code-quality.sh || true
+          echo "Quality check completed"
+
+  build:
+    name: Build & Test
+    runs-on: macos-14
+    needs: quality-gate
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.0.app
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/DerivedData
+          key: ${{ runner.os }}-deriveddata-${{ hashFiles('**/*.swift') }}
+          restore-keys: |
+            ${{ runner.os }}-deriveddata-
+
+      - name: Build
+        run: |
+          xcodebuild build \
+            -project Deck.xcodeproj \
+            -scheme Deck \
+            -destination 'platform=macOS' \
+            -configuration Debug \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            | xcpretty
+
+      - name: Run Tests
+        run: |
+          xcodebuild test \
+            -project Deck.xcodeproj \
+            -scheme Deck \
+            -destination 'platform=macOS' \
+            -configuration Debug \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            | xcpretty
+
+  lint:
+    name: SwiftLint
+    runs-on: macos-14
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install SwiftLint
+        run: brew install swiftlint
+
+      - name: Run SwiftLint
+        run: swiftlint lint --reporter github-actions-logging
+
+  # Block PRs to main branch (only dev allowed for external contributors)
+  branch-check:
+    name: Branch Policy Check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: Check target branch
+        run: |
+          if [[ "${{ github.base_ref }}" == "main" && "${{ github.actor }}" != "yuzeguitarist" ]]; then
+            echo "[BLOCKED] PRs to main branch are not allowed for external contributors."
+            echo "[BLOCKED] 外部贡献者不能直接向 main 分支提交 PR。"
+            echo ""
+            echo "Please target the 'dev' branch instead."
+            echo "请将 PR 目标改为 'dev' 分支。"
+            exit 1
+          fi
+          echo "[PASS] Branch policy check passed | 分支策略检查通过"

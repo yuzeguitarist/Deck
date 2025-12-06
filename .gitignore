@@ -1,0 +1,84 @@
+.DS_Store
+/build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.log
+*.dmg
+*.ipa
+*.xcarchive
+*.zip
+
+# 不公开的根部敏感/辅助文档
+cursor-*.md
+
+# 默认忽略 App 源码
+Deck/*
+
+# 允许公开的服务（其余服务保持忽略）
+!Deck/Services/
+Deck/Services/*
+!Deck/Services/ScriptPluginService.swift
+!Deck/Services/DataExportService.swift
+!Deck/Services/DeckSQLManager.swift
+!Deck/Services/SecurityService.swift
+
+# 允许公开的通用工具
+!Deck/Utilities/
+Deck/Utilities/*
+!Deck/Utilities/Extensions.swift
+!Deck/Utilities/Constants.swift
+!Deck/Utilities/AppLogger.swift
+
+# 允许公开的模型（如有敏感可改成忽略）
+!Deck/Models/
+Deck/Models/*
+!Deck/Models/DeckTag.swift
+!Deck/Models/ClipboardItem.swift
+
+# 允许公开的资源
+!Deck/Resources/
+Deck/Resources/*
+!Deck/Resources/AppTypePreferences.json
+
+# 明确保持忽略的 UI / 入口 / 资产 / 配置
+Deck/App/
+Deck/Controllers/
+Deck/Views/
+Deck/Assets.xcassets/
+Deck/DeckApp.swift
+Deck/Deck.entitlements
+Deck/Info.plist
+Deck/Intents/
+Deck/DeckDataStore.swift
+Deck/Services/ContextAwareService.swift
+Deck/Services/CursorAssistantService.swift
+Deck/Services/DirectConnectService.swift
+Deck/Services/HotKeyManager.swift
+Deck/Services/MultipeerService.swift
+Deck/Services/OCRService.swift
+Deck/Services/PasteQueueService.swift
+Deck/Services/SearchService.swift
+Deck/Services/SmartContentCache.swift
+Deck/Services/SmartRuleService.swift
+Deck/Services/SmartTextService.swift
+Deck/Services/TextTransformer.swift
+Deck/Services/ClipboardService.swift
+Deck/Services/BlobStorage.swift
+
+# 忽略工程文件与 UI 测试
+Deck.xcodeproj/
+DeckUITests/
+DeckTests/
+
+# 保留根部文档与脚本
+!.gitignore
+!README.md
+!LICENSE
+!CONTRIBUTING.md
+!CODE_OF_CONDUCT.md
+!SECURITY.md
+!CHANGELOG.md
+!ExportOptions.plist
+!scripts/
+!photos/
