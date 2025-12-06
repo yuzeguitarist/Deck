@@ -1,7 +1,7 @@
 # Deck
 
 <p align="center">
-  <img src="assets/icon.png" alt="Deck Logo" width="128" height="128">
+  <img src="photos/deck_1024x1024.png" alt="Deck Logo" width="128" height="128">
 </p>
 
 <p align="center">
