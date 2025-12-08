@@ -1,7 +1,11 @@
-# Deck
+<p align="center">
+  <span style="font-size: 48px; font-weight: bold;">DE</span>
+  <img src="photos/deck_1024x1024.png" alt="Deck Logo" width="64" height="64" style="vertical-align: middle;">
+  <span style="font-size: 48px; font-weight: bold;">CK</span>
+</p>
 
 <p align="center">
-  <img src="photos/deck_1024x1024.png" alt="Deck Logo" width="128" height="128">
+  <img src="photos/DeckShow.png" alt="Deck Show" width="720">
 </p>
 
 <p align="center">
