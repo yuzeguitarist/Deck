@@ -79,6 +79,19 @@ final class DeckSQLManager: NSObject {
     
     @discardableResult
     private func withDB<T>(_ work: () throws -> T) -> T? {
+        // 在执行数据库操作前检查文件有效性，防止 try! 崩溃
+        if !isDatabaseFileValid() {
+            log.warn("Database file is invalid or missing, attempting to reinitialize...")
+            handleDBError(NSError(domain: "DeckSQL", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "Database file is invalid or missing"
+            ]))
+            // 尝试重新初始化数据库
+            DispatchQueue.main.async { [weak self] in
+                self?.reinitialize()
+            }
+            return nil
+        }
+
         do {
             let result = try syncOnDBQueue(work)
             // 操作成功，重置错误计数
@@ -88,6 +101,14 @@ final class DeckSQLManager: NSObject {
             handleDBError(error)
             return nil
         }
+    }
+
+    /// 检查数据库文件是否存在且可访问
+    /// 在数据库操作前调用，防止因文件被删除而导致 try! 崩溃
+    private func isDatabaseFileValid() -> Bool {
+        let basePath = getStoragePath()
+        let dbPath = (basePath as NSString).appendingPathComponent("Deck.sqlite3")
+        return FileManager.default.fileExists(atPath: dbPath) && FileManager.default.isReadableFile(atPath: dbPath)
     }
 
     /// 处理数据库错误并在必要时通知用户
@@ -531,7 +552,13 @@ final class DeckSQLManager: NSObject {
         // Migration 0 -> 1: 添加 blob_path 列
         if currentVersion < 1 {
             withDB {
-                let columns = try db.prepare("PRAGMA table_info(ClipboardHistory)").map { $0[1] as? String ?? "" }
+                let stmt = try db.prepare("PRAGMA table_info(ClipboardHistory)")
+                var columns: [String] = []
+                while let row = try stmt.failableNext() {
+                    if let name = row[1] as? String {
+                        columns.append(name)
+                    }
+                }
                 if !columns.contains("blob_path") {
                     try db.run("ALTER TABLE ClipboardHistory ADD COLUMN blob_path TEXT")
                     log.info("Added blob_path column for large payload offloading")
@@ -951,9 +978,9 @@ extension DeckSQLManager {
                 ORDER BY rank
                 LIMIT ?
             """
-            let stmt = try db.prepare(sql)
+            let stmt = try db.prepare(sql).bind(ftsQuery, limit)
             var ids: [Int64] = []
-            for row in stmt.bind(ftsQuery, limit) {
+            while let row = try stmt.failableNext() {
                 if let id = row[0] as? Int64 {
                     ids.append(id)
                 }
