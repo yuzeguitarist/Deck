@@ -1,37 +1,37 @@
-<div align="center">
-  <table>
-    <tr>
-      <td><h1>DE</h1></td>
-      <td><img src="photos/deck_1024x1024.png" alt="Deck Logo" width="80" height="80"></td>
-      <td><h1>CK</h1></td>
-    </tr>
-  </table>
-</div>
-
 <p align="center">
-  <img src="photos/DeckShow.png" alt="Deck Show" width="720">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="photos/deck-macOS-Dark-1024x1024@1x.png">
+    <source media="(prefers-color-scheme: light)" srcset="photos/deck-macOS-Default-1024x1024@1x.png">
+    <img src="photos/deck-macOS-Default-1024x1024@1x.png" alt="Deck Logo" width="128" height="128">
+  </picture>
 </p>
+
+<h1 align="center">Deck</h1>
 
 <p align="center">
   <strong>A modern, native, privacy-first clipboard OS for macOS</strong>
 </p>
 
 <p align="center">
-  <a href="#features">Features</a> |
-  <a href="#installation">Installation</a> |
-  <a href="#screenshots">Screenshots</a> |
-  <a href="#usage">Usage</a> |
-  <a href="#tech-highlights">Tech</a> |
-  <a href="#contributing">Contributing</a> |
-  <a href="#license">License</a> |
+  <a href="#features">Features</a> •
+  <a href="#installation">Installation</a> •
+  <a href="#screenshots">Screenshots</a> •
+  <a href="#usage">Usage</a> •
+  <a href="#tech-highlights">Tech</a> •
+  <a href="#contributing">Contributing</a> •
+  <a href="#license">License</a> •
   <a href="#中文说明">中文</a>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-macOS-blue.svg" alt="Platform">
-  <img src="https://img.shields.io/badge/swift-5.9+-orange.svg" alt="Swift">
-  <img src="https://img.shields.io/badge/license-GPL--3.0%20with%20Commons%20Clause-green.svg" alt="License">
-  <img src="https://img.shields.io/badge/status-Free%20for%20now-brightgreen.svg" alt="Status">
+  <img src="https://img.shields.io/badge/platform-macOS_14+-blue?style=flat-square" alt="Platform">
+  <img src="https://img.shields.io/badge/swift-5.9+-F05138?style=flat-square&logo=swift&logoColor=white" alt="Swift">
+  <img src="https://img.shields.io/badge/license-GPL--3.0-green?style=flat-square" alt="License">
+  <img src="https://img.shields.io/badge/status-Free_for_now-brightgreen?style=flat-square" alt="Status">
+</p>
+
+<p align="center">
+  <img src="photos/DeckShow.png" alt="Deck Show" width="720">
 </p>
 
 ---
