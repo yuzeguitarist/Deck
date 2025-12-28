@@ -96,7 +96,11 @@ enum Const {
     static let maxSearchTextLength: Int = 5000
     static let maxSmartAnalysisLength: Int = 8000
     static let maxPreviewBodyLength: Int = 10000
+    static let maxSemanticTextLength: Int = 512
+    static let semanticCandidateLimit: Int = 800
+    static let maxRichTextSanitizeBytes: Int = 512 * 1024
     static let largeBlobThreshold: Int = 512 * 1024 // 512KB threshold for offloading binary payloads
+    static let maxBase64ImageBytes: Int = 2 * 1024 * 1024 // 2MB cap for base64 image preview
     static let pageSize: Int = 50
 
     // Script safety

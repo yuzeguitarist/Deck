@@ -49,6 +49,7 @@ Deck/Assets.xcassets/
 Deck/DeckApp.swift
 Deck/Deck.entitlements
 Deck/Info.plist
+Config/Info.plist
 Deck/Intents/
 Deck/DeckDataStore.swift
 Deck/Services/ContextAwareService.swift

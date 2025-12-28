@@ -123,7 +123,7 @@ final class DataExportService {
                 var isFirst = true
                 
                 while true {
-                    let batch = DeckSQLManager.shared.fetchAll(limit: batchSize, offset: offset)
+                    let batch = DeckSQLManager.shared.fetchAll(limit: batchSize, offset: offset, loadFullData: true)
                     if batch.isEmpty { break }
 
                     for item in batch {

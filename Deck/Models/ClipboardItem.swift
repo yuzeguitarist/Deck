@@ -18,6 +18,9 @@ extension PasteboardType {
     static var supportedTypes: [PasteboardType] = [
         .png, .tiff, .rtf, .rtfd, .fileURL, .string
     ]
+
+    static let microsoftObjectLink = NSPasteboard.PasteboardType(rawValue: "com.microsoft.ObjectLink")
+    static let microsoftLinkSource = NSPasteboard.PasteboardType(rawValue: "com.microsoft.Link-Source")
     
     func isImage() -> Bool {
         self == .png || self == .tiff
@@ -71,15 +74,35 @@ final class ClipboardItem: Identifiable, Equatable {
     var id: Int64?
     let uniqueId: String
     let pasteboardType: PasteboardType
-    let data: Data
+    @ObservationIgnored
+    private var inlineData: Data
     let previewData: Data?
     let blobPath: String?
     private(set) var timestamp: Int64
     let appPath: String
     let appName: String
-    var searchText: String
+    var searchText: String {
+        didSet {
+            guard searchText != oldValue else { return }
+            base64ImageChecked = false
+            cachedBase64Image = nil
+            cachedSmartAnalysis = nil
+            cachedIsMarkdown = nil
+            cachedCalculationResult = nil
+            calculationResultChecked = false
+        }
+    }
     let contentLength: Int
     var tagId: Int
+
+    @ObservationIgnored
+    private var dataIsFull: Bool
+
+    @ObservationIgnored
+    private var fullDataLoader: (() -> Data?)?
+
+    @ObservationIgnored
+    private let dataLock = NSLock()
     
     @ObservationIgnored
     private(set) lazy var itemType: ClipItemType = detectItemType()
@@ -95,14 +118,20 @@ final class ClipboardItem: Identifiable, Equatable {
     
     @ObservationIgnored
     private var cachedColorValue: NSColor?
+
+    @ObservationIgnored
+    private var cachedBase64Image: NSImage?
+
+    @ObservationIgnored
+    private var base64ImageChecked: Bool = false
     
     @ObservationIgnored
-    private lazy var analysisSample: String = {
+    private var analysisSample: String {
         if searchText.count > Const.maxSmartAnalysisLength {
             return String(searchText.prefix(Const.maxSmartAnalysisLength))
         }
         return searchText
-    }()
+    }
     
     @ObservationIgnored
     private var cachedSmartAnalysis: SmartTextService.DetectionResult?
@@ -152,10 +181,12 @@ final class ClipboardItem: Identifiable, Equatable {
         tagId: Int = -1,
         id: Int64? = nil,
         uniqueId: String? = nil,
-        blobPath: String? = nil
+        blobPath: String? = nil,
+        dataIsFull: Bool = true,
+        dataLoader: (() -> Data?)? = nil
     ) {
         self.pasteboardType = pasteboardType
-        self.data = data
+        self.inlineData = data
         self.previewData = previewData
         self.uniqueId = uniqueId ?? data.sha256Hex
         self.timestamp = timestamp
@@ -166,6 +197,8 @@ final class ClipboardItem: Identifiable, Equatable {
         self.tagId = tagId
         self.id = id
         self.blobPath = blobPath
+        self.dataIsFull = dataIsFull
+        self.fullDataLoader = dataLoader
         
         if pasteboardType == .fileURL {
             if let urlString = String(data: data, encoding: .utf8) {
@@ -173,25 +206,69 @@ final class ClipboardItem: Identifiable, Equatable {
             }
         }
     }
+
+    var data: Data {
+        inlineData
+    }
+
+    var hasFullData: Bool {
+        dataIsFull
+    }
+
+    func setDeferredDataLoader(_ loader: @escaping () -> Data?) {
+        fullDataLoader = loader
+    }
+
+    /// Load and cache full data when needed (for non-blob items).
+    func loadFullData() -> Data? {
+        if dataIsFull {
+            return inlineData
+        }
+
+        dataLock.lock()
+        defer { dataLock.unlock() }
+
+        if dataIsFull {
+            return inlineData
+        }
+
+        if let loaded = fullDataLoader?() {
+            inlineData = loaded
+            dataIsFull = true
+            return loaded
+        }
+
+        return inlineData
+    }
     
     convenience init?(with pasteboard: NSPasteboard) {
         guard let item = pasteboard.pasteboardItems?.first else { return nil }
         
         let app = NSWorkspace.shared.frontmostApplication
-        guard let type = item.availableType(from: PasteboardType.supportedTypes) else { return nil }
-        
+        let filteredTypes = Self.filteredPasteboardTypes(from: item.types)
+        guard let type = PasteboardType.supportedTypes.first(where: { filteredTypes.contains($0) }) else { return nil }
+
+        var resolvedType = type
         log.debug("Creating item with type: \(type.rawValue)")
-        
+
         var content: Data?
-        if type.isFile() {
-            // 使用 propertyList 替代 readObjects 以避免 NSSecureCoding 问题
-            // readObjects(forClasses:) 会触发 NSXPCDecoder 警告
+        if type == .rtfd,
+           let plain = item.string(forType: .string),
+           !plain.isEmpty,
+           let plainData = plain.data(using: .utf8) {
+            // Prefer plain text for RTFD to avoid heavy decoding and NSSecureCoding warnings.
+            resolvedType = .string
+            content = plainData
+        } else if type.isFile() {
             var filePaths: [String] = []
 
-            // 方法 1: 从 propertyList 读取 (避免 NSSecureCoding)
+            // 从 propertyList 读取，避免 NSSecureCoding 解码警告
             if let urlStrings = pasteboard.propertyList(forType: .fileURL) as? [String] {
                 filePaths = urlStrings.compactMap { URL(string: $0)?.path }
             } else if let urlString = pasteboard.propertyList(forType: .fileURL) as? String,
+                      let url = URL(string: urlString) {
+                filePaths = [url.path]
+            } else if let urlString = item.string(forType: .fileURL),
                       let url = URL(string: urlString) {
                 filePaths = [url.path]
             } else if let data = item.data(forType: .fileURL),
@@ -216,8 +293,8 @@ final class ClipboardItem: Identifiable, Equatable {
         var previewData: Data?
         var attributedString = NSAttributedString()
         
-        if type.isText() {
-            attributedString = NSAttributedString(with: content, type: type) ?? NSAttributedString()
+        if resolvedType.isText() {
+            attributedString = NSAttributedString(with: content, type: resolvedType) ?? NSAttributedString()
             guard !attributedString.string.allSatisfy(\.isWhitespace) else { return nil }
             
             let previewAttr = attributedString.length > 250
@@ -230,7 +307,7 @@ final class ClipboardItem: Identifiable, Equatable {
         let length = type.isText() ? attributedString.length : content.count
 
         self.init(
-            pasteboardType: type,
+            pasteboardType: resolvedType,
             data: content,
             previewData: previewData,
             timestamp: Int64(Date().timeIntervalSince1970),
@@ -240,6 +317,19 @@ final class ClipboardItem: Identifiable, Equatable {
             contentLength: length,
             tagId: -1
         )
+    }
+
+    private static let microsoftSourcePrefix = "com.microsoft.ole.source."
+
+    private static func filteredPasteboardTypes(from types: [PasteboardType]) -> Set<PasteboardType> {
+        var filtered = Set(types)
+        filtered = filtered.filter { !$0.rawValue.hasPrefix(microsoftSourcePrefix) }
+
+        if filtered.contains(.microsoftLinkSource) && filtered.contains(.microsoftObjectLink) {
+            filtered.subtract([.microsoftLinkSource, .microsoftObjectLink, .pdf])
+        }
+
+        return filtered
     }
     
     private static let imageExtensions: Set<String> = [
@@ -335,6 +425,10 @@ final class ClipboardItem: Identifiable, Equatable {
             completion(nil)
             return
         }
+        guard FileManager.default.fileExists(atPath: pdfPath) else {
+            completion(nil)
+            return
+        }
 
         let url = URL(fileURLWithPath: pdfPath)
         let request = QLThumbnailGenerator.Request(
@@ -395,8 +489,36 @@ final class ClipboardItem: Identifiable, Equatable {
         cachedThumbnail = NSImage(data: payload)
         return cachedThumbnail
     }
+
+    func base64Image(maxBytes: Int = Const.maxBase64ImageBytes) -> NSImage? {
+        if base64ImageChecked { return cachedBase64Image }
+        base64ImageChecked = true
+
+        guard itemType == .text || itemType == .code || itemType == .richText else { return nil }
+        guard let payload = extractBase64ImagePayload(from: searchText) else { return nil }
+
+        let normalized = normalizeBase64(payload)
+        let estimatedBytes = normalized.count * 3 / 4
+        guard estimatedBytes > 0 && estimatedBytes <= maxBytes else { return nil }
+
+        guard let data = Data(base64Encoded: normalized, options: [.ignoreUnknownCharacters]),
+              data.count <= maxBytes,
+              let image = NSImage(data: data) else {
+            return nil
+        }
+
+        cachedBase64Image = image
+        return image
+    }
     
     private func generateThumbnailFromFile(path: String) -> NSImage? {
+        guard FileManager.default.fileExists(atPath: path) else {
+            let ext = URL(fileURLWithPath: path).pathExtension
+            let contentType = UTType(filenameExtension: ext) ?? .data
+            let icon = NSWorkspace.shared.icon(for: contentType)
+            icon.size = NSSize(width: Self.maxThumbnailSize, height: Self.maxThumbnailSize)
+            return icon
+        }
         let url = URL(fileURLWithPath: path)
         
         // First try: Use QuickLook thumbnail generator
@@ -421,6 +543,45 @@ final class ClipboardItem: Identifiable, Equatable {
         let icon = NSWorkspace.shared.icon(forFile: path)
         icon.size = NSSize(width: Self.maxThumbnailSize, height: Self.maxThumbnailSize)
         return icon
+    }
+
+    private func extractBase64ImagePayload(from text: String) -> String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if trimmed.hasPrefix("data:image/") {
+            guard let commaRange = trimmed.range(of: ",") else { return nil }
+            return String(trimmed[commaRange.upperBound...])
+        }
+
+        let cleaned = trimmed.replacingOccurrences(of: "\\s", with: "", options: .regularExpression)
+        guard cleaned.count >= 128 else { return nil }
+
+        let lowercased = cleaned.lowercased()
+        let looksLikeImageBase64 =
+            lowercased.hasPrefix("ivborw0kggo") || // PNG
+            lowercased.hasPrefix("/9j/") ||        // JPEG
+            lowercased.hasPrefix("r0lgod") ||      // GIF
+            lowercased.hasPrefix("uklgr")          // WebP
+
+        guard looksLikeImageBase64 else { return nil }
+
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-")
+        guard cleaned.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return nil }
+
+        return cleaned
+    }
+
+    private func normalizeBase64(_ input: String) -> String {
+        var normalized = input
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+
+        let remainder = normalized.count % 4
+        if remainder != 0 {
+            normalized += String(repeating: "=", count: 4 - remainder)
+        }
+
+        return normalized
     }
     
     private func generateSafeThumbnailFromData() -> NSImage? {
@@ -476,6 +637,7 @@ final class ClipboardItem: Identifiable, Equatable {
         
         var source: CGImageSource?
         if pasteboardType == .fileURL, let paths = cachedFilePaths, let path = paths.first {
+            guard FileManager.default.fileExists(atPath: path) else { return nil }
             let url = URL(fileURLWithPath: path)
             source = CGImageSourceCreateWithURL(url as CFURL, nil)
         } else if pasteboardType.isImage(), let payload = resolvedData() {
@@ -541,7 +703,7 @@ final class ClipboardItem: Identifiable, Equatable {
             // 使用 BlobStorage.load() 自动处理解密
             return BlobStorage.shared.load(path: blobPath)
         }
-        return data
+        return loadFullData()
     }
     
     var smartAnalysis: SmartTextService.DetectionResult {
@@ -590,6 +752,7 @@ final class ClipboardItem: Identifiable, Equatable {
         return !analysis.emails.isEmpty ||
                !analysis.phones.isEmpty ||
                analysis.codeLanguage != nil ||
+               analysis.jwt != nil ||
                isMarkdown ||
                calculationResult != nil
     }
