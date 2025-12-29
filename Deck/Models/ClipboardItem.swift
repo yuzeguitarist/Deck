@@ -46,13 +46,13 @@ enum ClipItemType: String, Codable, Sendable {
     
     var displayName: String {
         switch self {
-        case .text: return "文本"
-        case .richText: return "富文本"
-        case .image: return "图片"
-        case .file: return "文件"
-        case .url: return "链接"
-        case .color: return "颜色"
-        case .code: return "代码"
+        case .text: return NSLocalizedString("文本", comment: "Text")
+        case .richText: return NSLocalizedString("富文本", comment: "Rich Text")
+        case .image: return NSLocalizedString("图片", comment: "Image")
+        case .file: return NSLocalizedString("文件", comment: "File")
+        case .url: return NSLocalizedString("链接", comment: "URL")
+        case .color: return NSLocalizedString("颜色", comment: "Color")
+        case .code: return NSLocalizedString("代码", comment: "Code")
         }
     }
     

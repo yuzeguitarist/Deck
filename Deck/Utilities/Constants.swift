@@ -18,7 +18,11 @@ enum Const {
     // Window dimensions
     static let windowHeight: CGFloat = 300.0
     static let topBarHeight: CGFloat = 44.0
-    static let settingWidth: CGFloat = 600.0
+    static let settingWidth: CGFloat = {
+        // Use wider window for English/German due to longer text
+        let languageCode = Locale.current.language.languageCode?.identifier ?? "zh"
+        return (languageCode == "en" || languageCode == "de") ? 720.0 : 600.0
+    }()
     static let settingHeight: CGFloat = 500.0
     
     // Spacing

@@ -77,6 +77,7 @@ final class DeckSQLManager: NSObject {
     private var vecLegacyTableCleaned = false
     private var vecBackfillInProgress = false
     private let vecBackfillStateQueue = DispatchQueue(label: "com.deck.vec.backfill.state")
+    private var vecMissingDimensionLogged: Set<Int> = []
 
     // Error tracking - 错误追踪
     private var consecutiveErrorCount = 0
@@ -418,6 +419,7 @@ final class DeckSQLManager: NSObject {
         vecIndexEnabled = false
         vecReadyDimensions.removeAll()
         vecLegacyTableCleaned = false
+        vecMissingDimensionLogged.removeAll()
         db = try Connection(dbPath)
         db?.busyTimeout = 5.0
         if let db = db {
@@ -460,6 +462,7 @@ final class DeckSQLManager: NSObject {
         if rc == SQLITE_OK {
             vecIndexEnabled = true
             log.info("sqlite-vec initialized via sqlite3_vec_init (static)")
+            log.debug("sqlite-vec registered on db handle: \(String(describing: db.handle))")
             cleanupLegacyVecTableIfNeeded()
             scheduleVecIndexBackfillIfNeeded()
             return
@@ -649,7 +652,11 @@ final class DeckSQLManager: NSObject {
             vecBackfillInProgress = true
             return true
         }
-        guard shouldStart else { return }
+        guard shouldStart else {
+            log.debug("Vec index backfill already in progress; skip scheduling")
+            return
+        }
+        log.info("Vec index backfill started")
         Task(priority: .background) { [weak self] in
             defer {
                 self?.vecBackfillStateQueue.sync {
@@ -667,6 +674,7 @@ final class DeckSQLManager: NSObject {
         let maxItems = DeckUserDefaults.securityModeEnabled ? 300 : 1000
         var processed = 0
         var offset = 0
+        var dimensionCounts: [Int: Int] = [:]
         while processed < maxItems {
             guard !Task.isCancelled else { break }
 
@@ -706,6 +714,7 @@ final class DeckSQLManager: NSObject {
                 guard !Task.isCancelled else { break }
                 let raw = DeckUserDefaults.securityModeEnabled ? decryptData(row.data) : row.data
                 guard let vector = decodeEmbedding(raw) else { continue }
+                dimensionCounts[vector.count, default: 0] += 1
                 updateVecIndex(id: row.id, vector: vector)
                 processed += 1
             }
@@ -715,7 +724,13 @@ final class DeckSQLManager: NSObject {
         }
 
         if processed > 0 {
-            log.info("Vec index backfill completed: \(processed) items processed")
+            let dimensionSummary = dimensionCounts
+                .sorted(by: { $0.key < $1.key })
+                .map { "\($0.key):\($0.value)" }
+                .joined(separator: ", ")
+            log.info("Vec index backfill completed: \(processed) items processed (dims: [\(dimensionSummary)])")
+        } else {
+            log.debug("Vec index backfill completed: 0 items processed")
         }
     }
 
@@ -1548,16 +1563,25 @@ extension DeckSQLManager {
         guard !vector.isEmpty else { return }
         let normalized = normalizeVector(vector)
         ensureVecTable(dimension: normalized.count)
-        guard vecReadyDimensions.contains(normalized.count) else { return }
+        guard vecReadyDimensions.contains(normalized.count) else {
+            if vecMissingDimensionLogged.insert(normalized.count).inserted {
+                log.debug("Vec table not ready for dimension \(normalized.count); skipping updates")
+            }
+            return
+        }
         let tableName = vecTableName(for: normalized.count)
         let payload = vectorToJSONString(normalized)
-        withDB {
+        let success = withDB {
             try db.run("DELETE FROM \(tableName) WHERE rowid = ?", id)
             try db.run(
                 "INSERT INTO \(tableName)(rowid, embedding) VALUES (?, ?)",
                 id,
                 payload
             )
+            return true
+        }
+        if success != true {
+            log.debug("Vec index update failed for id=\(id), dim=\(normalized.count)")
         }
     }
 
@@ -1651,12 +1675,18 @@ extension DeckSQLManager {
         let normalized = normalizeVector(queryVector)
         guard !normalized.isEmpty else { return [] }
         ensureVecTable(dimension: normalized.count)
-        guard vecReadyDimensions.contains(normalized.count) else { return [] }
+        guard vecReadyDimensions.contains(normalized.count) else {
+            if vecMissingDimensionLogged.insert(normalized.count).inserted {
+                log.debug("Vec table not ready for dimension \(normalized.count); search fallback")
+            }
+            return []
+        }
         guard let db = db else { return [] }
 
         let tableName = vecTableName(for: normalized.count)
         let payload = vectorToJSONString(normalized)
-        return withDB {
+        log.debug("Vec search: dim=\(normalized.count), table=\(tableName), limit=\(limit), db=\(String(describing: db.handle))")
+        let results: [(id: Int64, distance: Double)] = withDB({ () throws -> [(id: Int64, distance: Double)] in
             let sql = """
                 SELECT rowid, distance FROM \(tableName)
                 WHERE embedding MATCH ?
@@ -1664,16 +1694,18 @@ extension DeckSQLManager {
                 LIMIT ?
             """
             let stmt = try db.prepare(sql).bind(payload, limit)
-            var rows: [(Int64, Double)] = []
+            var rows: [(id: Int64, distance: Double)] = []
             while let row = try stmt.failableNext() {
                 guard let id = bindingToInt64(row[0]),
                       let distance = bindingToDouble(row[1]) else {
                     continue
                 }
-                rows.append((id, distance))
+                rows.append((id: id, distance: distance))
             }
             return rows
-        } ?? []
+        }) ?? []
+        log.debug("Vec search results: count=\(results.count)")
+        return results
     }
 
     // MARK: - Search Cache Helpers
@@ -2158,9 +2190,27 @@ extension DeckSQLManager {
             query = query.filter(Col.tagId == tagId)
         }
 
-        query = query.order(Col.ts.desc).limit(limit)
+        query = query.limit(matchingIds.count)
 
-        return withDB { Array(try db.prepare(query)) } ?? []
+        let rows = withDB { Array(try db.prepare(query)) } ?? []
+        guard rows.count > 1 else { return rows }
+
+        var rowsById: [Int64: Row] = [:]
+        rowsById.reserveCapacity(rows.count)
+        for row in rows {
+            if let id = try? row.get(Col.id) {
+                rowsById[id] = row
+            }
+        }
+
+        var ordered: [Row] = []
+        ordered.reserveCapacity(min(limit, matchingIds.count))
+        for id in matchingIds {
+            guard let row = rowsById[id] else { continue }
+            ordered.append(row)
+            if ordered.count >= limit { break }
+        }
+        return ordered
     }
     
     func fetchAll(limit: Int = 10000, offset: Int = 0, loadFullData: Bool = false) -> [ClipboardItem] {
