@@ -105,7 +105,22 @@ final class DeckSQLManager: NSObject {
         }
         return try dbQueue.sync(execute: work)
     }
-    
+
+    private func asyncOnDBQueue<T>(_ work: @escaping () throws -> T) async throws -> T {
+        if DispatchQueue.getSpecific(key: dbQueueKey) != nil {
+            return try work()
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            dbQueue.async {
+                do {
+                    continuation.resume(returning: try work())
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     @discardableResult
     private func withDB<T>(_ work: () throws -> T) -> T? {
         // 在执行数据库操作前检查文件有效性，防止 try! 崩溃
@@ -123,6 +138,32 @@ final class DeckSQLManager: NSObject {
 
         do {
             let result = try syncOnDBQueue(work)
+            // 操作成功，重置错误计数
+            consecutiveErrorCount = 0
+            return result
+        } catch {
+            handleDBError(error)
+            return nil
+        }
+    }
+
+    @discardableResult
+    private func withDBAsync<T>(_ work: @escaping () throws -> T) async -> T? {
+        // 在执行数据库操作前检查文件有效性，防止 try! 崩溃
+        if !isDatabaseFileValid() {
+            log.warn("Database file is invalid or missing, attempting to reinitialize...")
+            handleDBError(NSError(domain: "DeckSQL", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "Database file is invalid or missing"
+            ]))
+            // 尝试重新初始化数据库
+            DispatchQueue.main.async { [weak self] in
+                self?.reinitialize()
+            }
+            return nil
+        }
+
+        do {
+            let result = try await asyncOnDBQueue(work)
             // 操作成功，重置错误计数
             consecutiveErrorCount = 0
             return result
@@ -907,7 +948,7 @@ final class DeckSQLManager: NSObject {
 
         query = query.order(Col.ts.desc).limit(limit)
 
-        return withDB { Array(try db.prepare(query)) } ?? []
+        return await withDBAsync { Array(try db.prepare(query)) } ?? []
     }
 
     /// 安全模式下的正则搜索：在内存中解密后匹配
@@ -946,7 +987,7 @@ final class DeckSQLManager: NSObject {
                 query = query.filter(Col.tagId == tagId)
             }
 
-            guard let rows = withDB({ Array(try db.prepare(query)) }) else { break }
+            guard let rows = await withDBAsync({ Array(try db.prepare(query)) }) else { break }
 
             // 没有更多数据
             if rows.isEmpty { break }
@@ -1348,7 +1389,7 @@ final class DeckSQLManager: NSObject {
                 let encryptedData = encryptData(storedData)
 
                 let query = table.filter(Col.id == item.id!)
-                withDB {
+                _ = await withDBAsync {
                     try db.run(query.update(
                         Col.data <- encryptedData,
                         Col.blobPath <- path
@@ -1393,7 +1434,7 @@ final class DeckSQLManager: NSObject {
         while processed < maxItems {
             guard !Task.isCancelled else { break }
 
-            let rows: [(id: Int64, searchText: String)] = withDB {
+            let rows: [(id: Int64, searchText: String)] = await withDBAsync {
                 let sql = """
                     SELECT ch.id, ch.search_text
                     FROM ClipboardHistory ch
@@ -1642,7 +1683,7 @@ extension DeckSQLManager {
         let query = tab.select(EmbeddingCol.id, EmbeddingCol.textHash, EmbeddingCol.embedding)
             .filter(ids.contains(EmbeddingCol.id))
 
-        return withDB {
+        return await withDBAsync {
             var result: [Int64: [Float]] = [:]
             let rows = Array(try db.prepare(query))
             for row in rows {
@@ -1650,8 +1691,8 @@ extension DeckSQLManager {
                 let storedHash = try row.get(EmbeddingCol.textHash)
                 guard let expectedHash = expectedHashes[id], expectedHash == storedHash else { continue }
                 let rawData = try row.get(EmbeddingCol.embedding)
-                let decodedData = DeckUserDefaults.securityModeEnabled ? decryptData(rawData) : rawData
-                guard let vector = decodeEmbedding(decodedData) else { continue }
+                let decodedData = DeckUserDefaults.securityModeEnabled ? self.decryptData(rawData) : rawData
+                guard let vector = self.decodeEmbedding(decodedData) else { continue }
                 result[id] = vector
             }
             return result
@@ -1686,7 +1727,7 @@ extension DeckSQLManager {
         let tableName = vecTableName(for: normalized.count)
         let payload = vectorToJSONString(normalized)
         log.debug("Vec search: dim=\(normalized.count), table=\(tableName), limit=\(limit), db=\(String(describing: db.handle))")
-        let results: [(id: Int64, distance: Double)] = withDB({ () throws -> [(id: Int64, distance: Double)] in
+        let results: [(id: Int64, distance: Double)] = await withDBAsync({ () throws -> [(id: Int64, distance: Double)] in
             let sql = """
                 SELECT rowid, distance FROM \(tableName)
                 WHERE embedding MATCH ?
@@ -1696,8 +1737,8 @@ extension DeckSQLManager {
             let stmt = try db.prepare(sql).bind(payload, limit)
             var rows: [(id: Int64, distance: Double)] = []
             while let row = try stmt.failableNext() {
-                guard let id = bindingToInt64(row[0]),
-                      let distance = bindingToDouble(row[1]) else {
+                guard let id = self.bindingToInt64(row[0]),
+                      let distance = self.bindingToDouble(row[1]) else {
                     continue
                 }
                 rows.append((id: id, distance: distance))
@@ -1834,7 +1875,7 @@ extension DeckSQLManager {
             Col.blobPath <- blobPath
         )
 
-        if let rowId: Int64 = withDB({ try db.run(insert) }) {
+        if let rowId: Int64 = await withDBAsync({ try db.run(insert) }) {
             log.debug("Inserted item with id: \(rowId)")
             scheduleSemanticEmbeddingUpdate(id: rowId, searchText: item.searchText)
             return rowId
@@ -1846,7 +1887,7 @@ extension DeckSQLManager {
         guard let db = db, let table = table else { return }
 
         let query = table.filter(filter)
-        if let count: Int = withDB({ try db.run(query.delete()) }) {
+        if let count: Int = await withDBAsync({ try db.run(query.delete()) }) {
             log.debug("Deleted \(count) items")
             // 无法确定具体删除了哪些 ID，清空所有缓存
             invalidateSearchCache()
@@ -1866,7 +1907,7 @@ extension DeckSQLManager {
         guard let db = db, let table = table else { return }
 
         let query = table.filter(Col.id == id)
-        if let count: Int = withDB({ try db.run(query.delete()) }) {
+        if let count: Int = await withDBAsync({ try db.run(query.delete()) }) {
             log.debug("Deleted item with id \(id): \(count) rows")
             invalidateSearchCache(ids: [id])  // 只失效被删除的项
         }
@@ -1901,7 +1942,7 @@ extension DeckSQLManager {
             Col.tagId <- item.tagId
         )
 
-        if let count: Int = withDB({ try db.run(update) }) {
+        if let count: Int = await withDBAsync({ try db.run(update) }) {
             log.debug("Updated \(count) items")
             invalidateSearchCache(ids: [id])  // 失效被更新的项（searchText 可能已变化）
             scheduleSemanticEmbeddingUpdate(id: id, searchText: item.searchText)
@@ -1914,7 +1955,7 @@ extension DeckSQLManager {
         let query = table.filter(Col.id == id)
         let update = query.update(Col.tagId <- tagId)
 
-        if let count: Int = withDB({ try db.run(update) }) {
+        if let count: Int = await withDBAsync({ try db.run(update) }) {
             log.debug("Updated tag for \(count) items")
         }
     }
@@ -1935,7 +1976,7 @@ extension DeckSQLManager {
         let query = table.filter(Col.id == id)
         let update = query.update(Col.searchText <- textToStore)
 
-        if let count: Int = withDB({ try db.run(update) }) {
+        if let count: Int = await withDBAsync({ try db.run(update) }) {
             log.info("OCR DB: Successfully updated searchText for \(count) items (FTS auto-synced via trigger)")
             invalidateSearchCache(ids: [id])
             scheduleSemanticEmbeddingUpdate(id: id, searchText: searchText)
@@ -1959,7 +2000,7 @@ extension DeckSQLManager {
         if let f = filter { query = query.filter(f) }
         if let l = limit { query = query.limit(l, offset: offset ?? 0) }
 
-        return withDB { Array(try db.prepare(query)) } ?? []
+        return await withDBAsync { Array(try db.prepare(query)) } ?? []
     }
 
     private func buildFTSQuery(from keyword: String, useTrigram: Bool) -> String {
@@ -1980,10 +2021,10 @@ extension DeckSQLManager {
         return terms.joined(separator: " OR ")
     }
 
-    private func runFTSQuery(_ ftsQuery: String, limit: Int) -> [Int64] {
+    private func runFTSQuery(_ ftsQuery: String, limit: Int) async -> [Int64] {
         guard let db = db else { return [] }
 
-        return withDB {
+        return await withDBAsync {
             let sql = """
                 SELECT rowid FROM ClipboardHistory_fts
                 WHERE ClipboardHistory_fts MATCH ?
@@ -2009,13 +2050,13 @@ extension DeckSQLManager {
         return escaped
     }
 
-    private func searchWithSQLLike(keyword: String, limit: Int) -> [Int64] {
+    private func searchWithSQLLike(keyword: String, limit: Int) async -> [Int64] {
         guard let db = db else { return [] }
 
         let escaped = escapeForLike(keyword)
         let pattern = "%\(escaped)%"
 
-        return withDB {
+        return await withDBAsync {
             let sql = """
                 SELECT id FROM ClipboardHistory
                 WHERE search_text LIKE ? ESCAPE '\\'
@@ -2051,9 +2092,9 @@ extension DeckSQLManager {
         if ftsUsesTrigram {
             let ftsQuery = buildFTSQuery(from: trimmed, useTrigram: true)
             guard !ftsQuery.isEmpty else {
-                return searchWithSQLLike(keyword: trimmed, limit: limit)
+                return await searchWithSQLLike(keyword: trimmed, limit: limit)
             }
-            return runFTSQuery(ftsQuery, limit: limit)
+            return await runFTSQuery(ftsQuery, limit: limit)
         }
 
         // 检测是否包含 CJK 字符（中日韩）
@@ -2070,7 +2111,7 @@ extension DeckSQLManager {
 
         // FTS5 默认分词器对 CJK 支持不好，保留内存搜索兜底
         if containsCJK {
-            let sqlIds = searchWithSQLLike(keyword: trimmed, limit: limit)
+            let sqlIds = await searchWithSQLLike(keyword: trimmed, limit: limit)
             if !sqlIds.isEmpty {
                 return sqlIds
             }
@@ -2079,7 +2120,7 @@ extension DeckSQLManager {
 
         let ftsQuery = buildFTSQuery(from: trimmed, useTrigram: false)
         guard !ftsQuery.isEmpty else { return [] }
-        return runFTSQuery(ftsQuery, limit: limit)
+        return await runFTSQuery(ftsQuery, limit: limit)
     }
 
     /// In-memory fallback search (security mode or CJK without trigram support)
@@ -2107,7 +2148,7 @@ extension DeckSQLManager {
                 .order(Col.ts.desc)
                 .limit(batchSize, offset: offset)
 
-            guard let rows = withDB({ Array(try db.prepare(query)) }) else { break }
+            guard let rows = await withDBAsync({ Array(try db.prepare(query)) }) else { break }
 
             // 没有更多数据
             if rows.isEmpty { break }
@@ -2192,7 +2233,7 @@ extension DeckSQLManager {
 
         query = query.limit(matchingIds.count)
 
-        let rows = withDB { Array(try db.prepare(query)) } ?? []
+        let rows = await withDBAsync { Array(try db.prepare(query)) } ?? []
         guard rows.count > 1 else { return rows }
 
         var rowsById: [Int64: Row] = [:]
@@ -2213,6 +2254,15 @@ extension DeckSQLManager {
         return ordered
     }
     
+    func fetchAll(limit: Int = 10000, offset: Int = 0, loadFullData: Bool = false) async -> [ClipboardItem] {
+        guard let db = db, let table = table else { return [] }
+
+        let query = table.order(Col.ts.desc).limit(limit, offset: offset)
+
+        let rows = await withDBAsync { Array(try db.prepare(query)) } ?? []
+        return rows.compactMap { rowToClipboardItem($0, loadFullData: loadFullData) }
+    }
+
     func fetchAll(limit: Int = 10000, offset: Int = 0, loadFullData: Bool = false) -> [ClipboardItem] {
         guard let db = db, let table = table else { return [] }
         
@@ -2227,7 +2277,7 @@ extension DeckSQLManager {
 
         let query = table.filter(Col.id == id)
 
-        return withDB { try db.pluck(query) } ?? nil
+        return await withDBAsync { try db.pluck(query) } ?? nil
     }
 
     /// Fetch raw data payload for a single item (used for lazy loading).
@@ -2251,7 +2301,7 @@ extension DeckSQLManager {
         // 使用 WHERE id IN (...) 查询
         let query = table.filter(ids.contains(Col.id))
 
-        return withDB { Array(try db.prepare(query)) } ?? []
+        return await withDBAsync { Array(try db.prepare(query)) } ?? []
     }
 
     func count(typeFilter: [String]? = nil) async -> Int {
@@ -2267,7 +2317,7 @@ extension DeckSQLManager {
             query = query.filter(typeCondition)
         }
         
-        return withDB { try db.scalar(query.count) } ?? 0
+        return await withDBAsync { try db.scalar(query.count) } ?? 0
     }
     
     func rowToClipboardItem(_ row: Row, isEncrypted: Bool? = nil, loadFullData: Bool = true) -> ClipboardItem? {
@@ -2356,7 +2406,7 @@ extension DeckSQLManager {
 
         while !hasError {
             // 分批查询，只获取 id 和需要迁移的字段
-            let batchResult: (rows: [Row], count: Int)? = withDB {
+            let batchResult: (rows: [Row], count: Int)? = await withDBAsync {
                 let query = table
                     .select(Col.id, Col.data, Col.previewData, Col.searchText)
                     .order(Col.id.asc)
@@ -2376,7 +2426,7 @@ extension DeckSQLManager {
             }
 
             // 处理当前批次
-            let batchSuccess = withDB {
+            let batchSuccess = await withDBAsync {
                 for row in batch.rows {
                     let id = try row.get(Col.id)
                     let rawData = try row.get(Col.data)
@@ -2463,7 +2513,7 @@ extension DeckSQLManager {
         let query = table.select(Col.id, Col.blobPath)
             .filter(Col.blobPath != nil)
 
-        guard let rows = withDB({ Array(try db.prepare(query)) }) else { return }
+            guard let rows = await withDBAsync({ Array(try db.prepare(query)) }) else { return }
 
         for row in rows {
             do {
@@ -2481,7 +2531,7 @@ extension DeckSQLManager {
 
                 if newPath != oldPath {
                     let updateQuery = table.filter(Col.id == id)
-                    withDB {
+                    _ = await withDBAsync {
                         try db.run(updateQuery.update(Col.blobPath <- newPath))
                     }
                 }
@@ -2501,7 +2551,7 @@ extension DeckSQLManager {
         while true {
             guard !Task.isCancelled else { break }
 
-            let rows: [Row] = withDB {
+            let rows: [Row] = await withDBAsync {
                 let query = tab.select(EmbeddingCol.id, EmbeddingCol.embedding)
                     .order(EmbeddingCol.id.asc)
                     .limit(batchSize, offset: offset)
@@ -2523,7 +2573,7 @@ extension DeckSQLManager {
                     }
 
                     let updateQuery = tab.filter(EmbeddingCol.id == id)
-                    withDB {
+                    _ = await withDBAsync {
                         try db.run(updateQuery.update(EmbeddingCol.embedding <- newEmbedding))
                     }
                 } catch {
