@@ -15,6 +15,7 @@ struct DeckTag: Identifiable, Equatable, Codable {
     
     static let colorPalette: [Color] = [
         .gray.opacity(0.8),
+        // Row 1
         .blue,
         .green,
         .purple,
@@ -22,9 +23,16 @@ struct DeckTag: Identifiable, Equatable, Codable {
         .orange,
         .yellow,
         .pink,
+        Color(red: 0.95, green: 0.3, blue: 0.3),  // 亮红
+        // Row 2
         .cyan,
         .brown,
-        .indigo
+        .indigo,
+        .mint,
+        .teal,
+        Color(red: 0.6, green: 0.4, blue: 0.8),   // 淡紫色
+        Color(red: 0.95, green: 0.6, blue: 0.7),  // 珊瑚粉
+        Color(red: 0.4, green: 0.7, blue: 0.4)    // 草绿
     ]
     
     var color: Color {
