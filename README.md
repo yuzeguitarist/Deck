@@ -139,7 +139,7 @@ FAQ (unsigned builds):
   <img src="photos/DeckView.png" alt="Deck main view" width="720">
 </p>
 <p align="center">
-  <img src="photos/DeckSettings.png" alt="Deck settings" width="720">
+  <img src="photos/DeckSettings.jpg" alt="Deck settings" width="720">
 </p>
 
 ## Tech Highlights
@@ -308,7 +308,7 @@ brew install --cask deck
   <img src="photos/DeckView.png" alt="Deck 主界面" width="720">
 </p>
 <p align="center">
-  <img src="photos/DeckSettings.png" alt="Deck 设置" width="720">
+  <img src="photos/DeckSettings.jpg" alt="Deck 设置" width="720">
 </p>
 
 ## 技术亮点
