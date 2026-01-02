@@ -77,23 +77,65 @@ enum Const {
         }
     })
 
-    /// 卡片头部背景色 - 浅色模式使用更深的灰色
+    /// 卡片头部背景色 - 使用更高对比度的颜色
     static let cardHeaderBackground: Color = Color(nsColor: NSColor(name: nil) { appearance in
         if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
-            return NSColor.gray.withAlphaComponent(0.3)
+            // 深色模式：较亮的深灰色背景（避免太黑）
+            return NSColor(red: 0.22, green: 0.22, blue: 0.24, alpha: 0.95)
         } else {
-            return NSColor.gray.withAlphaComponent(0.15)
+            // 浅色模式：淡灰色背景
+            return NSColor(red: 0.92, green: 0.92, blue: 0.94, alpha: 0.98)
         }
     })
 
-    /// 按钮/元素背景色 - 浅色模式使用更明显的背景
-    static let elementBackground: Color = Color(nsColor: NSColor(name: nil) { appearance in
+    /// 卡片内容背景色 - Material Design 风格的 surface 颜色
+    static let cardContentBackground: Color = Color(nsColor: NSColor(name: nil) { appearance in
         if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
-            return NSColor.white.withAlphaComponent(0.1)
+            // 深色模式：#2C2C2E 较亮的深灰（类似系统控件背景）
+            return NSColor(red: 0.17, green: 0.17, blue: 0.18, alpha: 0.98)
         } else {
-            return NSColor.black.withAlphaComponent(0.08)
+            // 浅色模式：纯白色
+            return NSColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 0.98)
         }
     })
+
+    /// 按钮/元素背景色 - 更高对比度
+    static let elementBackground: Color = Color(nsColor: NSColor(name: nil) { appearance in
+        if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+            return NSColor(red: 0.28, green: 0.28, blue: 0.30, alpha: 0.9)
+        } else {
+            return NSColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 0.06)
+        }
+    })
+
+    /// 弹出窗口毛玻璃叠加层 - 增加背景不透明度
+    static let panelOverlay: Color = Color(nsColor: NSColor(name: nil) { appearance in
+        if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+            // 深色模式：较浅的叠加层（避免太黑）
+            return NSColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 0.55)
+        } else {
+            // 浅色模式：淡色半透明叠加
+            return NSColor(red: 0.96, green: 0.96, blue: 0.97, alpha: 0.5)
+        }
+    })
+
+    /// 卡片阴影 - 浅色模式更明显的阴影
+    static let cardShadowColor: Color = Color(nsColor: NSColor(name: nil) { appearance in
+        if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+            return NSColor.black.withAlphaComponent(0.3)
+        } else {
+            // 浅色模式需要更明显的阴影
+            return NSColor.black.withAlphaComponent(0.15)
+        }
+    })
+
+    static let cardShadowRadius: CGFloat = {
+        if NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+            return 6.0
+        } else {
+            return 10.0
+        }
+    }()
     
     // Content limits
     static let maxPreviewTextLength: Int = 500

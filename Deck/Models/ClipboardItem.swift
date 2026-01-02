@@ -16,14 +16,25 @@ typealias PasteboardType = NSPasteboard.PasteboardType
 extension PasteboardType {
     // Image types first to prioritize image detection over fileURL
     static var supportedTypes: [PasteboardType] = [
-        .png, .tiff, .rtf, .rtfd, .fileURL, .string
+        .png, .tiff, .jpeg, .heic, .heif, .gif, .webp, .bmp, .rtfd, .flatRTFD, .rtf, .fileURL, .string
     ]
 
+    static let jpeg = NSPasteboard.PasteboardType("public.jpeg")
+    static let heic = NSPasteboard.PasteboardType("public.heic")
+    static let heif = NSPasteboard.PasteboardType("public.heif")
+    static let gif = NSPasteboard.PasteboardType("com.compuserve.gif")
+    static let webp = NSPasteboard.PasteboardType("org.webmproject.webp")
+    static let bmp = NSPasteboard.PasteboardType("com.microsoft.bmp")
+    static let flatRTFD = NSPasteboard.PasteboardType("com.apple.flat-rtfd")
     static let microsoftObjectLink = NSPasteboard.PasteboardType(rawValue: "com.microsoft.ObjectLink")
     static let microsoftLinkSource = NSPasteboard.PasteboardType(rawValue: "com.microsoft.Link-Source")
     
     func isImage() -> Bool {
-        self == .png || self == .tiff
+        if [.png, .tiff, .jpeg, .heic, .heif, .gif, .webp, .bmp].contains(self) { return true }
+        if let utType = UTType(self.rawValue) {
+            return utType.conforms(to: .image)
+        }
+        return false
     }
     
     func isText() -> Bool {
@@ -246,15 +257,32 @@ final class ClipboardItem: Identifiable, Equatable {
         
         let app = NSWorkspace.shared.frontmostApplication
         let filteredTypes = Self.filteredPasteboardTypes(from: item.types)
-        guard let type = PasteboardType.supportedTypes.first(where: { filteredTypes.contains($0) }) else { return nil }
+        guard let type = PasteboardType.supportedTypes.first(where: { filteredTypes.contains($0) }) else {
+            if let imageData = Self.imageDataFromPasteboard(pasteboard) {
+                let previewData = Self.generatePreviewThumbnailData(from: imageData)
+                self.init(
+                    pasteboardType: .png,
+                    data: imageData,
+                    previewData: previewData,
+                    timestamp: Int64(Date().timeIntervalSince1970),
+                    appPath: app?.bundleURL?.path ?? "",
+                    appName: app?.localizedName ?? "",
+                    searchText: "",
+                    contentLength: imageData.count,
+                    tagId: -1
+                )
+                return
+            }
+            return nil
+        }
 
         var resolvedType = type
         log.debug("Creating item with type: \(type.rawValue)")
 
         var content: Data?
-        if type == .rtfd,
+        if (type == .rtfd || type == .flatRTFD),
            let plain = item.string(forType: .string),
-           !plain.isEmpty,
+           !Self.normalizedPlainText(plain).isEmpty,
            let plainData = plain.data(using: .utf8) {
             // Prefer plain text for RTFD to avoid heavy decoding and NSSecureCoding warnings.
             resolvedType = .string
@@ -286,6 +314,10 @@ final class ClipboardItem: Identifiable, Equatable {
             content = filePathsString.data(using: .utf8) ?? Data()
         } else {
             content = item.data(forType: type)
+            if content == nil, type.isImage(), let imageData = Self.imageDataFromPasteboard(pasteboard) {
+                resolvedType = .png
+                content = imageData
+            }
         }
         
         guard let content = content else { return nil }
@@ -295,16 +327,36 @@ final class ClipboardItem: Identifiable, Equatable {
         
         if resolvedType.isText() {
             attributedString = NSAttributedString(with: content, type: resolvedType) ?? NSAttributedString()
-            guard !attributedString.string.allSatisfy(\.isWhitespace) else { return nil }
+            let trimmedText = Self.normalizedPlainText(attributedString.string)
+
+            if trimmedText.isEmpty,
+               (resolvedType == .rtf || resolvedType == .rtfd),
+               let imageData = Self.imageDataFromAttributedString(attributedString) {
+                let previewData = Self.generatePreviewThumbnailData(from: imageData)
+                self.init(
+                    pasteboardType: .png,
+                    data: imageData,
+                    previewData: previewData,
+                    timestamp: Int64(Date().timeIntervalSince1970),
+                    appPath: app?.bundleURL?.path ?? "",
+                    appName: app?.localizedName ?? "",
+                    searchText: "",
+                    contentLength: imageData.count,
+                    tagId: -1
+                )
+                return
+            }
+
+            guard !trimmedText.isEmpty else { return nil }
             
             let previewAttr = attributedString.length > 250
                 ? attributedString.attributedSubstring(from: NSMakeRange(0, 250))
                 : attributedString
-            previewData = previewAttr.toData(with: type)
+            previewData = previewAttr.toData(with: resolvedType)
         }
         
         // 对于文本类型，使用字符长度；对于图片/文件，使用数据字节大小
-        let length = type.isText() ? attributedString.length : content.count
+        let length = resolvedType.isText() ? attributedString.length : content.count
 
         self.init(
             pasteboardType: resolvedType,
@@ -330,6 +382,62 @@ final class ClipboardItem: Identifiable, Equatable {
         }
 
         return filtered
+    }
+
+    private static func normalizedPlainText(_ text: String) -> String {
+        let stripped = text
+            .replacingOccurrences(of: "\u{FFFC}", with: "")
+            .replacingOccurrences(of: "\u{200B}", with: "")
+            .replacingOccurrences(of: "\u{FEFF}", with: "")
+        return stripped.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func imageDataFromPasteboard(_ pasteboard: NSPasteboard) -> Data? {
+        guard let image = NSImage(pasteboard: pasteboard) else { return nil }
+        return pngData(from: image)
+    }
+
+    private static func imageDataFromAttributedString(_ attributedString: NSAttributedString) -> Data? {
+        var foundImage: NSImage?
+
+        attributedString.enumerateAttribute(.attachment, in: NSRange(location: 0, length: attributedString.length), options: []) { value, _, stop in
+            guard let attachment = value as? NSTextAttachment else { return }
+
+            if let image = attachment.image {
+                foundImage = image
+                stop.pointee = true
+                return
+            }
+
+            if let fileWrapper = attachment.fileWrapper {
+                if let data = fileWrapper.regularFileContents,
+                   let image = NSImage(data: data) {
+                    foundImage = image
+                    stop.pointee = true
+                    return
+                }
+
+                if let wrappers = fileWrapper.fileWrappers {
+                    for wrapper in wrappers.values {
+                        if let data = wrapper.regularFileContents,
+                           let image = NSImage(data: data) {
+                            foundImage = image
+                            stop.pointee = true
+                            return
+                        }
+                    }
+                }
+            }
+        }
+
+        guard let image = foundImage else { return nil }
+        return pngData(from: image)
+    }
+
+    private static func pngData(from image: NSImage) -> Data? {
+        guard let tiff = image.tiffRepresentation,
+              let bitmap = NSBitmapImageRep(data: tiff) else { return nil }
+        return bitmap.representation(using: .png, properties: [:])
     }
     
     private static let imageExtensions: Set<String> = [
@@ -368,10 +476,12 @@ final class ClipboardItem: Identifiable, Equatable {
     private func detectItemType() -> ClipItemType {
         log.debug("detectItemType for pasteboardType: \(pasteboardType.rawValue)")
         
-        switch pasteboardType {
-        case .png, .tiff:
-            log.debug("Detected as image (png/tiff)")
+        if pasteboardType.isImage() {
+            log.debug("Detected as image (\(pasteboardType.rawValue))")
             return .image
+        }
+
+        switch pasteboardType {
         case .fileURL:
             // Ensure cachedFilePaths is initialized
             if cachedFilePaths == nil {
@@ -394,7 +504,7 @@ final class ClipboardItem: Identifiable, Equatable {
             }
             log.debug("Returning .file")
             return .file
-        case .rtf, .rtfd:
+        case .rtf, .rtfd, .flatRTFD:
             return .richText
         case .string:
             let text = String(data: data, encoding: .utf8) ?? ""

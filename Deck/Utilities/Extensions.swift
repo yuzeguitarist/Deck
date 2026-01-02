@@ -270,7 +270,7 @@ extension NSAttributedString {
         switch type {
         case .rtf:
             try? self.init(data: data, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil)
-        case .rtfd:
+        case .rtfd, .flatRTFD:
             try? self.init(data: data, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil)
         case .string:
             if let str = String(data: data, encoding: .utf8) {
@@ -288,7 +288,7 @@ extension NSAttributedString {
         case .rtf:
             return try? data(from: NSRange(location: 0, length: length),
                             documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
-        case .rtfd:
+        case .rtfd, .flatRTFD:
             return try? data(from: NSRange(location: 0, length: length),
                             documentAttributes: [.documentType: NSAttributedString.DocumentType.rtfd])
         default:
