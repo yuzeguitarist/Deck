@@ -896,16 +896,17 @@ final class DeckSQLManager: NSObject {
             guard args.count == 2,
                   let pattern = args[0] as? String,
                   let text = args[1] as? String else {
-                return false
+                return Int64(0)
             }
 
             // 使用缓存的正则表达式
             guard let regex = RegexCache.shared.regex(for: pattern) else {
-                return false
+                return Int64(0)
             }
 
             let range = NSRange(text.startIndex..., in: text)
-            return regex.firstMatch(in: text, range: range) != nil
+            let isMatch = regex.firstMatch(in: text, range: range) != nil
+            return isMatch ? Int64(1) : Int64(0)
         }
         log.debug("Registered custom REGEXP function for SQLite")
     }
