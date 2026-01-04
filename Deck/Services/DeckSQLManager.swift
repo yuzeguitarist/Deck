@@ -4,6 +4,204 @@
 //
 //  Deck Clipboard Manager - SQLite Database Management
 //
+//  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  职责边界 (Responsibility Boundaries)
+//  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+//  DeckSQLManager 是 Deck 应用的核心数据持久化层，负责：
+//
+//  1. **数据库生命周期管理**
+//     - 数据库初始化、连接管理、完整性检查
+//     - 自动备份/恢复机制（24小时周期）
+//     - Schema 迁移和版本控制
+//     - 数据库文件损坏时的自动恢复
+//
+//  2. **剪贴板数据 CRUD**
+//     - 插入、查询、更新、删除剪贴板历史记录
+//     - 支持文本、图片、文件、URL、颜色等多种类型
+//     - 大数据（>512KB）自动分离存储到 BlobStorage
+//
+//  3. **多维度搜索引擎**
+//     - FTS5 全文搜索（支持 trigram 分词）
+//     - 正则表达式搜索（安全模式下内存解密后匹配）
+//     - 语义向量搜索（基于 sqlite-vec 扩展）
+//     - 应用名、标签、类型等结构化过滤
+//
+//  4. **安全模式集成**
+//     - 敏感数据加密存储（data、search_text、app_name、embedding）
+//     - 安全模式下禁用向量索引（防止明文泄露）
+//     - 搜索时自动解密并缓存（NSCache 限制 300 条）
+//
+//  5. **性能优化**
+//     - 搜索缓存（避免重复解密）
+//     - 正则表达式缓存（RegexCache）
+//     - 分批流式处理（backfill、迁移）
+//     - mmap 优化（128MB）
+//
+//  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  线程模型 (Threading Model)
+//  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+//  **核心原则：SQLite 连接非线程安全，所有数据库操作必须在 dbQueue 上串行执行**
+//
+//  1. **dbQueue (DispatchQueue)**
+//     - Label: "com.deck.sqlite.queue"
+//     - QoS: .userInitiated
+//     - 所有读写操作必须通过 `withDB` / `withDBAsync` / `syncOnDBQueue` / `asyncOnDBQueue`
+//
+//  2. **函数线程约束**
+//
+//     **必须在 dbQueue 上调用（内部不切队列）：**
+//     - `createTable()`, `createFTS5Table()`, `createEmbeddingTable()`
+//     - `registerCustomFunctions()` - 注册 REGEXP 函数
+//     - `performIntegrityCheck()` - 完整性检查
+//     - `ensureVecTable(dimension:)` - 创建向量表
+//     - `cleanupLegacyVecTableIfNeeded()` - 清理旧表
+//
+//     **内部自动切到 dbQueue（可从任意线程调用）：**
+//     - `insert(_:)`, `update(_:)`, `delete(_:)` - CRUD 操作
+//     - `search(...)`, `searchWithRegex(...)` - 搜索接口
+//     - `getRecentItems(...)`, `getItemById(...)` - 查询接口
+//     - `storeSemanticEmbedding(...)`, `updateVecIndex(...)` - 向量索引
+//     - `backupDatabaseIfNeeded(...)` - 备份操作
+//
+//     **异步后台任务（Task.priority: .background）：**
+//     - `backfillVecIndexIfNeeded()` - 向量索引回填
+//     - `performSemanticEmbeddingBackfill()` - 语义嵌入回填
+//     - `performLargeImageMigration()` - 大图迁移
+//     - `backfillFileSearchTextIfNeeded()` - 文件搜索文本回填
+//
+//  3. **队列检测机制**
+//     - `dbQueueKey: DispatchSpecificKey<Void>` - 检测当前是否在 dbQueue
+//     - `syncOnDBQueue` / `asyncOnDBQueue` - 避免重复 dispatch 导致死锁
+//
+//  4. **embeddingQueue (DispatchQueue)**
+//     - Label: "com.deck.semantic.embedding"
+//     - QoS: .utility
+//     - 用于语义向量计算（与 dbQueue 解耦，避免阻塞数据库操作）
+//
+//  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  安全模式语义 (Security Mode Semantics)
+//  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+//  **触发条件：** `DeckUserDefaults.securityModeEnabled == true`
+//
+//  1. **加密列（存储时加密，读取时解密）**
+//     - `data` (Col.data) - 剪贴板内容主体
+//     - `search_text` (Col.searchText) - 用于全文搜索的文本
+//     - `app_name` (Col.appName) - 来源应用名称
+//     - `embedding` (ClipboardHistory_embedding.embedding) - 语义向量
+//
+//  2. **不可检索列（FTS5 / 向量索引失效）**
+//     - **FTS5 全文搜索：** 加密后的 search_text 无法被 FTS5 索引
+//       - Fallback: `searchWithRegexInMemory()` - 分批解密后内存匹配
+//       - 限制：最多扫描 5000 条，返回前 N 条匹配
+//
+//     - **向量索引：** 完全禁用（`vecIndexEnabled = false`）
+//       - 原因：加密后的向量无法进行相似度计算
+//       - Fallback: 语义搜索降级为普通文本搜索
+//
+//  3. **搜索缓存策略**
+//     - `searchTextCache: NSCache<NSNumber, SearchCacheEntry>`
+//       - Key: row.id
+//       - Value: 解密后的 searchText + appName（已 lowercased）
+//       - Limit: 300 条（降低常驻内存）
+//     - 缓存失效：`reinitialize()` / `invalidateSearchCache()`
+//
+//  4. **性能权衡**
+//     - 安全模式下搜索性能显著下降（需解密）
+//     - 向量索引回填限制：300 条（非安全模式 1000 条）
+//     - 正则搜索扫描限制：5000 条（分批 500 条）
+//
+//  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//  存储策略 (Storage Strategy)
+//  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+//  1. **存储路径**
+//     - 默认路径：`~/Library/Application Support/Deck/Deck.sqlite3`
+//     - 自定义路径：支持用户选择（需 security-scoped bookmark）
+//     - 备份路径：`Deck.sqlite3.bak`（同目录）
+//
+//  2. **大数据分离存储（blobPath 机制）**
+//     - **触发条件：** `data.count > Const.largeBlobThreshold` (512KB)
+//     - **存储流程：**
+//       1. 调用 `BlobStorage.shared.storeAsync(data, uniqueId)` 存储到文件系统
+//       2. 数据库 `data` 列存储 `previewData`（缩略图/前 N 字节）
+//       3. `blob_path` 列存储文件路径（相对路径）
+//     - **读取流程：**
+//       1. 检查 `blob_path` 是否为 nil
+//       2. 若非 nil，调用 `BlobStorage.shared.loadAsync(path)` 加载完整数据
+//       3. 若 nil，直接使用 `data` 列
+//     - **迁移：** `performLargeImageMigration()` - 分批迁移历史大图
+//
+//  3. **备份与恢复**
+//     - **自动备份：**
+//       - 触发：`backupDatabaseIfNeeded()` - 启动时 + 24 小时周期
+//       - 方法：`FileManager.copyItem()` - 文件级拷贝
+//       - 条件：距上次备份超过 `backupInterval` (24h)
+//
+//     - **自动恢复：**
+//       - 触发时机：
+//         1. 启动时主数据库不存在但备份存在
+//         2. 完整性检查失败（`performIntegrityCheck()` 返回 false）
+//       - 方法：`restoreDatabaseFromBackup()` - 删除损坏文件，拷贝备份
+//
+//  4. **迁移顺序约束（Schema Migration）**
+//     - **版本控制：** `getSchemaVersion()` / `setSchemaVersion()`
+//     - **迁移顺序（必须严格按序执行）：**
+//
+//       ```
+//       Version 1 → 2: 添加 tagId 列
+//       Version 2 → 3: 添加 blobPath 列
+//       Version 3 → 4: 创建 FTS5 表
+//       Version 4 → 5: 创建 Embedding 表
+//       Version 5 → 6: 大图迁移（异步后台）
+//       Version 6 → 7: 语义嵌入回填（异步后台）
+//       ```
+//
+//     - **异步迁移处理：**
+//       - Version 5 → 6: `migrateLargeImagesIfNeeded()` - 后台任务
+//       - Version 6 → 7: `backfillSemanticEmbeddingsIfNeeded()` - 后台任务
+//       - 迁移完成后才更新 schema_version（防止中断导致重复迁移）
+//
+//     - **迁移失败处理：**
+//       - 完整性检查失败 → 尝试从备份恢复
+//       - 备份恢复失败 → 发送 `.databaseError` 通知
+//       - 连续 3 次错误 → 触发 `attemptDBRecovery()`
+//
+//  5. **向量索引表（sqlite-vec）**
+//     - **表命名规则：** `ClipboardHistory_embedding_vec_{dimension}`
+//       - 示例：`ClipboardHistory_embedding_vec_384`（MiniLM）
+//       - 示例：`ClipboardHistory_embedding_vec_1024`（Nomic Embed）
+//
+//     - **动态创建：** `ensureVecTable(dimension:)` - 按需创建
+//     - **触发器：** `ClipboardHistory_embedding_vec_ad_{dimension}` - 级联删除
+//     - **回填：** `backfillVecIndexIfNeeded()` - 启动时后台回填
+//     - **清理：** `cleanupLegacyVecTableIfNeeded()` - 删除旧版无维度后缀的表
+//
+//  6. **错误恢复机制**
+//     - **错误追踪：**
+//       - `consecutiveErrorCount` - 连续错误计数
+//       - `errorThreshold = 3` - 触发通知阈值
+//       - `hasNotifiedUser` - 防止重复通知
+//
+//     - **关键错误码（触发自动恢复）：**
+//       - `SQLITE_IOERR` - 磁盘 I/O 错误
+//       - `SQLITE_CORRUPT` - 数据库损坏
+//       - `SQLITE_NOTADB` - 文件不是数据库
+//       - `SQLITE_READONLY` - 只读错误
+//       - `SQLITE_CANTOPEN` - 无法打开
+//       - `SQLITE_FULL` - 磁盘已满
+//
+//     - **恢复流程：**
+//       1. `handleDBError()` - 检测错误类型
+//       2. `attemptDBRecovery()` - 触发恢复
+//       3. `reinitialize()` - 重新初始化数据库
+//       4. 从备份恢复（如果可用）
+//       5. 发送 `.databaseError` 通知给 UI
+//
+//  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
 
 import AppKit
 import Foundation
@@ -51,19 +249,59 @@ final class DeckSQLManager: NSObject {
     private static var isInitialized = false
     private nonisolated static let initLock = NSLock()
 
-    // SQLite Connection is not thread-safe. Guard all DB access with a serial queue.
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Thread Safety (线程安全)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    /// 数据库操作队列：SQLite 连接非线程安全，所有 DB 操作必须在此队列上串行执行
+    /// - Label: "com.deck.sqlite.queue"
+    /// - QoS: .userInitiated - 用户发起的操作，需要快速响应
+    /// - 使用方式：通过 `withDB` / `withDBAsync` / `syncOnDBQueue` / `asyncOnDBQueue` 包装
     private let dbQueue = DispatchQueue(label: "com.deck.sqlite.queue", qos: .userInitiated)
+    
+    /// 队列检测 Key：用于判断当前代码是否已在 dbQueue 上执行
+    /// - 作用：防止重复 dispatch 导致死锁（如在 dbQueue 上再次 sync 到 dbQueue）
+    /// - 使用：`DispatchQueue.getSpecific(key: dbQueueKey)` 检测
     private let dbQueueKey = DispatchSpecificKey<Void>()
+    
+    /// 语义向量计算队列：与 dbQueue 解耦，避免阻塞数据库操作
+    /// - Label: "com.deck.semantic.embedding"
+    /// - QoS: .utility - 后台任务，不影响用户交互
+    /// - 用途：向量编码、相似度计算等 CPU 密集型任务
     private let embeddingQueue = DispatchQueue(label: "com.deck.semantic.embedding", qos: .utility)
 
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Database Core (数据库核心)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    /// SQLite 数据库连接（非线程安全，必须在 dbQueue 上访问）
     private var db: Connection?
+    
+    /// ClipboardHistory 主表引用
     private var table: Table?
+    
+    /// 自定义存储路径的 security-scoped URL（需要在 deinit 时释放）
     private var securityScopedURL: URL?
+    
+    /// FTS5 是否使用 trigram 分词（支持中文等 CJK 语言）
     private var ftsUsesTrigram = false
+    
+    /// trigram 分词最小查询长度（少于此长度不触发 FTS5 搜索）
     private let ftsTrigramMinQueryLength = 3
+    
+    /// 备份文件名
     private let backupFileName = "Deck.sqlite3.bak"
+    
+    /// 自动备份间隔（24 小时）
     private let backupInterval: TimeInterval = 24 * 60 * 60
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Vector Index (向量索引 - sqlite-vec)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    /// 向量表基础名称（实际表名会加上维度后缀，如 _384, _1024）
     private let vecTableBaseName = "ClipboardHistory_embedding_vec"
+    
+    /// sqlite-vec 扩展文件候选名称（按优先级搜索）
     private let vecExtensionFileNames = [
         "vec0",
         "vec0.dylib",
@@ -71,34 +309,78 @@ final class DeckSQLManager: NSObject {
         "sqlite-vec.dylib",
         "libsqlite_vec.dylib"
     ]
+    
+    /// 向量数值解析使用的 Locale（确保小数点格式一致）
     private let vecNumberLocale = Locale(identifier: "en_US_POSIX")
+    
+    /// 向量索引是否启用（安全模式下强制禁用）
     private var vecIndexEnabled = false
+    
+    /// 已创建的向量表维度集合（如 [384, 1024]）
     private var vecReadyDimensions: Set<Int> = []
+    
+    /// 是否已清理旧版向量表（无维度后缀的表）
     private var vecLegacyTableCleaned = false
+    
+    /// 向量索引回填是否正在进行（防止重复启动）
     private var vecBackfillInProgress = false
+    
+    /// 向量回填状态队列（保护 vecBackfillInProgress 的并发访问）
     private let vecBackfillStateQueue = DispatchQueue(label: "com.deck.vec.backfill.state")
+    
+    /// 已记录缺失维度警告的集合（避免重复日志）
     private var vecMissingDimensionLogged: Set<Int> = []
 
-    // Error tracking - 错误追踪
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Error Tracking (错误追踪与恢复)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    /// 连续错误计数（成功操作后重置为 0）
     private var consecutiveErrorCount = 0
+    
+    /// 最后一次错误发生时间
     private var lastErrorTime: Date?
-    private let errorThreshold = 3  // 连续 3 次错误后通知用户
+    
+    /// 错误阈值：连续错误达到此值时通知用户
+    private let errorThreshold = 3
+    
+    /// 是否已通知用户（防止重复弹窗）
     private var hasNotifiedUser = false
+    
+    /// 数据库恢复是否正在进行（防止并发恢复）
     private var recoveryInProgress = false
 
-    // 搜索缓存：避免重复解密和 lowercased 转换
-    // Key: row id, Value: 解密且小写化后的搜索文本
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Search Cache (搜索缓存 - 安全模式优化)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    /// 搜索缓存：避免重复解密和 lowercased 转换（仅安全模式下有效）
+    /// - Key: row.id (NSNumber)
+    /// - Value: SearchCacheEntry (解密且小写化后的 searchText + appName)
+    /// - Limit: 300 条（平衡性能与内存占用）
+    /// - 失效时机：`reinitialize()` / `invalidateSearchCache()`
     private let searchTextCache: NSCache<NSNumber, SearchCacheEntry> = {
         let cache = NSCache<NSNumber, SearchCacheEntry>()
         cache.countLimit = 300  // 限制缓存条目，降低常驻内存
         return cache
     }()
 
+    /// 单例初始化（设置队列检测机制）
+    /// - Note: 设置 `dbQueueKey` 用于检测当前是否在 dbQueue 上执行
     override private init() {
         super.init()
         dbQueue.setSpecific(key: dbQueueKey, value: ())
     }
+
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Thread Safety Wrappers (线程安全包装)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
+    /// 在 dbQueue 上同步执行代码块（防止死锁）
+    /// - Parameter work: 需要执行的代码块
+    /// - Returns: 代码块的返回值
+    /// - Note: 如果当前已在 dbQueue 上，直接执行；否则 sync 到 dbQueue
+    /// - Warning: 仅用于内部数据库操作，外部调用应使用 `withDB` / `withDBAsync`
     private func syncOnDBQueue<T>(_ work: () throws -> T) rethrows -> T {
         if DispatchQueue.getSpecific(key: dbQueueKey) != nil {
             return try work()
@@ -106,6 +388,11 @@ final class DeckSQLManager: NSObject {
         return try dbQueue.sync(execute: work)
     }
 
+    /// 在 dbQueue 上异步执行代码块（防止死锁）
+    /// - Parameter work: 需要执行的代码块
+    /// - Returns: 代码块的返回值
+    /// - Note: 如果当前已在 dbQueue 上，直接执行；否则异步切换到 dbQueue
+    /// - Warning: 仅用于内部数据库操作，外部调用应使用 `withDB` / `withDBAsync`
     private func asyncOnDBQueue<T>(_ work: @escaping () throws -> T) async throws -> T {
         if DispatchQueue.getSpecific(key: dbQueueKey) != nil {
             return try work()
@@ -121,6 +408,11 @@ final class DeckSQLManager: NSObject {
         }
     }
 
+    /// 在 dbQueue 上执行数据库操作（带错误处理和文件有效性检查）
+    /// - Parameter work: 数据库操作代码块
+    /// - Returns: 操作结果，失败时返回 nil
+    /// - Note: 自动处理错误、重置错误计数、触发恢复机制
+    /// - Warning: 操作失败时会调用 `handleDBError()`，可能触发数据库恢复
     @discardableResult
     private func withDB<T>(_ work: () throws -> T) -> T? {
         // 在执行数据库操作前检查文件有效性，防止 try! 崩溃
@@ -147,6 +439,11 @@ final class DeckSQLManager: NSObject {
         }
     }
 
+    /// 在 dbQueue 上异步执行数据库操作（带错误处理和文件有效性检查）
+    /// - Parameter work: 数据库操作代码块
+    /// - Returns: 操作结果，失败时返回 nil
+    /// - Note: 自动处理错误、重置错误计数、触发恢复机制
+    /// - Warning: 操作失败时会调用 `handleDBError()`，可能触发数据库恢复
     @discardableResult
     private func withDBAsync<T>(_ work: @escaping () throws -> T) async -> T? {
         // 在执行数据库操作前检查文件有效性，防止 try! 崩溃
@@ -328,6 +625,23 @@ final class DeckSQLManager: NSObject {
         initializeDatabase()
     }
     
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Database Initialization (数据库初始化)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    /// 初始化数据库（线程安全，支持重复调用）
+    /// - Note: 使用 `initLock` 确保只初始化一次
+    /// - 执行流程：
+    ///   1. 检查 `isInitialized` 标志，避免重复初始化
+    ///   2. 获取存储路径（默认或自定义）
+    ///   3. 创建数据库目录（如果不存在）
+    ///   4. 检查是否需要从备份恢复
+    ///   5. 打开数据库连接
+    ///   6. 执行完整性检查，失败时尝试从备份恢复
+    ///   7. 注册自定义函数（REGEXP）
+    ///   8. 创建表结构
+    ///   9. 应用 Schema 迁移
+    ///   10. 启动后台任务（FTS trigram、备份、回填）
     private func initializeDatabase() {
         Self.initLock.lock()
         defer { Self.initLock.unlock() }
@@ -788,6 +1102,18 @@ final class DeckSQLManager: NSObject {
         return false
     }
 
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    // MARK: - Backup & Recovery (备份与恢复)
+    // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    /// 自动备份数据库（如果需要）
+    /// - Parameters:
+    ///   - dbPath: 数据库文件路径
+    ///   - backupPath: 备份文件路径
+    ///   - force: 是否强制备份（忽略时间间隔）
+    ///   - synchronous: 是否同步执行（默认异步）
+    /// - Note: 默认 24 小时备份一次，使用文件拷贝方式
+    /// - Warning: 备份失败不会影响数据库正常运行
     private func backupDatabaseIfNeeded(
         dbPath: String,
         backupPath: String,
@@ -1567,19 +1893,37 @@ final class DeckSQLManager: NSObject {
     }
 }
 
-// MARK: - Encryption Helpers
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// MARK: - Encryption Helpers (加密辅助函数)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//
+//  安全模式下的加密/解密逻辑：
+//  - 加密列：data, search_text, app_name, embedding
+//  - 加密算法：由 SecurityService 提供（AES-256-GCM + Keychain 密钥管理）
+//  - Fallback：加密/解密失败时返回原始数据（避免数据丢失）
+//
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 extension DeckSQLManager {
+    /// 加密二进制数据（用于 data、embedding 列）
+    /// - Parameter data: 原始数据
+    /// - Returns: 加密后的数据（安全模式下），或原始数据（非安全模式）
     private func encryptData(_ data: Data) -> Data {
         guard DeckUserDefaults.securityModeEnabled else { return data }
         return SecurityService.shared.encrypt(data) ?? data
     }
     
+    /// 解密二进制数据（用于 data、embedding 列）
+    /// - Parameter data: 加密的数据
+    /// - Returns: 解密后的数据（安全模式下），或原始数据（非安全模式）
     private func decryptData(_ data: Data) -> Data {
         guard DeckUserDefaults.securityModeEnabled else { return data }
         return SecurityService.shared.decrypt(data) ?? data
     }
     
+    /// 加密字符串（用于 search_text、app_name 列）
+    /// - Parameter string: 原始字符串
+    /// - Returns: Base64 编码的加密数据（安全模式下），或原始字符串（非安全模式）
     private func encryptString(_ string: String) -> String {
         guard DeckUserDefaults.securityModeEnabled else { return string }
         guard let data = string.data(using: .utf8),
@@ -1587,6 +1931,9 @@ extension DeckSQLManager {
         return encrypted.base64EncodedString()
     }
     
+    /// 解密字符串（用于 search_text、app_name 列）
+    /// - Parameter string: Base64 编码的加密数据
+    /// - Returns: 解密后的字符串（安全模式下），或原始字符串（非安全模式）
     private func decryptString(_ string: String) -> String {
         guard DeckUserDefaults.securityModeEnabled else { return string }
         guard let data = Data(base64Encoded: string),
