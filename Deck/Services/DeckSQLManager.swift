@@ -350,6 +350,8 @@ final class DeckSQLManager: NSObject {
     
     /// 是否已通知用户（防止重复弹窗）
     private var hasNotifiedUser = false
+    /// 是否已提示过加密失败（避免频繁弹窗）
+    private var hasNotifiedEncryptionFailure = false
     
     /// 数据库恢复是否正在进行（防止并发恢复）
     private var recoveryInProgress = false
@@ -626,19 +628,21 @@ final class DeckSQLManager: NSObject {
         syncOnErrorStateQueue {
             consecutiveErrorCount = 0
             hasNotifiedUser = false
+            hasNotifiedEncryptionFailure = false
             lastErrorTime = nil
         }
     }
 
     /// 检查数据库健康状态
     func checkDatabaseHealth() -> (isHealthy: Bool, message: String) {
-        guard let db = db else {
+        guard syncOnDBQueue({ db != nil }) else {
             return (false, "数据库连接未建立")
         }
 
         // 检查数据库是否可读写
         let canWrite = withDB {
-            try db.scalar("SELECT 1") as? Int64 == 1
+            guard let db = self.db else { return false }
+            return (try db.scalar("SELECT 1") as? Int64) == 1
         } ?? false
 
         if !canWrite {
@@ -665,9 +669,18 @@ final class DeckSQLManager: NSObject {
     
     func reinitialize() {
         stopSecurityScopedAccess()
+        Self.initLock.lock()
         Self.isInitialized = false
-        db = nil
-        table = nil
+        Self.initLock.unlock()
+        syncOnDBQueue {
+            db = nil
+            table = nil
+            vecReadyDimensions.removeAll()
+            vecMissingDimensionLogged.removeAll()
+            vecIndexEnabled = false
+            vecLegacyTableCleaned = false
+            ftsUsesTrigram = false
+        }
         invalidateSearchCache()  // 清空搜索缓存
         initializeDatabase()
     }
@@ -906,35 +919,31 @@ final class DeckSQLManager: NSObject {
     }
 
     private func initializeSQLiteVecOnConnection() {
-        guard let db = db else { return }
-        guard !DeckUserDefaults.securityModeEnabled else { return }
+        syncOnDBQueue {
+            guard let db = db else { return }
+            guard !DeckUserDefaults.securityModeEnabled else { return }
 
-        var error: UnsafeMutablePointer<Int8>?
-        // sqlite-vec is compiled with SQLITE_CORE, so pApi can be nil.
-        let rc = sqlite3_vec_init(db.handle, &error, nil)
-        if rc == SQLITE_OK {
-            vecIndexEnabled = true
-            log.info("sqlite-vec initialized via sqlite3_vec_init (static)")
-            log.debug("sqlite-vec registered on db handle: \(String(describing: db.handle))")
-            cleanupLegacyVecTableIfNeeded()
-            scheduleVecIndexBackfillIfNeeded()
-            return
+            var error: UnsafeMutablePointer<Int8>?
+            // sqlite-vec is compiled with SQLITE_CORE, so pApi can be nil.
+            let rc = sqlite3_vec_init(db.handle, &error, nil)
+            if rc == SQLITE_OK {
+                vecIndexEnabled = true
+                log.info("sqlite-vec initialized via sqlite3_vec_init (static)")
+                log.debug("sqlite-vec registered on db handle: \(String(describing: db.handle))")
+                cleanupLegacyVecTableIfNeeded()
+                scheduleVecIndexBackfillIfNeeded()
+                return
+            }
+
+            let message = error.map { String(cString: $0) } ?? "unknown error"
+            if let error { sqlite3_free(error) }
+            vecIndexEnabled = false
+            log.debug("sqlite-vec init failed (rc=\(rc)): \(message)")
         }
-
-        let message = error.map { String(cString: $0) } ?? "unknown error"
-        if let error { sqlite3_free(error) }
-        vecIndexEnabled = false
-        log.debug("sqlite-vec init failed (rc=\(rc)): \(message)")
     }
 
     private func loadSQLiteVecExtensionIfAvailable() {
-        guard let db = db else { return }
         guard !DeckUserDefaults.securityModeEnabled else { return }
-        if vecIndexEnabled {
-            cleanupLegacyVecTableIfNeeded()
-            scheduleVecIndexBackfillIfNeeded()
-            return
-        }
 
         let candidates = vecExtensionCandidateURLs()
         guard let url = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
@@ -947,7 +956,11 @@ final class DeckSQLManager: NSObject {
             return
         }
 
-        syncOnDBQueue {
+        let didEnable = syncOnDBQueue { () -> Bool in
+            guard let db = db else { return false }
+            if vecIndexEnabled {
+                return true
+            }
             var error: UnsafeMutablePointer<Int8>?
             let rc: Int32 = url.path.withCString { path in
                 _ = api.enable(db.handle, 1)
@@ -963,9 +976,10 @@ final class DeckSQLManager: NSObject {
                 if let error { sqlite3_free(error) }
                 log.debug("Failed to load sqlite-vec extension: \(message)")
             }
+            return vecIndexEnabled
         }
 
-        if vecIndexEnabled {
+        if didEnable {
             cleanupLegacyVecTableIfNeeded()
             scheduleVecIndexBackfillIfNeeded()
         }
@@ -1005,8 +1019,8 @@ final class DeckSQLManager: NSObject {
     }
 
     private func listVecTables() -> [String] {
-        guard let db = db else { return [] }
         return (try? syncOnDBQueue {
+            guard let db = db else { return [] }
             let sql = """
                 SELECT name FROM sqlite_master
                 WHERE type='table' AND name LIKE ?
@@ -1024,10 +1038,10 @@ final class DeckSQLManager: NSObject {
     }
 
     private func cleanupLegacyVecTableIfNeeded() {
-        guard let db = db else { return }
-        guard !vecLegacyTableCleaned else { return }
-        vecLegacyTableCleaned = true
         syncOnDBQueue {
+            guard let db = db else { return }
+            guard !vecLegacyTableCleaned else { return }
+            vecLegacyTableCleaned = true
             do {
                 let legacyName = vecTableBaseName
                 let sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=? LIMIT 1"
@@ -1043,10 +1057,10 @@ final class DeckSQLManager: NSObject {
     }
 
     private func dropVecTables() {
-        guard let db = db else { return }
-        let tables = listVecTables()
-        guard !tables.isEmpty else { return }
         syncOnDBQueue {
+            guard let db = db else { return }
+            let tables = listVecTables()
+            guard !tables.isEmpty else { return }
             for name in tables {
                 do {
                     try db.run("DROP TABLE IF EXISTS \(name)")
@@ -1058,8 +1072,8 @@ final class DeckSQLManager: NSObject {
                     log.debug("Failed to drop vec table \(name): \(error.localizedDescription)")
                 }
             }
+            vecReadyDimensions.removeAll()
         }
-        vecReadyDimensions.removeAll()
     }
 
     private func vecDimension(from tableName: String) -> Int? {
@@ -1069,13 +1083,12 @@ final class DeckSQLManager: NSObject {
     }
 
     private func ensureVecTable(dimension: Int) {
-        guard vecIndexEnabled, dimension > 0 else { return }
-        guard let db = db else { return }
-        if vecReadyDimensions.contains(dimension) { return }
-        let tableName = vecTableName(for: dimension)
-        let triggerName = vecTriggerName(for: dimension)
-
         syncOnDBQueue {
+            guard vecIndexEnabled, dimension > 0 else { return }
+            guard let db = db else { return }
+            if vecReadyDimensions.contains(dimension) { return }
+            let tableName = vecTableName(for: dimension)
+            let triggerName = vecTriggerName(for: dimension)
             do {
                 let sql = """
                     CREATE VIRTUAL TABLE IF NOT EXISTS \(tableName) USING vec0(
@@ -1097,7 +1110,7 @@ final class DeckSQLManager: NSObject {
     }
 
     private func scheduleVecIndexBackfillIfNeeded() {
-        guard vecIndexEnabled else { return }
+        guard syncOnDBQueue({ vecIndexEnabled }) else { return }
         let shouldStart = vecBackfillStateQueue.sync {
             if vecBackfillInProgress {
                 return false
@@ -1121,7 +1134,7 @@ final class DeckSQLManager: NSObject {
     }
 
     private func backfillVecIndexIfNeeded() async {
-        guard let db = db, vecIndexEnabled else { return }
+        guard syncOnDBQueue({ vecIndexEnabled && db != nil }) else { return }
 
         let batchSize = 100
         let maxItems = DeckUserDefaults.securityModeEnabled ? 300 : 1000
@@ -1132,6 +1145,7 @@ final class DeckSQLManager: NSObject {
             guard !Task.isCancelled else { break }
 
             let rows: [(id: Int64, data: Data)] = syncOnDBQueue {
+                guard let db = db else { return [] }
                 do {
                     let sql = """
                         SELECT e.id, e.embedding
@@ -1188,9 +1202,9 @@ final class DeckSQLManager: NSObject {
     }
 
     private func performIntegrityCheck() -> Bool {
-        guard let db = db else { return false }
         let result: String? = syncOnDBQueue {
-            (try? db.scalar("PRAGMA quick_check(1)") as? String) ?? nil
+            guard let db = db else { return nil }
+            return (try? db.scalar("PRAGMA quick_check(1)") as? String) ?? nil
         }
         if result == "ok" {
             return true
@@ -1225,13 +1239,12 @@ final class DeckSQLManager: NSObject {
             return
         }
 
-        if let db = db {
-            syncOnDBQueue {
-                do {
-                    try db.run("PRAGMA wal_checkpoint(TRUNCATE)")
-                } catch {
-                    log.debug("Failed to checkpoint WAL before backup: \(error.localizedDescription)")
-                }
+        syncOnDBQueue {
+            guard let db = db else { return }
+            do {
+                try db.run("PRAGMA wal_checkpoint(TRUNCATE)")
+            } catch {
+                log.debug("Failed to checkpoint WAL before backup: \(error.localizedDescription)")
             }
         }
 
@@ -1312,27 +1325,29 @@ final class DeckSQLManager: NSObject {
 
     /// 注册自定义 SQL 函数（如正则匹配）
     private func registerCustomFunctions() {
-        guard let db = db else { return }
+        syncOnDBQueue {
+            guard let db = db else { return }
 
-        // 注册 REGEXP 函数：regexp(pattern, text) -> Bool
-        // 使用方式：WHERE search_text REGEXP 'pattern'
-        db.createFunction("regexp", argumentCount: 2, deterministic: true) { args in
-            guard args.count == 2,
-                  let pattern = args[0] as? String,
-                  let text = args[1] as? String else {
-                return Int64(0)
+            // 注册 REGEXP 函数：regexp(pattern, text) -> Bool
+            // 使用方式：WHERE search_text REGEXP 'pattern'
+            db.createFunction("regexp", argumentCount: 2, deterministic: true) { args in
+                guard args.count == 2,
+                      let pattern = args[0] as? String,
+                      let text = args[1] as? String else {
+                    return Int64(0)
+                }
+
+                // 使用缓存的正则表达式
+                guard let regex = RegexCache.shared.regex(for: pattern) else {
+                    return Int64(0)
+                }
+
+                let range = NSRange(text.startIndex..., in: text)
+                let isMatch = regex.firstMatch(in: text, range: range) != nil
+                return isMatch ? Int64(1) : Int64(0)
             }
-
-            // 使用缓存的正则表达式
-            guard let regex = RegexCache.shared.regex(for: pattern) else {
-                return Int64(0)
-            }
-
-            let range = NSRange(text.startIndex..., in: text)
-            let isMatch = regex.firstMatch(in: text, range: range) != nil
-            return isMatch ? Int64(1) : Int64(0)
+            log.debug("Registered custom REGEXP function for SQLite")
         }
-        log.debug("Registered custom REGEXP function for SQLite")
     }
 
     /// 使用正则表达式搜索（在数据库层执行）
@@ -1343,7 +1358,6 @@ final class DeckSQLManager: NSObject {
         limit: Int = 50
     ) async -> [Row] {
         guard !Task.isCancelled else { return [] }
-        guard let db = db, let table = table else { return [] }
 
         // 安全模式下需要内存解密后再匹配正则
         if DeckUserDefaults.securityModeEnabled {
@@ -1355,49 +1369,10 @@ final class DeckSQLManager: NSObject {
             )
         }
 
-        // 构建查询
-        var query = table.filter(Expression<Bool>(literal: "regexp('\(pattern.replacingOccurrences(of: "'", with: "''"))', search_text)"))
-
-        if let types = typeFilter, !types.isEmpty {
-            let typeCondition = types.map { Col.itemType == $0 }.reduce(
-                Expression<Bool>(value: false)
-            ) { result, condition in
-                result || condition
-            }
-            query = query.filter(typeCondition)
-        }
-
-        if let tagId = tagId, tagId != -1 {
-            query = query.filter(Col.tagId == tagId)
-        }
-
-        query = query.order(Col.ts.desc).limit(limit)
-
-        return await withDBAsync { Array(try db.prepare(query)) } ?? []
-    }
-
-    /// 安全模式下的正则搜索：在内存中解密后匹配
-    /// 采用分批流式扫描，覆盖更多数据
-    private func searchWithRegexInMemory(
-        pattern: String,
-        typeFilter: [String]?,
-        tagId: Int?,
-        limit: Int
-    ) async -> [Row] {
-        guard let db = db, let table = table else { return [] }
-        guard let regex = RegexCache.shared.regex(for: pattern) else { return [] }
-
-        var matchingRows: [Row] = []
-        let batchSize = 500
-        var offset = 0
-        let maxScan = 5000  // 安全模式下最多扫描 5000 条
-
-        while matchingRows.count < limit && offset < maxScan {
-            // 支持任务取消
-            guard !Task.isCancelled else { break }
-
-            // 构建基础查询
-            var query = table.order(Col.ts.desc).limit(batchSize, offset: offset)
+        return await withDBAsync {
+            guard let db = self.db, let table = self.table else { return [] }
+            // 构建查询
+            var query = table.filter(Expression<Bool>(literal: "regexp('\(pattern.replacingOccurrences(of: "'", with: "''"))', search_text)"))
 
             if let types = typeFilter, !types.isEmpty {
                 let typeCondition = types.map { Col.itemType == $0 }.reduce(
@@ -1412,7 +1387,51 @@ final class DeckSQLManager: NSObject {
                 query = query.filter(Col.tagId == tagId)
             }
 
-            guard let rows = await withDBAsync({ Array(try db.prepare(query)) }) else { break }
+            query = query.order(Col.ts.desc).limit(limit)
+
+            return Array(try db.prepare(query))
+        } ?? []
+    }
+
+    /// 安全模式下的正则搜索：在内存中解密后匹配
+    /// 采用分批流式扫描，覆盖更多数据
+    private func searchWithRegexInMemory(
+        pattern: String,
+        typeFilter: [String]?,
+        tagId: Int?,
+        limit: Int
+    ) async -> [Row] {
+        guard let regex = RegexCache.shared.regex(for: pattern) else { return [] }
+
+        var matchingRows: [Row] = []
+        let batchSize = 500
+        var offset = 0
+        let maxScan = 5000  // 安全模式下最多扫描 5000 条
+
+        while matchingRows.count < limit && offset < maxScan {
+            // 支持任务取消
+            guard !Task.isCancelled else { break }
+
+            let rows: [Row] = await withDBAsync {
+                guard let db = self.db, let table = self.table else { return [] }
+                // 构建基础查询
+                var query = table.order(Col.ts.desc).limit(batchSize, offset: offset)
+
+                if let types = typeFilter, !types.isEmpty {
+                    let typeCondition = types.map { Col.itemType == $0 }.reduce(
+                        Expression<Bool>(value: false)
+                    ) { result, condition in
+                        result || condition
+                    }
+                    query = query.filter(typeCondition)
+                }
+
+                if let tagId = tagId, tagId != -1 {
+                    query = query.filter(Col.tagId == tagId)
+                }
+
+                return Array(try db.prepare(query))
+            } ?? []
 
             // 没有更多数据
             if rows.isEmpty { break }
@@ -1451,12 +1470,10 @@ final class DeckSQLManager: NSObject {
     }
 
     private func createTable() {
-        guard let db = db else { return }
-
-        let tab = Table("ClipboardHistory")
-
         do {
             try syncOnDBQueue {
+                guard let db = db else { return }
+                let tab = Table("ClipboardHistory")
                 try db.run(tab.create(ifNotExists: true) { t in
                     t.column(Col.id, primaryKey: .autoincrement)
                     t.column(Col.uniqueId)
@@ -1492,9 +1509,8 @@ final class DeckSQLManager: NSObject {
     }
 
     private func createFTS5Table(forceRecreate: Bool = false, preferTrigram: Bool = true) {
-        guard let db = db else { return }
-
         syncOnDBQueue {
+            guard let db = db else { return }
             if forceRecreate {
                 do {
                     try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_ai")
@@ -1580,14 +1596,14 @@ final class DeckSQLManager: NSObject {
         }
 
         updateFTSTokenizerState()
-        log.info("FTS5 table and triggers created successfully (trigram=\(ftsUsesTrigram))")
+        let usesTrigram = syncOnDBQueue { ftsUsesTrigram }
+        log.info("FTS5 table and triggers created successfully (trigram=\(usesTrigram))")
     }
 
     private func createEmbeddingTable() {
-        guard let db = db else { return }
-
         do {
             try syncOnDBQueue {
+                guard let db = db else { return }
                 let tab = Table("ClipboardHistory_embedding")
                 try db.run(tab.create(ifNotExists: true) { t in
                     t.column(EmbeddingCol.id, primaryKey: true)
@@ -1609,26 +1625,25 @@ final class DeckSQLManager: NSObject {
     }
 
     private func updateFTSTokenizerState() {
-        guard let db = db else { return }
+        syncOnDBQueue {
+            guard let db = db else { return }
 
-        let sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name='ClipboardHistory_fts' LIMIT 1"
-        let ftsSQL: String? = syncOnDBQueue {
-            (try? db.scalar(sql) as? String) ?? nil
+            let sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name='ClipboardHistory_fts' LIMIT 1"
+            let ftsSQL: String? = (try? db.scalar(sql) as? String) ?? nil
+
+            let normalized = ftsSQL?.lowercased() ?? ""
+            let compact = normalized.components(separatedBy: .whitespacesAndNewlines).joined()
+            ftsUsesTrigram = compact.contains("tokenize='trigram'") || compact.contains("tokenize=\"trigram\"")
+            log.debug("FTS5 tokenizer detected: \(ftsUsesTrigram ? "trigram" : "default")")
         }
-
-        let normalized = ftsSQL?.lowercased() ?? ""
-        let compact = normalized.components(separatedBy: .whitespacesAndNewlines).joined()
-        ftsUsesTrigram = compact.contains("tokenize='trigram'") || compact.contains("tokenize=\"trigram\"")
-        log.debug("FTS5 tokenizer detected: \(ftsUsesTrigram ? "trigram" : "default")")
     }
 
     private func isFTSTrigramAvailable() -> Bool {
-        guard let db = db else { return false }
-
-        let testTable = "ClipboardHistory_fts_trigram_check"
-        var available = false
-
         syncOnDBQueue {
+            guard let db = db else { return false }
+            let testTable = "ClipboardHistory_fts_trigram_check"
+            var available = false
+
             do {
                 try db.run("CREATE VIRTUAL TABLE IF NOT EXISTS \(testTable) USING fts5(content, tokenize='trigram')")
                 available = true
@@ -1641,9 +1656,9 @@ final class DeckSQLManager: NSObject {
             } catch {
                 log.debug("Failed to drop trigram test table: \(error.localizedDescription)")
             }
-        }
 
-        return available
+            return available
+        }
     }
 
     private func ensureFTSTrigramIfAvailable() {
@@ -1661,11 +1676,11 @@ final class DeckSQLManager: NSObject {
 
     /// Rebuild FTS index from existing data (call after migration or if FTS gets out of sync)
     func rebuildFTSIndex() {
-        guard let db = db else { return }
-
         if withDB({
+            guard let db = self.db else { return false }
             try db.run("INSERT INTO ClipboardHistory_fts(ClipboardHistory_fts) VALUES ('rebuild')")
-        }) != nil {
+            return true
+        }) == true {
             // FTS 重建后清空搜索缓存，确保缓存与索引一致
             invalidateSearchCache()
             log.info("FTS5 index rebuilt successfully")
@@ -1683,22 +1698,20 @@ final class DeckSQLManager: NSObject {
     private static let fileSearchTextBackfillTargetVersion = 1
 
     private func getSchemaVersion() -> Int32 {
-        guard let db = db else { return 0 }
         return withDB {
-            Int32(try db.scalar("PRAGMA user_version") as? Int64 ?? 0)
+            guard let db = self.db else { return 0 }
+            return Int32(try db.scalar("PRAGMA user_version") as? Int64 ?? 0)
         } ?? 0
     }
 
     private func setSchemaVersion(_ version: Int32) {
-        guard let db = db else { return }
         withDB {
+            guard let db = self.db else { return }
             try db.run("PRAGMA user_version = \(version)")
         }
     }
 
     private func applyMigrations() {
-        guard let db = db else { return }
-
         let currentVersion = getSchemaVersion()
         log.info("Current database schema version: \(currentVersion)")
 
@@ -1719,6 +1732,7 @@ final class DeckSQLManager: NSObject {
         // Migration 0 -> 1: 添加 blob_path 列
         if needsLargeImageMigration {
             withDB {
+                guard let db = self.db else { return }
                 let stmt = try db.prepare("PRAGMA table_info(ClipboardHistory)")
                 var columns: [String] = []
                 while let row = try stmt.failableNext() {
@@ -1773,8 +1787,6 @@ final class DeckSQLManager: NSObject {
     }
 
     private func performFileSearchTextBackfill() async {
-        guard let db = db, let table = table else { return }
-
         let batchSize = 200
         var offset = 0
         var updated = 0
@@ -1783,6 +1795,7 @@ final class DeckSQLManager: NSObject {
             guard !Task.isCancelled else { break }
 
             let rows: [Row] = await withDBAsync {
+                guard let db = self.db, let table = self.table else { return [] }
                 let query = table
                     .select(Col.id, Col.data, Col.searchText, Col.type)
                     .filter(Col.type == PasteboardType.fileURL.rawValue)
@@ -1842,7 +1855,11 @@ final class DeckSQLManager: NSObject {
         // 在后台线程执行迁移
         Task(priority: .background) { [weak self] in
             guard let self else { return }
-            await self.performLargeImageMigration()
+            let completed = await self.performLargeImageMigration()
+            guard completed else {
+                log.warn("Large image migration incomplete; schema version not updated")
+                return
+            }
             if let postMigration {
                 await postMigration()
             }
@@ -1852,59 +1869,70 @@ final class DeckSQLManager: NSObject {
         }
     }
 
-    private func performLargeImageMigration() async {
-        guard let db = db, let table = table else { return }
+    private func performLargeImageMigration() async -> Bool {
+        guard syncOnDBQueue({ db != nil && table != nil }) else { return false }
 
         // 使用分页查询避免一次性加载全部数据
         let batchSize = 50
-        var offset = 0
+        var lastId: Int64 = 0
         var totalMigrated = 0
 
         while true {
+            // 支持任务取消
+            guard !Task.isCancelled else {
+                log.info("Large image migration cancelled after \(totalMigrated) items")
+                return false
+            }
+
             // 每次只查询一批需要迁移的图片
-            let blobIsNil = Expression<Bool>("blob_path IS NULL")
-            let filter = (Col.itemType == ClipItemType.image.rawValue) && blobIsNil
-            let rows = await search(filter: filter, limit: batchSize, offset: offset)
+            let rows: [Row] = await withDBAsync {
+                guard let db = self.db, let table = self.table else { return [] }
+                let blobIsNil = Expression<Bool>("blob_path IS NULL")
+                let filter = (Col.itemType == ClipItemType.image.rawValue) && blobIsNil && (Col.id > lastId)
+                let query = table
+                    .filter(filter)
+                    .order(Col.id.asc)
+                    .limit(batchSize)
+                return Array(try db.prepare(query))
+            } ?? []
 
             guard !rows.isEmpty else { break }
 
-            var migratedInBatch = 0
+            if let lastRow = rows.last, let rowId = try? lastRow.get(Col.id) {
+                lastId = rowId
+            }
 
             for row in rows {
                 // 支持任务取消
                 guard !Task.isCancelled else {
                     log.info("Large image migration cancelled after \(totalMigrated) items")
-                    return
+                    return false
                 }
 
                 guard let item = rowToClipboardItem(row, isEncrypted: nil) else { continue }
                 guard item.data.count > Const.largeBlobThreshold else { continue }
+                guard let rowId = try? row.get(Col.id) else { continue }
 
                 let path = await BlobStorage.shared.storeAsync(data: item.data, uniqueId: item.uniqueId)
 
                 guard let path else { continue }
 
                 // Avoid storing preview duplicates for blob-backed items.
-                let encryptedData = encryptData(Data())
+                guard let encryptedData = encryptData(Data()) else { return false }
 
-                let query = table.filter(Col.id == item.id!)
                 _ = await withDBAsync {
+                    guard let db = self.db, let table = self.table else { return }
+                    let query = table.filter(Col.id == rowId)
                     try db.run(query.update(
                         Col.data <- encryptedData,
                         Col.blobPath <- path
                     ))
                 }
 
-                migratedInBatch += 1
                 totalMigrated += 1
             }
 
-            // 如果本批次没有符合条件的大图，继续下一批
-            if migratedInBatch == 0 && rows.count < batchSize {
-                break
-            }
-
-            offset += batchSize
+            if rows.count < batchSize { break }
 
             // 批次间让出 CPU，避免长时间阻塞后台线程
             await Task.yield()
@@ -1912,6 +1940,7 @@ final class DeckSQLManager: NSObject {
 
         log.info("Large image migration completed: \(totalMigrated) items migrated")
         vacuumDatabase()
+        return true
     }
 
     private func backfillSemanticEmbeddingsIfNeeded(targetVersion: Int32) {
@@ -1924,8 +1953,6 @@ final class DeckSQLManager: NSObject {
     }
 
     private func performSemanticEmbeddingBackfill() async {
-        guard let db = db else { return }
-
         let batchSize = 100
         let maxItems = DeckUserDefaults.securityModeEnabled ? 300 : 1000
         var processed = 0
@@ -1934,6 +1961,7 @@ final class DeckSQLManager: NSObject {
             guard !Task.isCancelled else { break }
 
             let rows: [(id: Int64, searchText: String)] = await withDBAsync {
+                guard let db = self.db else { return [] }
                 let sql = """
                     SELECT ch.id, ch.search_text
                     FROM ClipboardHistory ch
@@ -1977,10 +2005,11 @@ final class DeckSQLManager: NSObject {
     }
 
     private func vacuumDatabase() {
-        guard let db = db else { return }
         if withDB({
+            guard let db = self.db else { return false }
             try db.run("VACUUM")
-        }) != nil {
+            return true
+        }) == true {
             log.info("Database vacuum completed after blob migration")
         }
     }
@@ -1997,19 +2026,20 @@ final class DeckSQLManager: NSObject {
 //  安全模式下的加密/解密逻辑：
 //  - 加密列：data, search_text, app_name, embedding
 //  - 加密算法：由 SecurityService 提供（AES-256-GCM + Keychain 密钥管理）
-//  - Fallback：加密/解密失败时返回原始数据（避免数据丢失）
+//  - 加密失败：返回 nil 并提示用户，避免安全模式下写入明文
 //
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 extension DeckSQLManager {
     /// 加密二进制数据（用于 data、embedding 列）
     /// - Parameter data: 原始数据
-    /// - Returns: 加密后的数据（安全模式下），或原始数据（非安全模式）
-    private func encryptData(_ data: Data) -> Data {
+    /// - Returns: 加密后的数据（安全模式下），或原始数据（非安全模式）；失败时返回 nil
+    private func encryptData(_ data: Data) -> Data? {
         guard DeckUserDefaults.securityModeEnabled else { return data }
         guard let encrypted = SecurityService.shared.encrypt(data) else {
-            log.error("Security mode enabled but data encryption failed; storing plaintext")
-            return data
+            log.error("Security mode enabled but data encryption failed; rejecting plaintext write")
+            notifyEncryptionFailureIfNeeded()
+            return nil
         }
         return encrypted
     }
@@ -2024,16 +2054,18 @@ extension DeckSQLManager {
     
     /// 加密字符串（用于 search_text、app_name 列）
     /// - Parameter string: 原始字符串
-    /// - Returns: Base64 编码的加密数据（安全模式下），或原始字符串（非安全模式）
-    private func encryptString(_ string: String) -> String {
+    /// - Returns: Base64 编码的加密数据（安全模式下），或原始字符串（非安全模式）；失败时返回 nil
+    private func encryptString(_ string: String) -> String? {
         guard DeckUserDefaults.securityModeEnabled else { return string }
         guard let data = string.data(using: .utf8) else {
-            log.error("Security mode enabled but string encoding failed; storing plaintext")
-            return string
+            log.error("Security mode enabled but string encoding failed; rejecting plaintext write")
+            notifyEncryptionFailureIfNeeded()
+            return nil
         }
         guard let encrypted = SecurityService.shared.encrypt(data) else {
-            log.error("Security mode enabled but string encryption failed; storing plaintext")
-            return string
+            log.error("Security mode enabled but string encryption failed; rejecting plaintext write")
+            notifyEncryptionFailureIfNeeded()
+            return nil
         }
         return encrypted.base64EncodedString()
     }
@@ -2047,6 +2079,18 @@ extension DeckSQLManager {
               let decrypted = SecurityService.shared.decrypt(data),
               let result = String(data: decrypted, encoding: .utf8) else { return string }
         return result
+    }
+
+    private func notifyEncryptionFailureIfNeeded() {
+        let shouldNotify = syncOnErrorStateQueue {
+            if hasNotifiedEncryptionFailure {
+                return false
+            }
+            hasNotifiedEncryptionFailure = true
+            return true
+        }
+        guard shouldNotify else { return }
+        notifyUserOfDBError("安全模式加密失败，请重新认证或关闭安全模式后重试", isCritical: true)
     }
 
     // MARK: - Semantic Embedding Helpers
@@ -2129,41 +2173,48 @@ extension DeckSQLManager {
     }
 
     private func updateVecIndex(id: Int64, vector: [Float]) {
-        guard vecIndexEnabled, !DeckUserDefaults.securityModeEnabled else { return }
-        guard let db = db else { return }
         guard !vector.isEmpty else { return }
         let normalized = normalizeVector(vector)
-        ensureVecTable(dimension: normalized.count)
-        guard vecReadyDimensions.contains(normalized.count) else {
-            if vecMissingDimensionLogged.insert(normalized.count).inserted {
-                log.debug("Vec table not ready for dimension \(normalized.count); skipping updates")
+        syncOnDBQueue {
+            guard vecIndexEnabled, !DeckUserDefaults.securityModeEnabled else { return }
+            guard let db = db else { return }
+            ensureVecTable(dimension: normalized.count)
+            guard vecReadyDimensions.contains(normalized.count) else {
+                if vecMissingDimensionLogged.insert(normalized.count).inserted {
+                    log.debug("Vec table not ready for dimension \(normalized.count); skipping updates")
+                }
+                return
             }
-            return
-        }
-        let tableName = vecTableName(for: normalized.count)
-        let payload = vectorToJSONString(normalized)
-        let success = withDB {
-            try db.run("DELETE FROM \(tableName) WHERE rowid = ?", id)
-            try db.run(
-                "INSERT INTO \(tableName)(rowid, embedding) VALUES (?, ?)",
-                id,
-                payload
-            )
-            return true
-        }
-        if success != true {
-            log.debug("Vec index update failed for id=\(id), dim=\(normalized.count)")
+            let tableName = vecTableName(for: normalized.count)
+            let payload = vectorToJSONString(normalized)
+            let success = withDB {
+                try db.run("DELETE FROM \(tableName) WHERE rowid = ?", id)
+                try db.run(
+                    "INSERT INTO \(tableName)(rowid, embedding) VALUES (?, ?)",
+                    id,
+                    payload
+                )
+                return true
+            }
+            if success != true {
+                log.debug("Vec index update failed for id=\(id), dim=\(normalized.count)")
+            }
         }
     }
 
     private func storeSemanticEmbedding(id: Int64, textHash: String, vector: [Float]) {
-        guard let db = db else { return }
-
         let encoded = encodeEmbedding(vector)
-        let storedData = DeckUserDefaults.securityModeEnabled ? encryptData(encoded) : encoded
-        let tab = Table("ClipboardHistory_embedding")
+        let storedData: Data
+        if DeckUserDefaults.securityModeEnabled {
+            guard let encrypted = encryptData(encoded) else { return }
+            storedData = encrypted
+        } else {
+            storedData = encoded
+        }
 
         withDB {
+            guard let db = self.db else { return }
+            let tab = Table("ClipboardHistory_embedding")
             let insert = tab.insert(or: .replace,
                                     EmbeddingCol.id <- id,
                                     EmbeddingCol.textHash <- textHash,
@@ -2194,8 +2245,6 @@ extension DeckSQLManager {
     }
 
     func fetchSemanticEmbeddings(for items: [ClipboardItem]) async -> [Int64: [Float]] {
-        guard let db = db else { return [:] }
-
         let ids = items.compactMap { $0.id }
         guard !ids.isEmpty else { return [:] }
 
@@ -2214,6 +2263,7 @@ extension DeckSQLManager {
             .filter(ids.contains(EmbeddingCol.id))
 
         return await withDBAsync {
+            guard let db = self.db else { return [:] }
             var result: [Int64: [Float]] = [:]
             let rows = Array(try db.prepare(query))
             for row in rows {
@@ -2230,7 +2280,7 @@ extension DeckSQLManager {
     }
 
     var isVecSearchAvailable: Bool {
-        vecIndexEnabled && !DeckUserDefaults.securityModeEnabled
+        syncOnDBQueue { vecIndexEnabled } && !DeckUserDefaults.securityModeEnabled
     }
 
     func searchVecIds(queryVector: [Float], limit: Int) async -> [Int64] {
@@ -2240,24 +2290,28 @@ extension DeckSQLManager {
 
     func searchVecCandidates(queryVector: [Float], limit: Int) async -> [(id: Int64, distance: Double)] {
         guard !Task.isCancelled else { return [] }
-        guard isVecSearchAvailable else { return [] }
         guard !queryVector.isEmpty else { return [] }
 
         let normalized = normalizeVector(queryVector)
         guard !normalized.isEmpty else { return [] }
-        ensureVecTable(dimension: normalized.count)
-        guard vecReadyDimensions.contains(normalized.count) else {
-            if vecMissingDimensionLogged.insert(normalized.count).inserted {
-                log.debug("Vec table not ready for dimension \(normalized.count); search fallback")
+        let isReady = syncOnDBQueue { () -> Bool in
+            guard vecIndexEnabled, !DeckUserDefaults.securityModeEnabled else { return false }
+            ensureVecTable(dimension: normalized.count)
+            guard vecReadyDimensions.contains(normalized.count) else {
+                if vecMissingDimensionLogged.insert(normalized.count).inserted {
+                    log.debug("Vec table not ready for dimension \(normalized.count); search fallback")
+                }
+                return false
             }
-            return []
+            return true
         }
-        guard let db = db else { return [] }
+        guard isReady else { return [] }
 
         let tableName = vecTableName(for: normalized.count)
         let payload = vectorToJSONString(normalized)
-        log.debug("Vec search: dim=\(normalized.count), table=\(tableName), limit=\(limit), db=\(String(describing: db.handle))")
+        log.debug("Vec search: dim=\(normalized.count), table=\(tableName), limit=\(limit)")
         let results: [(id: Int64, distance: Double)] = await withDBAsync({ () throws -> [(id: Int64, distance: Double)] in
+            guard let db = self.db else { return [] }
             let sql = """
                 SELECT rowid, distance FROM \(tableName)
                 WHERE embedding MATCH ?
@@ -2299,9 +2353,10 @@ extension DeckSQLManager {
         // 每次请求都实时解密，虽然性能略低但更安全
         if isSecurityMode {
             let searchText = decryptString(rawSearchText)
+            let resolvedAppName = decryptString(appName)
             return SearchCacheEntry(
                 searchText: searchText.lowercased(),
-                appName: appName.lowercased()
+                appName: resolvedAppName.lowercased()
             )
         }
 
@@ -2342,8 +2397,11 @@ extension DeckSQLManager {
     }
 
     func shrinkMemory() {
-        guard let db = db else { return }
-        _ = withDB { try db.run("PRAGMA shrink_memory") }
+        _ = withDB {
+            guard let db = self.db else { return false }
+            try db.run("PRAGMA shrink_memory")
+            return true
+        }
     }
 }
 
@@ -2351,13 +2409,13 @@ extension DeckSQLManager {
 
 extension DeckSQLManager {
     var totalCount: Int {
-        guard let db = db, let table = table else { return 0 }
-        return withDB { try db.scalar(table.count) } ?? 0
+        return withDB {
+            guard let db = self.db, let table = self.table else { return 0 }
+            return try db.scalar(table.count)
+        } ?? 0
     }
     
     func insert(item: ClipboardItem) async -> Int64 {
-        guard let db = db, let table = table else { return -1 }
-
         await delete(filter: Col.uniqueId == item.uniqueId)
 
         // Offload large image payloads to filesystem
@@ -2387,26 +2445,53 @@ extension DeckSQLManager {
         }
 
         // Encrypt sensitive data if security mode is enabled
-        let encryptedData = encryptData(dataToStore)
-        let encryptedPreviewData = previewData.map { encryptData($0) }
-        let encryptedSearchText = encryptString(item.searchText)
+        let encryptedData: Data
+        let encryptedPreviewData: Data?
+        let encryptedSearchText: String
+        let encryptedAppName: String
 
-        let insert = table.insert(
-            Col.uniqueId <- item.uniqueId,
-            Col.type <- item.pasteboardType.rawValue,
-            Col.itemType <- item.itemType.rawValue,
-            Col.data <- encryptedData,
-            Col.previewData <- encryptedPreviewData,
-            Col.ts <- item.timestamp,
-            Col.appPath <- item.appPath,
-            Col.appName <- item.appName,
-            Col.searchText <- encryptedSearchText,
-            Col.length <- item.contentLength,
-            Col.tagId <- item.tagId,
-            Col.blobPath <- blobPath
-        )
+        if isSecurityMode {
+            guard let data = encryptData(dataToStore),
+                  let searchText = encryptString(item.searchText),
+                  let appName = encryptString(item.appName) else {
+                return -1
+            }
+            if let previewData = previewData {
+                guard let encryptedPreview = encryptData(previewData) else { return -1 }
+                encryptedPreviewData = encryptedPreview
+            } else {
+                encryptedPreviewData = nil
+            }
+            encryptedData = data
+            encryptedSearchText = searchText
+            encryptedAppName = appName
+        } else {
+            encryptedData = dataToStore
+            encryptedPreviewData = previewData
+            encryptedSearchText = item.searchText
+            encryptedAppName = item.appName
+        }
 
-        if let rowId: Int64 = await withDBAsync({ try db.run(insert) }) {
+        let rowId: Int64? = await withDBAsync {
+            guard let db = self.db, let table = self.table else { return -1 }
+            let insert = table.insert(
+                Col.uniqueId <- item.uniqueId,
+                Col.type <- item.pasteboardType.rawValue,
+                Col.itemType <- item.itemType.rawValue,
+                Col.data <- encryptedData,
+                Col.previewData <- encryptedPreviewData,
+                Col.ts <- item.timestamp,
+                Col.appPath <- item.appPath,
+                Col.appName <- encryptedAppName,
+                Col.searchText <- encryptedSearchText,
+                Col.length <- item.contentLength,
+                Col.tagId <- item.tagId,
+                Col.blobPath <- blobPath
+            )
+            return try db.run(insert)
+        }
+
+        if let rowId, rowId > 0 {
             log.debug("Inserted item with id: \(rowId)")
             scheduleSemanticEmbeddingUpdate(id: rowId, searchText: item.searchText)
             return rowId
@@ -2415,10 +2500,11 @@ extension DeckSQLManager {
     }
     
     func delete(filter: SQLite.Expression<Bool>) async {
-        guard let db = db, let table = table else { return }
-
-        let query = table.filter(filter)
-        if let count: Int = await withDBAsync({ try db.run(query.delete()) }) {
+        if let count: Int = await withDBAsync({
+            guard let db = self.db, let table = self.table else { return 0 }
+            let query = table.filter(filter)
+            return try db.run(query.delete())
+        }) {
             log.debug("Deleted \(count) items")
             // 无法确定具体删除了哪些 ID，清空所有缓存
             invalidateSearchCache()
@@ -2426,27 +2512,33 @@ extension DeckSQLManager {
     }
 
     func deleteAll() {
-        guard let db = db, let table = table else { return }
-        _ = withDB { try db.run(table.delete()) }
-        _ = withDB { try db.run("DELETE FROM ClipboardHistory_embedding") }
+        _ = withDB {
+            guard let db = self.db, let table = self.table else { return false }
+            try db.run(table.delete())
+            return true
+        }
+        _ = withDB {
+            guard let db = self.db else { return false }
+            try db.run("DELETE FROM ClipboardHistory_embedding")
+            return true
+        }
         dropVecTables()
         invalidateSearchCache()  // 清空所有搜索缓存
         log.info("Deleted all items from database")
     }
 
     func delete(id: Int64) async {
-        guard let db = db, let table = table else { return }
-
-        let query = table.filter(Col.id == id)
-        if let count: Int = await withDBAsync({ try db.run(query.delete()) }) {
+        if let count: Int = await withDBAsync({
+            guard let db = self.db, let table = self.table else { return 0 }
+            let query = table.filter(Col.id == id)
+            return try db.run(query.delete())
+        }) {
             log.debug("Deleted item with id \(id): \(count) rows")
             invalidateSearchCache(ids: [id])  // 只失效被删除的项
         }
     }
 
     func update(id: Int64, item: ClipboardItem) async {
-        guard let db = db, let table = table else { return }
-
         // 与 insert 保持一致，安全模式下加密数据
         var dataToStore = item.data
         if item.blobPath != nil {
@@ -2459,25 +2551,50 @@ extension DeckSQLManager {
             dataToStore = fullData
         }
 
-        let encryptedData = encryptData(dataToStore)
-        let encryptedPreviewData = item.previewData.map { encryptData($0) }
-        let encryptedSearchText = encryptString(item.searchText)
+        let encryptedData: Data
+        let encryptedPreviewData: Data?
+        let encryptedSearchText: String
+        let encryptedAppName: String
 
-        let query = table.filter(Col.id == id)
-        let update = query.update(
-            Col.type <- item.pasteboardType.rawValue,
-            Col.itemType <- item.itemType.rawValue,
-            Col.data <- encryptedData,
-            Col.previewData <- encryptedPreviewData,
-            Col.ts <- item.timestamp,
-            Col.appPath <- item.appPath,
-            Col.appName <- item.appName,
-            Col.searchText <- encryptedSearchText,
-            Col.length <- item.contentLength,
-            Col.tagId <- item.tagId
-        )
+        if DeckUserDefaults.securityModeEnabled {
+            guard let data = encryptData(dataToStore),
+                  let searchText = encryptString(item.searchText),
+                  let appName = encryptString(item.appName) else {
+                return
+            }
+            if let previewData = item.previewData {
+                guard let encryptedPreview = encryptData(previewData) else { return }
+                encryptedPreviewData = encryptedPreview
+            } else {
+                encryptedPreviewData = nil
+            }
+            encryptedData = data
+            encryptedSearchText = searchText
+            encryptedAppName = appName
+        } else {
+            encryptedData = dataToStore
+            encryptedPreviewData = item.previewData
+            encryptedSearchText = item.searchText
+            encryptedAppName = item.appName
+        }
 
-        if let count: Int = await withDBAsync({ try db.run(update) }) {
+        if let count: Int = await withDBAsync({
+            guard let db = self.db, let table = self.table else { return 0 }
+            let query = table.filter(Col.id == id)
+            let update = query.update(
+                Col.type <- item.pasteboardType.rawValue,
+                Col.itemType <- item.itemType.rawValue,
+                Col.data <- encryptedData,
+                Col.previewData <- encryptedPreviewData,
+                Col.ts <- item.timestamp,
+                Col.appPath <- item.appPath,
+                Col.appName <- encryptedAppName,
+                Col.searchText <- encryptedSearchText,
+                Col.length <- item.contentLength,
+                Col.tagId <- item.tagId
+            )
+            return try db.run(update)
+        }) {
             log.debug("Updated \(count) items")
             invalidateSearchCache(ids: [id])  // 失效被更新的项（searchText 可能已变化）
             scheduleSemanticEmbeddingUpdate(id: id, searchText: item.searchText)
@@ -2485,12 +2602,12 @@ extension DeckSQLManager {
     }
     
     func updateItemTag(id: Int64, tagId: Int) async {
-        guard let db = db, let table = table else { return }
-
-        let query = table.filter(Col.id == id)
-        let update = query.update(Col.tagId <- tagId)
-
-        if let count: Int = await withDBAsync({ try db.run(update) }) {
+        if let count: Int = await withDBAsync({
+            guard let db = self.db, let table = self.table else { return 0 }
+            let query = table.filter(Col.id == id)
+            let update = query.update(Col.tagId <- tagId)
+            return try db.run(update)
+        }) {
             log.debug("Updated tag for \(count) items")
         }
     }
@@ -2498,7 +2615,7 @@ extension DeckSQLManager {
     /// 更新项目的 searchText（用于 OCR 结果）
     /// 注意：FTS 索引会通过 ClipboardHistory_au 触发器自动更新
     func updateSearchText(id: Int64, searchText: String) async {
-        guard let db = db, let table = table else {
+        guard syncOnDBQueue({ db != nil && table != nil }) else {
             log.error("OCR DB: Database not initialized")
             return
         }
@@ -2506,12 +2623,17 @@ extension DeckSQLManager {
         log.info("OCR DB: Updating searchText for item \(id), text length: \(searchText.count)")
 
         // 根据安全模式决定是否加密
-        let textToStore = encryptString(searchText)
+        guard let textToStore = encryptString(searchText) else {
+            log.error("OCR DB: Failed to encrypt searchText for item \(id)")
+            return
+        }
 
-        let query = table.filter(Col.id == id)
-        let update = query.update(Col.searchText <- textToStore)
-
-        if let count: Int = await withDBAsync({ try db.run(update) }) {
+        if let count: Int = await withDBAsync({
+            guard let db = self.db, let table = self.table else { return 0 }
+            let query = table.filter(Col.id == id)
+            let update = query.update(Col.searchText <- textToStore)
+            return try db.run(update)
+        }) {
             log.info("OCR DB: Successfully updated searchText for \(count) items (FTS auto-synced via trigger)")
             invalidateSearchCache(ids: [id])
             scheduleSemanticEmbeddingUpdate(id: id, searchText: searchText)
@@ -2527,15 +2649,15 @@ extension DeckSQLManager {
         offset: Int? = nil
     ) async -> [Row] {
         guard !Task.isCancelled else { return [] }
-        guard let db = db, let table = table else { return [] }
-
         let ord = order ?? [Col.ts.desc]
 
-        var query = table.order(ord)
-        if let f = filter { query = query.filter(f) }
-        if let l = limit { query = query.limit(l, offset: offset ?? 0) }
-
-        return await withDBAsync { Array(try db.prepare(query)) } ?? []
+        return await withDBAsync {
+            guard let db = self.db, let table = self.table else { return [] }
+            var query = table.order(ord)
+            if let f = filter { query = query.filter(f) }
+            if let l = limit { query = query.limit(l, offset: offset ?? 0) }
+            return Array(try db.prepare(query))
+        } ?? []
     }
 
     private func buildFTSQuery(from keyword: String, useTrigram: Bool) -> String {
@@ -2557,9 +2679,8 @@ extension DeckSQLManager {
     }
 
     private func runFTSQuery(_ ftsQuery: String, limit: Int) async -> [Int64] {
-        guard let db = db else { return [] }
-
         return await withDBAsync {
+            guard let db = self.db else { return [] }
             let sql = """
                 SELECT rowid FROM ClipboardHistory_fts
                 WHERE ClipboardHistory_fts MATCH ?
@@ -2586,12 +2707,11 @@ extension DeckSQLManager {
     }
 
     private func searchWithSQLLike(keyword: String, limit: Int) async -> [Int64] {
-        guard let db = db else { return [] }
-
         let escaped = escapeForLike(keyword)
         let pattern = "%\(escaped)%"
 
         return await withDBAsync {
+            guard let db = self.db else { return [] }
             let sql = """
                 SELECT id FROM ClipboardHistory
                 WHERE search_text LIKE ? ESCAPE '\\'
@@ -2614,7 +2734,8 @@ extension DeckSQLManager {
     /// Returns row IDs matching the search term
     func searchFTS(keyword: String, limit: Int = 50) async -> [Int64] {
         guard !Task.isCancelled else { return [] }
-        guard db != nil, !keyword.isEmpty else { return [] }
+        guard !keyword.isEmpty else { return [] }
+        guard syncOnDBQueue({ db != nil }) else { return [] }
 
         let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -2624,7 +2745,8 @@ extension DeckSQLManager {
             return await searchWithLike(keyword: trimmed, limit: limit)
         }
 
-        if ftsUsesTrigram {
+        let usesTrigram = syncOnDBQueue { ftsUsesTrigram }
+        if usesTrigram {
             let ftsQuery = buildFTSQuery(from: trimmed, useTrigram: true)
             guard !ftsQuery.isEmpty else {
                 return await searchWithSQLLike(keyword: trimmed, limit: limit)
@@ -2663,8 +2785,6 @@ extension DeckSQLManager {
     /// 使用缓存避免重复解密和 lowercased 转换，显著提升频繁搜索性能
     /// 采用分批流式扫描，覆盖全量数据
     private func searchWithLike(keyword: String, limit: Int) async -> [Int64] {
-        guard let db = db, let table = table else { return [] }
-
         var matchingIds: [Int64] = []
         let lowercasedKeyword = keyword.lowercased()
         let isSecurityMode = DeckUserDefaults.securityModeEnabled
@@ -2679,11 +2799,13 @@ extension DeckSQLManager {
             // 支持任务取消
             guard !Task.isCancelled else { break }
 
-            let query = table.select(Col.id, Col.searchText, Col.appName)
-                .order(Col.ts.desc)
-                .limit(batchSize, offset: offset)
-
-            guard let rows = await withDBAsync({ Array(try db.prepare(query)) }) else { break }
+            let rows: [Row] = await withDBAsync {
+                guard let db = self.db, let table = self.table else { return [] }
+                let query = table.select(Col.id, Col.searchText, Col.appName)
+                    .order(Col.ts.desc)
+                    .limit(batchSize, offset: offset)
+                return Array(try db.prepare(query))
+            } ?? []
 
             // 没有更多数据
             if rows.isEmpty { break }
@@ -2744,31 +2866,32 @@ extension DeckSQLManager {
         limit: Int = 50
     ) async -> [Row] {
         guard !Task.isCancelled else { return [] }
-        guard let db = db, let table = table else { return [] }
 
         // Get matching IDs from FTS
         let matchingIds = await searchFTS(keyword: keyword, limit: limit * 2)
         guard !matchingIds.isEmpty else { return [] }
 
-        // Build query with additional filters
-        var query = table.filter(matchingIds.contains(Col.id))
+        let rows = await withDBAsync { () throws -> [Row] in
+            guard let db = self.db, let table = self.table else { return [Row]() }
+            // Build query with additional filters
+            var query = table.filter(matchingIds.contains(Col.id))
 
-        if let types = typeFilter, !types.isEmpty {
-            let typeCondition = types.map { Col.itemType == $0 }.reduce(
-                Expression<Bool>(value: false)
-            ) { result, condition in
-                result || condition
+            if let types = typeFilter, !types.isEmpty {
+                let typeCondition = types.map { Col.itemType == $0 }.reduce(
+                    Expression<Bool>(value: false)
+                ) { result, condition in
+                    result || condition
+                }
+                query = query.filter(typeCondition)
             }
-            query = query.filter(typeCondition)
-        }
 
-        if let tagId = tagId, tagId != -1 {
-            query = query.filter(Col.tagId == tagId)
-        }
+            if let tagId = tagId, tagId != -1 {
+                query = query.filter(Col.tagId == tagId)
+            }
 
-        query = query.limit(matchingIds.count)
-
-        let rows = await withDBAsync { Array(try db.prepare(query)) } ?? []
+            query = query.limit(matchingIds.count)
+            return Array(try db.prepare(query))
+        } ?? []
         guard rows.count > 1 else { return rows }
 
         var rowsById: [Int64: Row] = [:]
@@ -2790,38 +2913,36 @@ extension DeckSQLManager {
     }
     
     func fetchAll(limit: Int = 10000, offset: Int = 0, loadFullData: Bool = false) async -> [ClipboardItem] {
-        guard let db = db, let table = table else { return [] }
-
-        let query = table.order(Col.ts.desc).limit(limit, offset: offset)
-
-        let rows = await withDBAsync { Array(try db.prepare(query)) } ?? []
+        let rows = await withDBAsync { () throws -> [Row] in
+            guard let db = self.db, let table = self.table else { return [Row]() }
+            let query = table.order(Col.ts.desc).limit(limit, offset: offset)
+            return Array(try db.prepare(query))
+        } ?? []
         return rows.compactMap { rowToClipboardItem($0, loadFullData: loadFullData) }
     }
 
     func fetchAll(limit: Int = 10000, offset: Int = 0, loadFullData: Bool = false) -> [ClipboardItem] {
-        guard let db = db, let table = table else { return [] }
-        
-        let query = table.order(Col.ts.desc).limit(limit, offset: offset)
-        
-        let rows = withDB { Array(try db.prepare(query)) } ?? []
+        let rows = withDB { () throws -> [Row] in
+            guard let db = self.db, let table = self.table else { return [Row]() }
+            let query = table.order(Col.ts.desc).limit(limit, offset: offset)
+            return Array(try db.prepare(query))
+        } ?? []
         return rows.compactMap { rowToClipboardItem($0, loadFullData: loadFullData) }
     }
     
     func fetch(id: Int64) async -> Row? {
-        guard let db = db, let table = table else { return nil }
-
-        let query = table.filter(Col.id == id)
-
-        return await withDBAsync { try db.pluck(query) } ?? nil
+        return await withDBAsync { () throws -> Row? in
+            guard let db = self.db, let table = self.table else { return nil }
+            let query = table.filter(Col.id == id)
+            return try db.pluck(query)
+        } ?? nil
     }
 
     /// Fetch raw data payload for a single item (used for lazy loading).
     func fetchData(for id: Int64, isEncrypted: Bool? = nil) -> Data? {
-        guard let db = db, let table = table else { return nil }
-
-        let query = table.select(Col.data).filter(Col.id == id).limit(1)
-
         return withDB { () -> Data? in
+            guard let db = self.db, let table = self.table else { return nil }
+            let query = table.select(Col.data).filter(Col.id == id).limit(1)
             guard let row = try db.pluck(query) else { return nil }
             let rawData = try row.get(Col.data)
             let shouldDecrypt = isEncrypted ?? DeckUserDefaults.securityModeEnabled
@@ -2831,28 +2952,29 @@ extension DeckSQLManager {
 
     /// 批量获取多个 ID 的记录，使用单次 SQL 查询
     func fetchBatch(ids: [Int64]) async -> [Row] {
-        guard let db = db, let table = table, !ids.isEmpty else { return [] }
-
-        // 使用 WHERE id IN (...) 查询
-        let query = table.filter(ids.contains(Col.id))
-
-        return await withDBAsync { Array(try db.prepare(query)) } ?? []
+        guard !ids.isEmpty else { return [] }
+        return await withDBAsync {
+            guard let db = self.db, let table = self.table else { return [] }
+            // 使用 WHERE id IN (...) 查询
+            let query = table.filter(ids.contains(Col.id))
+            return Array(try db.prepare(query))
+        } ?? []
     }
 
     func count(typeFilter: [String]? = nil) async -> Int {
-        guard let db = db, let table = table else { return 0 }
-        
-        var query = table
-        if let types = typeFilter, !types.isEmpty {
-            let typeCondition = types.map { Col.itemType == $0 }.reduce(
-                Expression<Bool>(value: false)
-            ) { result, condition in
-                result || condition
+        return await withDBAsync {
+            guard let db = self.db, let table = self.table else { return 0 }
+            var query = table
+            if let types = typeFilter, !types.isEmpty {
+                let typeCondition = types.map { Col.itemType == $0 }.reduce(
+                    Expression<Bool>(value: false)
+                ) { result, condition in
+                    result || condition
+                }
+                query = query.filter(typeCondition)
             }
-            query = query.filter(typeCondition)
-        }
-        
-        return await withDBAsync { try db.scalar(query.count) } ?? 0
+            return try db.scalar(query.count)
+        } ?? 0
     }
     
     func rowToClipboardItem(_ row: Row, isEncrypted: Bool? = nil, loadFullData: Bool = true) -> ClipboardItem? {
@@ -2861,7 +2983,7 @@ extension DeckSQLManager {
             let rawData = try row.get(Col.data)
             let timestamp = try row.get(Col.ts)
             let id = try row.get(Col.id)
-            let appName = try row.get(Col.appName)
+            let rawAppName = try row.get(Col.appName)
             let appPath = try row.get(Col.appPath)
             let rawPreviewData = try row.get(Col.previewData)
             let rawSearchText = try row.get(Col.searchText)
@@ -2876,6 +2998,7 @@ extension DeckSQLManager {
             let data = shouldDecrypt ? decryptData(rawData) : rawData
             let previewData = rawPreviewData.map { shouldDecrypt ? decryptData($0) : $0 }
             let searchText = shouldDecrypt ? decryptString(rawSearchText) : rawSearchText
+            let appName = shouldDecrypt ? decryptString(rawAppName) : rawAppName
 
             var inlineData = data
             var dataIsFull = true
@@ -2929,7 +3052,7 @@ extension DeckSQLManager {
     /// - Parameter encrypt: true to encrypt, false to decrypt
     /// - Returns: true if migration succeeded, false if failed
     func migrateEncryption(encrypt: Bool) async -> Bool {
-        guard let db = db, let table = table else {
+        guard syncOnDBQueue({ db != nil && table != nil }) else {
             log.error("Database not initialized for encryption migration")
             return false
         }
@@ -2945,8 +3068,9 @@ extension DeckSQLManager {
         while !hasError {
             // 分批查询，只获取 id 和需要迁移的字段
             let batchResult: (rows: [Row], count: Int)? = await withDBAsync {
+                guard let db = self.db, let table = self.table else { return ([], 0) }
                 let query = table
-                    .select(Col.id, Col.data, Col.previewData, Col.searchText)
+                    .select(Col.id, Col.data, Col.previewData, Col.searchText, Col.appName)
                     .order(Col.id.asc)
                     .limit(batchSize, offset: offset)
                 let rows = Array(try db.prepare(query))
@@ -2965,26 +3089,47 @@ extension DeckSQLManager {
 
             // 处理当前批次
             let batchSuccess = await withDBAsync {
+                guard let db = self.db, let table = self.table else { return false }
                 for row in batch.rows {
                     let id = try row.get(Col.id)
                     let rawData = try row.get(Col.data)
                     let rawPreviewData = try row.get(Col.previewData)
                     let rawSearchText = try row.get(Col.searchText)
+                    let rawAppName = try row.get(Col.appName)
 
                     let newData: Data
                     let newPreviewData: Data?
                     let newSearchText: String
+                    let newAppName: String
 
                     if encrypt {
                         // Encrypting: data is currently unencrypted
-                        newData = SecurityService.shared.encrypt(rawData) ?? rawData
-                        newPreviewData = rawPreviewData.flatMap { SecurityService.shared.encrypt($0) }
-                        if let stringData = rawSearchText.data(using: .utf8),
-                           let encrypted = SecurityService.shared.encrypt(stringData) {
-                            newSearchText = encrypted.base64EncodedString()
-                        } else {
-                            newSearchText = rawSearchText
+                        guard let encryptedData = SecurityService.shared.encrypt(rawData) else {
+                            self.notifyEncryptionFailureIfNeeded()
+                            return false
                         }
+                        newData = encryptedData
+                        if let rawPreviewData = rawPreviewData {
+                            guard let encryptedPreview = SecurityService.shared.encrypt(rawPreviewData) else {
+                                self.notifyEncryptionFailureIfNeeded()
+                                return false
+                            }
+                            newPreviewData = encryptedPreview
+                        } else {
+                            newPreviewData = nil
+                        }
+                        guard let searchData = rawSearchText.data(using: .utf8),
+                              let encryptedSearch = SecurityService.shared.encrypt(searchData) else {
+                            self.notifyEncryptionFailureIfNeeded()
+                            return false
+                        }
+                        newSearchText = encryptedSearch.base64EncodedString()
+                        guard let appNameData = rawAppName.data(using: .utf8),
+                              let encryptedAppName = SecurityService.shared.encrypt(appNameData) else {
+                            self.notifyEncryptionFailureIfNeeded()
+                            return false
+                        }
+                        newAppName = encryptedAppName.base64EncodedString()
                     } else {
                         // Decrypting: data is currently encrypted
                         newData = SecurityService.shared.decrypt(rawData) ?? rawData
@@ -2996,6 +3141,13 @@ extension DeckSQLManager {
                         } else {
                             newSearchText = rawSearchText
                         }
+                        if let decoded = Data(base64Encoded: rawAppName),
+                           let decrypted = SecurityService.shared.decrypt(decoded),
+                           let str = String(data: decrypted, encoding: .utf8) {
+                            newAppName = str
+                        } else {
+                            newAppName = rawAppName
+                        }
                     }
 
                     // Update the row
@@ -3003,7 +3155,8 @@ extension DeckSQLManager {
                     let update = query.update(
                         Col.data <- newData,
                         Col.previewData <- newPreviewData,
-                        Col.searchText <- newSearchText
+                        Col.searchText <- newSearchText,
+                        Col.appName <- newAppName
                     )
                     try db.run(update)
                 }
@@ -3045,13 +3198,13 @@ extension DeckSQLManager {
 
     /// 更新数据库中的 blob_path 字段（加密迁移后路径后缀变化）
     private func updateBlobPathsAfterMigration(encrypt: Bool) async {
-        guard let db = db, let table = table else { return }
-
-        // 查找所有有 blob_path 的记录
-        let query = table.select(Col.id, Col.blobPath)
-            .filter(Col.blobPath != nil)
-
-            guard let rows = await withDBAsync({ Array(try db.prepare(query)) }) else { return }
+        let rows: [Row] = await withDBAsync {
+            guard let db = self.db, let table = self.table else { return [] }
+            // 查找所有有 blob_path 的记录
+            let query = table.select(Col.id, Col.blobPath)
+                .filter(Col.blobPath != nil)
+            return Array(try db.prepare(query))
+        } ?? []
 
         for row in rows {
             do {
@@ -3068,8 +3221,9 @@ extension DeckSQLManager {
                 }
 
                 if newPath != oldPath {
-                    let updateQuery = table.filter(Col.id == id)
                     _ = await withDBAsync {
+                        guard let db = self.db, let table = self.table else { return }
+                        let updateQuery = table.filter(Col.id == id)
                         try db.run(updateQuery.update(Col.blobPath <- newPath))
                     }
                 }
@@ -3080,8 +3234,6 @@ extension DeckSQLManager {
     }
 
     private func migrateEmbeddingEncryption(encrypt: Bool) async {
-        guard let db = db else { return }
-
         let tab = Table("ClipboardHistory_embedding")
         let batchSize = 200
         var offset = 0
@@ -3090,6 +3242,7 @@ extension DeckSQLManager {
             guard !Task.isCancelled else { break }
 
             let rows: [Row] = await withDBAsync {
+                guard let db = self.db else { return [] }
                 let query = tab.select(EmbeddingCol.id, EmbeddingCol.embedding)
                     .order(EmbeddingCol.id.asc)
                     .limit(batchSize, offset: offset)
@@ -3105,13 +3258,18 @@ extension DeckSQLManager {
 
                     let newEmbedding: Data
                     if encrypt {
-                        newEmbedding = SecurityService.shared.encrypt(rawEmbedding) ?? rawEmbedding
+                        guard let encrypted = SecurityService.shared.encrypt(rawEmbedding) else {
+                            notifyEncryptionFailureIfNeeded()
+                            return
+                        }
+                        newEmbedding = encrypted
                     } else {
                         newEmbedding = SecurityService.shared.decrypt(rawEmbedding) ?? rawEmbedding
                     }
 
-                    let updateQuery = tab.filter(EmbeddingCol.id == id)
                     _ = await withDBAsync {
+                        guard let db = self.db else { return }
+                        let updateQuery = tab.filter(EmbeddingCol.id == id)
                         try db.run(updateQuery.update(EmbeddingCol.embedding <- newEmbedding))
                     }
                 } catch {
@@ -3128,7 +3286,7 @@ extension DeckSQLManager {
             dropVecTables()
         } else {
             loadSQLiteVecExtensionIfAvailable()
-            if vecIndexEnabled {
+            if syncOnDBQueue({ vecIndexEnabled }) {
                 scheduleVecIndexBackfillIfNeeded()
             }
         }

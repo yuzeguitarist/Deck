@@ -14,6 +14,8 @@ final class DataExportService {
     
     /// 当前正在导出的临时文件 URL（用于清理）
     private var currentExportTempURL: URL?
+    /// 最近一次导出的记录数量（用于提示）
+    private var lastExportedCount: Int = 0
     
     private init() {
         // 注册应用终止通知，确保清理临时文件
@@ -121,6 +123,7 @@ final class DataExportService {
                 var offset = 0
                 let batchSize = 500
                 var isFirst = true
+                var exportedCount = 0
                 
                 while true {
                     let batch = await DeckSQLManager.shared.fetchAll(limit: batchSize, offset: offset, loadFullData: true)
@@ -151,6 +154,7 @@ final class DataExportService {
                         }
                         handle.write(data)
                         isFirst = false
+                        exportedCount += 1
                     }
 
                     offset += batch.count
@@ -159,6 +163,7 @@ final class DataExportService {
                 
                 handle.write(Data([UInt8(ascii: "]"), UInt8(ascii: "}")]))
                 try handle.close()
+                lastExportedCount = exportedCount
                 
                 await MainActor.run {
                     completion(.success(tempURL))
@@ -166,6 +171,7 @@ final class DataExportService {
             } catch {
                 // 出错时清理临时文件
                 cleanupTempFile()
+                lastExportedCount = 0
                 await MainActor.run {
                     completion(.failure(error))
                 }
@@ -331,7 +337,7 @@ extension DataExportService {
                 
                 let alert = NSAlert()
                 alert.messageText = "导出成功"
-                alert.informativeText = "已导出 \(DeckDataStore.shared.items.count) 条记录"
+                alert.informativeText = "已导出 \(self?.lastExportedCount ?? 0) 条记录"
                 alert.alertStyle = .informational
                 alert.runModal()
             } catch {
