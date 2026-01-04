@@ -179,6 +179,50 @@ final class ClipboardItem: Identifiable, Equatable {
         cachedFilePaths = urlString.components(separatedBy: "\n").filter { !$0.isEmpty }
         return cachedFilePaths
     }
+
+    /// OCR text for image items; ignores file path tokens for fileURL images.
+    var ocrTextForImage: String? {
+        guard itemType == .image || isFileURLImage else { return nil }
+        let trimmed = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if pasteboardType == .fileURL, let paths = filePaths {
+            let fileText = Self.searchTextForFilePaths(paths)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !fileText.isEmpty {
+                if trimmed == fileText { return nil }
+                if trimmed.hasPrefix(fileText) {
+                    let remainder = trimmed.dropFirst(fileText.count)
+                    let cleaned = String(remainder).trimmingCharacters(in: .whitespacesAndNewlines)
+                    return cleaned.isEmpty ? nil : cleaned
+                }
+            }
+        }
+
+        return trimmed
+    }
+
+    static func searchTextForFilePaths(_ paths: [String]) -> String {
+        let cleanedPaths = paths
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !cleanedPaths.isEmpty else { return "" }
+
+        var tokens: [String] = []
+        var seen = Set<String>()
+
+        for path in cleanedPaths {
+            if seen.insert(path).inserted {
+                tokens.append(path)
+            }
+            let fileName = URL(fileURLWithPath: path).lastPathComponent
+            if !fileName.isEmpty, seen.insert(fileName).inserted {
+                tokens.append(fileName)
+            }
+        }
+
+        return tokens.joined(separator: "\n")
+    }
     
     init(
         pasteboardType: PasteboardType,
@@ -280,6 +324,7 @@ final class ClipboardItem: Identifiable, Equatable {
         log.debug("Creating item with type: \(type.rawValue)")
 
         var content: Data?
+        var filePaths: [String] = []
         if (type == .rtfd || type == .flatRTFD),
            let plain = item.string(forType: .string),
            !Self.normalizedPlainText(plain).isEmpty,
@@ -288,8 +333,6 @@ final class ClipboardItem: Identifiable, Equatable {
             resolvedType = .string
             content = plainData
         } else if type.isFile() {
-            var filePaths: [String] = []
-
             // 从 propertyList 读取，避免 NSSecureCoding 解码警告
             if let urlStrings = pasteboard.propertyList(forType: .fileURL) as? [String] {
                 filePaths = urlStrings.compactMap { URL(string: $0)?.path }
@@ -358,6 +401,15 @@ final class ClipboardItem: Identifiable, Equatable {
         // 对于文本类型，使用字符长度；对于图片/文件，使用数据字节大小
         let length = resolvedType.isText() ? attributedString.length : content.count
 
+        let searchText: String
+        if resolvedType.isText() {
+            searchText = attributedString.string
+        } else if resolvedType.isFile() {
+            searchText = Self.searchTextForFilePaths(filePaths)
+        } else {
+            searchText = ""
+        }
+
         self.init(
             pasteboardType: resolvedType,
             data: content,
@@ -365,7 +417,7 @@ final class ClipboardItem: Identifiable, Equatable {
             timestamp: Int64(Date().timeIntervalSince1970),
             appPath: app?.bundleURL?.path ?? "",
             appName: app?.localizedName ?? "",
-            searchText: attributedString.string,
+            searchText: searchText,
             contentLength: length,
             tagId: -1
         )
@@ -446,12 +498,36 @@ final class ClipboardItem: Identifiable, Equatable {
 
     private static let pdfExtensions: Set<String> = ["pdf"]
     private static let markdownExtensions: Set<String> = ["md", "markdown", "mdown", "mkd"]
+    private static let officeExtensions: Set<String> = [
+        "doc", "docx", "docm", "dot", "dotx",
+        "xls", "xlsx", "xlsm", "xlt", "xltx",
+        "ppt", "pptx", "pptm", "pot", "potx", "pps", "ppsx"
+    ]
 
     /// 检查文件是否为 PDF
     var isPDF: Bool {
         guard itemType == .file, let paths = filePaths, let firstPath = paths.first else { return false }
         let ext = (firstPath as NSString).pathExtension.lowercased()
         return Self.pdfExtensions.contains(ext)
+    }
+
+    /// Checks if a fileURL item points to image files (by extension/UTType).
+    var isFileURLImage: Bool {
+        guard pasteboardType == .fileURL, let paths = filePaths, !paths.isEmpty else { return false }
+        return paths.allSatisfy { path in
+            let resolvedPath: String
+            if path.hasPrefix("file://"), let url = URL(string: path) {
+                resolvedPath = url.path
+            } else {
+                resolvedPath = path
+            }
+            let ext = (resolvedPath as NSString).pathExtension.lowercased()
+            if Self.imageExtensions.contains(ext) { return true }
+            if !ext.isEmpty, let type = UTType(filenameExtension: ext), type.conforms(to: .image) {
+                return true
+            }
+            return false
+        }
     }
 
     /// 获取第一个 PDF 文件路径
@@ -472,6 +548,17 @@ final class ClipboardItem: Identifiable, Equatable {
         guard isMarkdownFile, let paths = filePaths else { return nil }
         return paths.first
     }
+
+    /// Checks if the item is a single Office document that can use QuickLook.
+    var officePreviewPath: String? {
+        guard itemType == .file, let paths = filePaths, paths.count == 1, let firstPath = paths.first else {
+            return nil
+        }
+        let ext = (firstPath as NSString).pathExtension.lowercased()
+        guard Self.officeExtensions.contains(ext) else { return nil }
+        guard FileManager.default.fileExists(atPath: firstPath) else { return nil }
+        return firstPath
+    }
     
     private func detectItemType() -> ClipItemType {
         log.debug("detectItemType for pasteboardType: \(pasteboardType.rawValue)")
@@ -489,18 +576,9 @@ final class ClipboardItem: Identifiable, Equatable {
                     cachedFilePaths = urlString.components(separatedBy: "\n").filter { !$0.isEmpty }
                 }
             }
-            // Check if files are images
-            if let paths = cachedFilePaths, !paths.isEmpty {
-                log.debug("Checking file paths for image extensions: \(paths)")
-                let allImages = paths.allSatisfy { path in
-                    let ext = (path as NSString).pathExtension.lowercased()
-                    let isImage = Self.imageExtensions.contains(ext)
-                    return isImage
-                }
-                if allImages {
-                    log.debug("All files are images, returning .image")
-                    return .image
-                }
+            if isFileURLImage {
+                log.debug("All files are images, returning .image")
+                return .image
             }
             log.debug("Returning .file")
             return .file

@@ -381,6 +381,7 @@ final class DeckSQLManager: NSObject {
             registerCustomFunctions()
             createTable()
             applyMigrations()
+            backfillFileSearchTextIfNeeded()
             Task { @MainActor in
                 DeckSQLManager.shared.ensureFTSTrigramIfAvailable()
             }
@@ -1256,6 +1257,7 @@ final class DeckSQLManager: NSObject {
     /// - 1: 添加 blob_path 列并完成大图迁移
     /// - 2: 添加语义向量缓存表
     private static let currentSchemaVersion: Int32 = 2
+    private static let fileSearchTextBackfillTargetVersion = 1
 
     private func getSchemaVersion() -> Int32 {
         guard let db = db else { return 0 }
@@ -1335,6 +1337,79 @@ final class DeckSQLManager: NSObject {
 
         // 未来的迁移可以继续添加:
         // if currentVersion < 3 { ... }
+    }
+
+    private func backfillFileSearchTextIfNeeded() {
+        guard DeckUserDefaults.fileSearchTextBackfillVersion < Self.fileSearchTextBackfillTargetVersion else { return }
+
+        Task(priority: .background) { [weak self] in
+            guard let self else { return }
+            await self.performFileSearchTextBackfill()
+            DeckUserDefaults.fileSearchTextBackfillVersion = Self.fileSearchTextBackfillTargetVersion
+        }
+    }
+
+    private func performFileSearchTextBackfill() async {
+        guard let db = db, let table = table else { return }
+
+        let batchSize = 200
+        var offset = 0
+        var updated = 0
+
+        while true {
+            guard !Task.isCancelled else { break }
+
+            let rows: [Row] = await withDBAsync {
+                let query = table
+                    .select(Col.id, Col.data, Col.searchText, Col.type)
+                    .filter(Col.type == PasteboardType.fileURL.rawValue)
+                    .limit(batchSize, offset: offset)
+                return Array(try db.prepare(query))
+            } ?? []
+
+            guard !rows.isEmpty else { break }
+
+            for row in rows {
+                guard !Task.isCancelled else { break }
+                do {
+                    let id = try row.get(Col.id)
+                    let rawSearchText = try row.get(Col.searchText)
+                    let existingSearchText = decryptString(rawSearchText)
+
+                    let rawData = try row.get(Col.data)
+                    let decodedData = decryptData(rawData)
+                    guard let text = String(data: decodedData, encoding: .utf8) else { continue }
+                    let paths = text.components(separatedBy: "\n").filter { !$0.isEmpty }
+                    let newSearchText = ClipboardItem.searchTextForFilePaths(paths)
+                    guard !newSearchText.isEmpty else { continue }
+
+                    if existingSearchText == newSearchText {
+                        continue
+                    }
+
+                    let existingLower = existingSearchText.lowercased()
+                    if !existingLower.isEmpty {
+                        let fileNames = paths.map { URL(fileURLWithPath: $0).lastPathComponent }
+                        if fileNames.contains(where: { !($0.isEmpty) && existingLower.contains($0.lowercased()) }) {
+                            continue
+                        }
+                    }
+
+                    await updateSearchText(id: id, searchText: newSearchText)
+                    updated += 1
+                } catch {
+                    continue
+                }
+            }
+
+            if rows.count < batchSize { break }
+            offset += batchSize
+            await Task.yield()
+        }
+
+        if updated > 0 {
+            log.info("File search text backfill completed: \(updated) items updated")
+        }
     }
 
     private func migrateLargeImagesIfNeeded(
