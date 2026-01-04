@@ -282,6 +282,10 @@ final class DeckSQLManager: NSObject {
     
     /// 自定义存储路径的 security-scoped URL（需要在 deinit 时释放）
     private var securityScopedURL: URL?
+    /// 保护 security-scoped access 的并发访问
+    private let securityScopeLock = NSLock()
+    /// 当前是否已成功 startAccessingSecurityScopedResource()
+    private var securityScopedAccessActive = false
     
     /// FTS5 是否使用 trigram 分词（支持中文等 CJK 语言）
     private var ftsUsesTrigram = false
@@ -349,6 +353,10 @@ final class DeckSQLManager: NSObject {
     
     /// 数据库恢复是否正在进行（防止并发恢复）
     private var recoveryInProgress = false
+    
+    /// 错误状态锁（保护错误计数与通知状态）
+    private let errorStateQueue = DispatchQueue(label: "com.deck.sqlite.error.state")
+    private let errorStateQueueKey = DispatchSpecificKey<Void>()
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // MARK: - Search Cache (搜索缓存 - 安全模式优化)
@@ -370,6 +378,7 @@ final class DeckSQLManager: NSObject {
     override private init() {
         super.init()
         dbQueue.setSpecific(key: dbQueueKey, value: ())
+        errorStateQueue.setSpecific(key: errorStateQueueKey, value: ())
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -408,6 +417,14 @@ final class DeckSQLManager: NSObject {
         }
     }
 
+    /// 在错误状态队列上同步执行（避免 NSLock 在 async 上下文报错）
+    private func syncOnErrorStateQueue<T>(_ work: () -> T) -> T {
+        if DispatchQueue.getSpecific(key: errorStateQueueKey) != nil {
+            return work()
+        }
+        return errorStateQueue.sync(execute: work)
+    }
+
     /// 在 dbQueue 上执行数据库操作（带错误处理和文件有效性检查）
     /// - Parameter work: 数据库操作代码块
     /// - Returns: 操作结果，失败时返回 nil
@@ -431,7 +448,9 @@ final class DeckSQLManager: NSObject {
         do {
             let result = try syncOnDBQueue(work)
             // 操作成功，重置错误计数
-            consecutiveErrorCount = 0
+            syncOnErrorStateQueue {
+                consecutiveErrorCount = 0
+            }
             return result
         } catch {
             handleDBError(error)
@@ -462,7 +481,9 @@ final class DeckSQLManager: NSObject {
         do {
             let result = try await asyncOnDBQueue(work)
             // 操作成功，重置错误计数
-            consecutiveErrorCount = 0
+            syncOnErrorStateQueue {
+                consecutiveErrorCount = 0
+            }
             return result
         } catch {
             handleDBError(error)
@@ -481,12 +502,15 @@ final class DeckSQLManager: NSObject {
 
     /// 处理数据库错误并在必要时通知用户
     private func handleDBError(_ error: Error) {
-        consecutiveErrorCount += 1
-        lastErrorTime = Date()
-
         let details = extractDBErrorDetails(error)
         let errorMessage = details.message
-        log.error("DB operation failed (\(consecutiveErrorCount)/\(errorThreshold)): \(errorMessage) (domain=\(details.domain), code=\(details.code))")
+        let errorCount = syncOnErrorStateQueue {
+            consecutiveErrorCount += 1
+            lastErrorTime = Date()
+            return consecutiveErrorCount
+        }
+
+        log.error("DB operation failed (\(errorCount)/\(errorThreshold)): \(errorMessage) (domain=\(details.domain), code=\(details.code))")
         if details.debug != details.message {
             log.debug("DB error detail: \(details.debug)")
         }
@@ -502,28 +526,49 @@ final class DeckSQLManager: NSObject {
         if details.isSQLiteDomain, details.code == SQLITE_OK {
             if !performIntegrityCheck() {
                 attemptDBRecovery(reason: "SQLite error 0 with failed integrity check")
-            } else if consecutiveErrorCount >= errorThreshold {
-                consecutiveErrorCount = 0
+            } else {
+                syncOnErrorStateQueue {
+                    if consecutiveErrorCount >= errorThreshold {
+                        consecutiveErrorCount = 0
+                    }
+                }
             }
             return
         }
 
-        if (consecutiveErrorCount >= errorThreshold || isCritical) && !hasNotifiedUser {
-            if details.isSQLiteDomain, isCritical {
-                attemptDBRecovery(reason: "Critical SQLite error")
+        let (shouldNotify, shouldAttemptRecovery) = syncOnErrorStateQueue { () -> (Bool, Bool) in
+            if (consecutiveErrorCount >= errorThreshold || isCritical) && !hasNotifiedUser {
+                hasNotifiedUser = true
+                let shouldAttemptRecovery = details.isSQLiteDomain && isCritical
+                return (true, shouldAttemptRecovery)
             }
-            hasNotifiedUser = true
+            return (false, false)
+        }
+
+        if shouldAttemptRecovery {
+            attemptDBRecovery(reason: "Critical SQLite error")
+        }
+        if shouldNotify {
             notifyUserOfDBError(errorMessage, isCritical: isCritical)
         }
     }
 
     private func attemptDBRecovery(reason: String) {
-        guard !recoveryInProgress else { return }
-        recoveryInProgress = true
+        let shouldProceed = syncOnErrorStateQueue {
+            if recoveryInProgress {
+                return false
+            }
+            recoveryInProgress = true
+            return true
+        }
+        guard shouldProceed else { return }
         log.warn("Attempting database recovery: \(reason)")
         DispatchQueue.main.async { [weak self] in
-            self?.reinitialize()
-            self?.recoveryInProgress = false
+            guard let self else { return }
+            self.reinitialize()
+            self.syncOnErrorStateQueue {
+                self.recoveryInProgress = false
+            }
         }
     }
 
@@ -578,9 +623,11 @@ final class DeckSQLManager: NSObject {
 
     /// 重置错误状态（用户处理后调用）
     func resetErrorState() {
-        consecutiveErrorCount = 0
-        hasNotifiedUser = false
-        lastErrorTime = nil
+        syncOnErrorStateQueue {
+            consecutiveErrorCount = 0
+            hasNotifiedUser = false
+            lastErrorTime = nil
+        }
     }
 
     /// 检查数据库健康状态
@@ -599,8 +646,9 @@ final class DeckSQLManager: NSObject {
         }
 
         // 检查最近是否有错误
-        if consecutiveErrorCount > 0 {
-            return (false, "最近有 \(consecutiveErrorCount) 次数据库操作失败")
+        let recentErrorCount = syncOnErrorStateQueue { consecutiveErrorCount }
+        if recentErrorCount > 0 {
+            return (false, "最近有 \(recentErrorCount) 次数据库操作失败")
         }
 
         // 轻量完整性检查（用于用户主动诊断）
@@ -616,8 +664,7 @@ final class DeckSQLManager: NSObject {
     }
     
     func reinitialize() {
-        securityScopedURL?.stopAccessingSecurityScopedResource()
-        securityScopedURL = nil
+        stopSecurityScopedAccess()
         Self.isInitialized = false
         db = nil
         table = nil
@@ -671,30 +718,33 @@ final class DeckSQLManager: NSObject {
         }
 
         do {
-            try openDatabase(at: dbPath)
+            try syncOnDBQueue {
+                try openDatabase(at: dbPath)
 
-            if !performIntegrityCheck() {
-                log.warn("Database integrity check failed, attempting to restore from backup")
-                db = nil
-                if restoreDatabaseFromBackup(dbPath: dbPath, backupPath: backupPath) {
-                    try openDatabase(at: dbPath)
-                    if !performIntegrityCheck() {
-                        handleDBError(NSError(domain: "DeckSQL", code: -2, userInfo: [
-                            NSLocalizedDescriptionKey: "Database integrity check failed after restore"
+                if !performIntegrityCheck() {
+                    log.warn("Database integrity check failed, attempting to restore from backup")
+                    db = nil
+                    if restoreDatabaseFromBackup(dbPath: dbPath, backupPath: backupPath) {
+                        try openDatabase(at: dbPath)
+                        if !performIntegrityCheck() {
+                            handleDBError(NSError(domain: "DeckSQL", code: -2, userInfo: [
+                                NSLocalizedDescriptionKey: "Database integrity check failed after restore"
+                            ]))
+                        }
+                    } else {
+                        handleDBError(NSError(domain: "DeckSQL", code: -3, userInfo: [
+                            NSLocalizedDescriptionKey: "Database integrity check failed and no backup available"
                         ]))
                     }
-                } else {
-                    handleDBError(NSError(domain: "DeckSQL", code: -3, userInfo: [
-                        NSLocalizedDescriptionKey: "Database integrity check failed and no backup available"
-                    ]))
                 }
+
+                log.info("Database initialized at: \(dbPath)")
+                Self.isInitialized = true
+                registerCustomFunctions()
+                createTable()
+                applyMigrations()
             }
 
-            log.info("Database initialized at: \(dbPath)")
-            Self.isInitialized = true
-            registerCustomFunctions()
-            createTable()
-            applyMigrations()
             backfillFileSearchTextIfNeeded()
             Task { @MainActor in
                 DeckSQLManager.shared.ensureFTSTrigramIfAvailable()
@@ -709,52 +759,99 @@ final class DeckSQLManager: NSObject {
     
     private func getStoragePath() -> String {
         var basePath: String
-        
+
         if DeckUserDefaults.useCustomStorage {
             if let bookmarkData = DeckUserDefaults.storageBookmark {
-                var isStale = false
-                do {
-                    let url = try URL(
-                        resolvingBookmarkData: bookmarkData,
-                        options: .withSecurityScope,
-                        relativeTo: nil,
-                        bookmarkDataIsStale: &isStale
-                    )
-                    
-                    if url.startAccessingSecurityScopedResource() {
-                        securityScopedURL = url
-                        basePath = url.path
-                        log.debug("Restored security-scoped access to \(url.path)")
-                        
-                        if isStale {
-                            if let newBookmark = try? url.bookmarkData(
-                                options: .withSecurityScope,
-                                includingResourceValuesForKeys: nil,
-                                relativeTo: nil
-                            ) {
-                                DeckUserDefaults.storageBookmark = newBookmark
-                                log.debug("Refreshed stale bookmark")
-                            }
-                        }
-                    } else {
-                        basePath = defaultStoragePath()
-                    }
-                } catch {
-                    log.error("Failed to resolve bookmark: \(error)")
-                    basePath = defaultStoragePath()
-                }
+                basePath = resolveSecurityScopedStoragePath(from: bookmarkData)
             } else if let customPath = DeckUserDefaults.customStoragePath {
+                stopSecurityScopedAccess()
                 basePath = customPath
             } else {
+                stopSecurityScopedAccess()
                 basePath = defaultStoragePath()
             }
         } else {
-            securityScopedURL?.stopAccessingSecurityScopedResource()
-            securityScopedURL = nil
+            stopSecurityScopedAccess()
             basePath = defaultStoragePath()
         }
-        
+
         return (basePath as NSString).appendingPathComponent("Deck")
+    }
+
+    private func resolveSecurityScopedStoragePath(from bookmarkData: Data) -> String {
+        var isStale = false
+        do {
+            let url = try URL(
+                resolvingBookmarkData: bookmarkData,
+                options: .withSecurityScope,
+                relativeTo: nil,
+                bookmarkDataIsStale: &isStale
+            )
+
+            let result = ensureSecurityScopedAccess(for: url)
+            if result.success {
+                if result.didStart {
+                    log.debug("Restored security-scoped access to \(url.path)")
+                }
+                if isStale {
+                    if let newBookmark = try? url.bookmarkData(
+                        options: .withSecurityScope,
+                        includingResourceValuesForKeys: nil,
+                        relativeTo: nil
+                    ) {
+                        DeckUserDefaults.storageBookmark = newBookmark
+                        log.debug("Refreshed stale bookmark")
+                    }
+                }
+                return url.path
+            }
+        } catch {
+            log.error("Failed to resolve bookmark: \(error)")
+        }
+
+        stopSecurityScopedAccess()
+        return defaultStoragePath()
+    }
+
+    private func ensureSecurityScopedAccess(for url: URL) -> (success: Bool, didStart: Bool) {
+        securityScopeLock.lock()
+        defer { securityScopeLock.unlock() }
+
+        if let currentURL = securityScopedURL,
+           securityScopedAccessActive,
+           currentURL.path == url.path {
+            return (true, false)
+        }
+
+        if securityScopedAccessActive {
+            securityScopedURL?.stopAccessingSecurityScopedResource()
+            securityScopedAccessActive = false
+            securityScopedURL = nil
+        }
+
+        guard url.startAccessingSecurityScopedResource() else {
+            securityScopedURL = nil
+            securityScopedAccessActive = false
+            return (false, false)
+        }
+
+        securityScopedURL = url
+        securityScopedAccessActive = true
+        return (true, true)
+    }
+
+    private func stopSecurityScopedAccess() {
+        securityScopeLock.lock()
+        defer { securityScopeLock.unlock() }
+
+        guard securityScopedAccessActive else {
+            securityScopedURL = nil
+            return
+        }
+
+        securityScopedURL?.stopAccessingSecurityScopedResource()
+        securityScopedURL = nil
+        securityScopedAccessActive = false
     }
     
     private func defaultStoragePath() -> String {
@@ -1787,8 +1884,8 @@ final class DeckSQLManager: NSObject {
 
                 guard let path else { continue }
 
-                let storedData = item.previewData ?? Data()
-                let encryptedData = encryptData(storedData)
+                // Avoid storing preview duplicates for blob-backed items.
+                let encryptedData = encryptData(Data())
 
                 let query = table.filter(Col.id == item.id!)
                 _ = await withDBAsync {
@@ -1889,7 +1986,7 @@ final class DeckSQLManager: NSObject {
     }
     
     deinit {
-        securityScopedURL?.stopAccessingSecurityScopedResource()
+        stopSecurityScopedAccess()
     }
 }
 
@@ -1910,7 +2007,11 @@ extension DeckSQLManager {
     /// - Returns: 加密后的数据（安全模式下），或原始数据（非安全模式）
     private func encryptData(_ data: Data) -> Data {
         guard DeckUserDefaults.securityModeEnabled else { return data }
-        return SecurityService.shared.encrypt(data) ?? data
+        guard let encrypted = SecurityService.shared.encrypt(data) else {
+            log.error("Security mode enabled but data encryption failed; storing plaintext")
+            return data
+        }
+        return encrypted
     }
     
     /// 解密二进制数据（用于 data、embedding 列）
@@ -1926,8 +2027,14 @@ extension DeckSQLManager {
     /// - Returns: Base64 编码的加密数据（安全模式下），或原始字符串（非安全模式）
     private func encryptString(_ string: String) -> String {
         guard DeckUserDefaults.securityModeEnabled else { return string }
-        guard let data = string.data(using: .utf8),
-              let encrypted = SecurityService.shared.encrypt(data) else { return string }
+        guard let data = string.data(using: .utf8) else {
+            log.error("Security mode enabled but string encoding failed; storing plaintext")
+            return string
+        }
+        guard let encrypted = SecurityService.shared.encrypt(data) else {
+            log.error("Security mode enabled but string encryption failed; storing plaintext")
+            return string
+        }
         return encrypted.base64EncodedString()
     }
     
@@ -2270,7 +2377,8 @@ extension DeckSQLManager {
                     log.debug("Pre-generated thumbnail for large image (\(item.data.count) bytes)")
                 }
 
-                dataToStore = previewData ?? Data()
+                // Avoid storing duplicate preview data in both columns for blob-backed items.
+                dataToStore = Data()
             }
         } else if item.itemType == .image && item.data.count > 50 * 1024 && (previewData == nil || previewData!.isEmpty) {
             // For medium-sized images (50KB-512KB), also pre-generate thumbnail
@@ -2342,7 +2450,11 @@ extension DeckSQLManager {
         // 与 insert 保持一致，安全模式下加密数据
         var dataToStore = item.data
         if item.blobPath != nil {
-            dataToStore = item.previewData ?? item.data
+            if let preview = item.previewData, !preview.isEmpty {
+                dataToStore = Data()
+            } else {
+                dataToStore = item.previewData ?? item.data
+            }
         } else if !item.hasFullData, let fullData = item.loadFullData() {
             dataToStore = fullData
         }
@@ -2770,6 +2882,9 @@ extension DeckSQLManager {
 
             if blobPath != nil {
                 dataIsFull = false
+                if inlineData.isEmpty, let preview = previewData, !preview.isEmpty {
+                    inlineData = preview
+                }
             } else if !loadFullData,
                       let itemType = ClipItemType(rawValue: storedItemType),
                       itemType == .image,
