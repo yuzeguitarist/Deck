@@ -72,6 +72,7 @@ final class DataExportService {
         let searchText: String
         let contentLength: Int
         let tagId: Int
+        let isTemporary: Bool?
         // 标记是否为大图（用于导入时重建 blob）
         let isLargeBlob: Bool?
     }
@@ -146,6 +147,7 @@ final class DataExportService {
                             searchText: item.searchText,
                             contentLength: item.contentLength,
                             tagId: item.tagId,
+                            isTemporary: item.isTemporary,
                             isLargeBlob: isLargeBlob
                         )
                         let data = try encoder.encode(exportItem)
@@ -229,6 +231,7 @@ final class DataExportService {
                         searchText: exportItem.searchText,
                         contentLength: exportItem.contentLength,
                         tagId: exportItem.tagId,
+                        isTemporary: exportItem.isTemporary ?? false,
                         uniqueId: exportItem.uniqueId
                     )
 

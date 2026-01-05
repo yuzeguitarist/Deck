@@ -223,6 +223,7 @@ enum Col {
     static let length = Expression<Int>("content_length")
     static let tagId = Expression<Int>("tag_id")
     static let blobPath = Expression<String?>("blob_path")
+    static let isTemporary = Expression<Bool>("is_temporary")
 }
 
 enum EmbeddingCol {
@@ -1488,6 +1489,7 @@ final class DeckSQLManager: NSObject {
                     t.column(Col.length)
                     t.column(Col.tagId, defaultValue: -1)
                     t.column(Col.blobPath)
+                    t.column(Col.isTemporary, defaultValue: false)
                 })
 
                 try db.run(tab.createIndex(Col.ts, ifNotExists: true))
@@ -1694,7 +1696,8 @@ final class DeckSQLManager: NSObject {
     /// - 0: 初始版本
     /// - 1: 添加 blob_path 列并完成大图迁移
     /// - 2: 添加语义向量缓存表
-    private static let currentSchemaVersion: Int32 = 2
+    /// - 3: 添加 is_temporary 列
+    private static let currentSchemaVersion: Int32 = 3
     private static let fileSearchTextBackfillTargetVersion = 1
 
     private func getSchemaVersion() -> Int32 {
@@ -1728,6 +1731,7 @@ final class DeckSQLManager: NSObject {
 
         let needsLargeImageMigration = currentVersion < 1
         let needsEmbeddingMigration = currentVersion < 2
+        let needsTemporaryMigration = currentVersion < 3
 
         // Migration 0 -> 1: 添加 blob_path 列
         if needsLargeImageMigration {
@@ -1750,6 +1754,10 @@ final class DeckSQLManager: NSObject {
                 createEmbeddingTable()
             }
 
+            if needsTemporaryMigration {
+                addTemporaryColumnIfNeeded()
+            }
+
             // 执行大图迁移，完成后再进行语义缓存回填
             let postMigration: (() async -> Void)?
             if needsEmbeddingMigration {
@@ -1769,11 +1777,35 @@ final class DeckSQLManager: NSObject {
         // Migration 1 -> 2: 添加语义向量缓存表
         if needsEmbeddingMigration {
             createEmbeddingTable()
+            if needsTemporaryMigration {
+                addTemporaryColumnIfNeeded()
+            }
             backfillSemanticEmbeddingsIfNeeded(targetVersion: Self.currentSchemaVersion)
+            return
+        }
+
+        if needsTemporaryMigration {
+            addTemporaryColumnIfNeeded()
+            setSchemaVersion(Self.currentSchemaVersion)
         }
 
         // 未来的迁移可以继续添加:
-        // if currentVersion < 3 { ... }
+    }
+
+    private func addTemporaryColumnIfNeeded() {
+        withDB {
+            guard let db = self.db else { return }
+            let stmt = try db.prepare("PRAGMA table_info(ClipboardHistory)")
+            var columns: [String] = []
+            while let row = try stmt.failableNext() {
+                if let name = row[1] as? String {
+                    columns.append(name)
+                }
+            }
+            guard !columns.contains("is_temporary") else { return }
+            try db.run("ALTER TABLE ClipboardHistory ADD COLUMN is_temporary INTEGER NOT NULL DEFAULT 0")
+            log.info("Added is_temporary column for temporary items")
+        }
     }
 
     private func backfillFileSearchTextIfNeeded() {
@@ -2486,7 +2518,8 @@ extension DeckSQLManager {
                 Col.searchText <- encryptedSearchText,
                 Col.length <- item.contentLength,
                 Col.tagId <- item.tagId,
-                Col.blobPath <- blobPath
+                Col.blobPath <- blobPath,
+                Col.isTemporary <- item.isTemporary
             )
             return try db.run(insert)
         }
@@ -2591,7 +2624,8 @@ extension DeckSQLManager {
                 Col.appName <- encryptedAppName,
                 Col.searchText <- encryptedSearchText,
                 Col.length <- item.contentLength,
-                Col.tagId <- item.tagId
+                Col.tagId <- item.tagId,
+                Col.isTemporary <- item.isTemporary
             )
             return try db.run(update)
         }) {
@@ -2609,6 +2643,17 @@ extension DeckSQLManager {
             return try db.run(update)
         }) {
             log.debug("Updated tag for \(count) items")
+        }
+    }
+
+    func updateItemTemporary(id: Int64, isTemporary: Bool) async {
+        if let count: Int = await withDBAsync({
+            guard let db = self.db, let table = self.table else { return 0 }
+            let query = table.filter(Col.id == id)
+            let update = query.update(Col.isTemporary <- isTemporary)
+            return try db.run(update)
+        }) {
+            log.debug("Updated temporary flag for \(count) items")
         }
     }
 
@@ -2992,6 +3037,7 @@ extension DeckSQLManager {
             let blobPath = try row.get(Col.blobPath)
             let storedUniqueId = try row.get(Col.uniqueId)
             let storedItemType = try row.get(Col.itemType)
+            let isTemporary = (try? row.get(Col.isTemporary)) ?? false
             
             // Decrypt data if security mode is enabled
             let shouldDecrypt = isEncrypted ?? DeckUserDefaults.securityModeEnabled
@@ -3027,6 +3073,7 @@ extension DeckSQLManager {
                 searchText: searchText,
                 contentLength: length,
                 tagId: tagId,
+                isTemporary: isTemporary,
                 id: id,
                 uniqueId: storedUniqueId,
                 blobPath: blobPath,

@@ -186,13 +186,7 @@ final class SecurityService {
             return nil
         }
         
-        do {
-            let sealedBox = try AES.GCM.seal(data, using: key)
-            return sealedBox.combined
-        } catch {
-            log.error("Encryption failed: \(error)")
-            return nil
-        }
+        return encrypt(data, using: key)
     }
     
     func decrypt(_ encryptedData: Data) -> Data? {
@@ -201,6 +195,20 @@ final class SecurityService {
             return nil
         }
         
+        return decrypt(encryptedData, using: key)
+    }
+
+    func encrypt(_ data: Data, using key: SymmetricKey) -> Data? {
+        do {
+            let sealedBox = try AES.GCM.seal(data, using: key)
+            return sealedBox.combined
+        } catch {
+            log.error("Encryption failed: \(error)")
+            return nil
+        }
+    }
+
+    func decrypt(_ encryptedData: Data, using key: SymmetricKey) -> Data? {
         do {
             let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
             return try AES.GCM.open(sealedBox, using: key)

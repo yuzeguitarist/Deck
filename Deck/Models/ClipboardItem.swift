@@ -105,6 +105,7 @@ final class ClipboardItem: Identifiable, Equatable {
     }
     let contentLength: Int
     var tagId: Int
+    var isTemporary: Bool
 
     @ObservationIgnored
     private var dataIsFull: Bool
@@ -234,6 +235,7 @@ final class ClipboardItem: Identifiable, Equatable {
         searchText: String,
         contentLength: Int,
         tagId: Int = -1,
+        isTemporary: Bool = false,
         id: Int64? = nil,
         uniqueId: String? = nil,
         blobPath: String? = nil,
@@ -250,6 +252,7 @@ final class ClipboardItem: Identifiable, Equatable {
         self.searchText = searchText
         self.contentLength = contentLength
         self.tagId = tagId
+        self.isTemporary = isTemporary
         self.id = id
         self.blobPath = blobPath
         self.dataIsFull = dataIsFull
