@@ -29,11 +29,6 @@
   <img src="https://img.shields.io/badge/license-GPL--3.0-green?style=flat-square" alt="License">
   <img src="https://img.shields.io/badge/status-Free_for_now-brightgreen?style=flat-square" alt="Status">
 </p>
-
-<p align="center">
-  <img src="photos/DeckShow.png" alt="Deck Show" width="720">
-</p>
-
 ---
 
 ## Features (all currently free)
