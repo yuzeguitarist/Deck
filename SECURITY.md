@@ -6,8 +6,8 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.x.x   | :white_check_mark: |
-| < 1.0   | :x:                |
+| > 1.0   | Yes |
+| < 1.0   | No                |
 
 ## Reporting a Vulnerability
 
@@ -69,8 +69,8 @@ The following are in scope:
 
 | 版本 | 支持状态 |
 | ---- | -------- |
-| 1.x.x | :white_check_mark: |
-| < 1.0 | :x: |
+| > 1.0 | Yes |
+| < 1.0 | No |
 
 ## 报告漏洞
 

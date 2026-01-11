@@ -14,6 +14,7 @@ enum Const {
     static let cardHeaderSize: CGFloat = 40.0
     static let cardSpace: CGFloat = 16.0
     static let cardBottomPadding: CGFloat = 12.0
+    static let linkCardImageSize: CGSize = CGSize(width: 640.0, height: 360.0)
     
     // Window dimensions
     static let windowHeight: CGFloat = 300.0

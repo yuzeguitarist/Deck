@@ -92,6 +92,7 @@ final class ClipboardItem: Identifiable, Equatable {
     private(set) var timestamp: Int64
     let appPath: String
     let appName: String
+    var sourceAnchor: SourceAnchor?
     var searchText: String {
         didSet {
             guard searchText != oldValue else { return }
@@ -159,8 +160,11 @@ final class ClipboardItem: Identifiable, Equatable {
     
     var url: URL? {
         if pasteboardType == .string {
-            let urlString = String(data: data, encoding: .utf8) ?? ""
+            let urlString = String(data: data, encoding: .utf8) ?? searchText
             return urlString.asCompleteURL()
+        }
+        if itemType == .url {
+            return searchText.asCompleteURL()
         }
         return nil
     }
@@ -232,6 +236,7 @@ final class ClipboardItem: Identifiable, Equatable {
         timestamp: Int64,
         appPath: String,
         appName: String,
+        sourceAnchor: SourceAnchor? = nil,
         searchText: String,
         contentLength: Int,
         tagId: Int = -1,
@@ -249,6 +254,7 @@ final class ClipboardItem: Identifiable, Equatable {
         self.timestamp = timestamp
         self.appPath = appPath
         self.appName = appName
+        self.sourceAnchor = sourceAnchor
         self.searchText = searchText
         self.contentLength = contentLength
         self.tagId = tagId
@@ -586,6 +592,10 @@ final class ClipboardItem: Identifiable, Equatable {
             log.debug("Returning .file")
             return .file
         case .rtf, .rtfd, .flatRTFD:
+            let text = searchText
+            if text.isHexColor { return .color }
+            if text.asCompleteURL() != nil { return .url }
+            if text.isCodeSnippet { return .code }
             return .richText
         case .string:
             let text = String(data: data, encoding: .utf8) ?? ""

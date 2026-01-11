@@ -69,6 +69,7 @@ final class DataExportService {
         let timestamp: Int64
         let appPath: String
         let appName: String
+        let sourceAnchor: SourceAnchor?
         let searchText: String
         let contentLength: Int
         let tagId: Int
@@ -144,6 +145,7 @@ final class DataExportService {
                             timestamp: item.timestamp,
                             appPath: item.appPath,
                             appName: item.appName,
+                            sourceAnchor: item.sourceAnchor,
                             searchText: item.searchText,
                             contentLength: item.contentLength,
                             tagId: item.tagId,
@@ -228,6 +230,7 @@ final class DataExportService {
                         timestamp: exportItem.timestamp,
                         appPath: exportItem.appPath,
                         appName: exportItem.appName,
+                        sourceAnchor: exportItem.sourceAnchor,
                         searchText: exportItem.searchText,
                         contentLength: exportItem.contentLength,
                         tagId: exportItem.tagId,

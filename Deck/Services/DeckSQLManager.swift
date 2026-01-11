@@ -219,6 +219,7 @@ enum Col {
     static let ts = Expression<Int64>("timestamp")
     static let appPath = Expression<String>("app_path")
     static let appName = Expression<String>("app_name")
+    static let sourceAnchor = Expression<String?>("source_anchor")
     static let searchText = Expression<String>("search_text")
     static let length = Expression<Int>("content_length")
     static let tagId = Expression<Int>("tag_id")
@@ -1485,6 +1486,7 @@ final class DeckSQLManager: NSObject {
                     t.column(Col.ts)
                     t.column(Col.appPath)
                     t.column(Col.appName)
+                    t.column(Col.sourceAnchor)
                     t.column(Col.searchText)
                     t.column(Col.length)
                     t.column(Col.tagId, defaultValue: -1)
@@ -1697,7 +1699,8 @@ final class DeckSQLManager: NSObject {
     /// - 1: 添加 blob_path 列并完成大图迁移
     /// - 2: 添加语义向量缓存表
     /// - 3: 添加 is_temporary 列
-    private static let currentSchemaVersion: Int32 = 3
+    /// - 4: 添加 source_anchor 列（IDE 溯源元数据）
+    private static let currentSchemaVersion: Int32 = 4
     private static let fileSearchTextBackfillTargetVersion = 1
 
     private func getSchemaVersion() -> Int32 {
@@ -1732,6 +1735,7 @@ final class DeckSQLManager: NSObject {
         let needsLargeImageMigration = currentVersion < 1
         let needsEmbeddingMigration = currentVersion < 2
         let needsTemporaryMigration = currentVersion < 3
+        let needsSourceAnchorMigration = currentVersion < 4
 
         // Migration 0 -> 1: 添加 blob_path 列
         if needsLargeImageMigration {
@@ -1757,6 +1761,9 @@ final class DeckSQLManager: NSObject {
             if needsTemporaryMigration {
                 addTemporaryColumnIfNeeded()
             }
+            if needsSourceAnchorMigration {
+                addSourceAnchorColumnIfNeeded()
+            }
 
             // 执行大图迁移，完成后再进行语义缓存回填
             let postMigration: (() async -> Void)?
@@ -1780,12 +1787,20 @@ final class DeckSQLManager: NSObject {
             if needsTemporaryMigration {
                 addTemporaryColumnIfNeeded()
             }
+            if needsSourceAnchorMigration {
+                addSourceAnchorColumnIfNeeded()
+            }
             backfillSemanticEmbeddingsIfNeeded(targetVersion: Self.currentSchemaVersion)
             return
         }
 
-        if needsTemporaryMigration {
-            addTemporaryColumnIfNeeded()
+        if needsTemporaryMigration || needsSourceAnchorMigration {
+            if needsTemporaryMigration {
+                addTemporaryColumnIfNeeded()
+            }
+            if needsSourceAnchorMigration {
+                addSourceAnchorColumnIfNeeded()
+            }
             setSchemaVersion(Self.currentSchemaVersion)
         }
 
@@ -1805,6 +1820,22 @@ final class DeckSQLManager: NSObject {
             guard !columns.contains("is_temporary") else { return }
             try db.run("ALTER TABLE ClipboardHistory ADD COLUMN is_temporary INTEGER NOT NULL DEFAULT 0")
             log.info("Added is_temporary column for temporary items")
+        }
+    }
+
+    private func addSourceAnchorColumnIfNeeded() {
+        withDB {
+            guard let db = self.db else { return }
+            let stmt = try db.prepare("PRAGMA table_info(ClipboardHistory)")
+            var columns: [String] = []
+            while let row = try stmt.failableNext() {
+                if let name = row[1] as? String {
+                    columns.append(name)
+                }
+            }
+            guard !columns.contains("source_anchor") else { return }
+            try db.run("ALTER TABLE ClipboardHistory ADD COLUMN source_anchor TEXT")
+            log.info("Added source_anchor column for IDE anchors")
         }
     }
 
@@ -2481,6 +2512,8 @@ extension DeckSQLManager {
         let encryptedPreviewData: Data?
         let encryptedSearchText: String
         let encryptedAppName: String
+        let encryptedSourceAnchor: String?
+        let encodedSourceAnchor = item.sourceAnchor?.toJSON()
 
         if isSecurityMode {
             guard let data = encryptData(dataToStore),
@@ -2497,11 +2530,18 @@ extension DeckSQLManager {
             encryptedData = data
             encryptedSearchText = searchText
             encryptedAppName = appName
+            if let encodedSourceAnchor {
+                guard let encryptedAnchor = encryptString(encodedSourceAnchor) else { return -1 }
+                encryptedSourceAnchor = encryptedAnchor
+            } else {
+                encryptedSourceAnchor = nil
+            }
         } else {
             encryptedData = dataToStore
             encryptedPreviewData = previewData
             encryptedSearchText = item.searchText
             encryptedAppName = item.appName
+            encryptedSourceAnchor = encodedSourceAnchor
         }
 
         let rowId: Int64? = await withDBAsync {
@@ -2515,6 +2555,7 @@ extension DeckSQLManager {
                 Col.ts <- item.timestamp,
                 Col.appPath <- item.appPath,
                 Col.appName <- encryptedAppName,
+                Col.sourceAnchor <- encryptedSourceAnchor,
                 Col.searchText <- encryptedSearchText,
                 Col.length <- item.contentLength,
                 Col.tagId <- item.tagId,
@@ -2588,6 +2629,8 @@ extension DeckSQLManager {
         let encryptedPreviewData: Data?
         let encryptedSearchText: String
         let encryptedAppName: String
+        let encryptedSourceAnchor: String?
+        let encodedSourceAnchor = item.sourceAnchor?.toJSON()
 
         if DeckUserDefaults.securityModeEnabled {
             guard let data = encryptData(dataToStore),
@@ -2604,11 +2647,18 @@ extension DeckSQLManager {
             encryptedData = data
             encryptedSearchText = searchText
             encryptedAppName = appName
+            if let encodedSourceAnchor {
+                guard let encryptedAnchor = encryptString(encodedSourceAnchor) else { return }
+                encryptedSourceAnchor = encryptedAnchor
+            } else {
+                encryptedSourceAnchor = nil
+            }
         } else {
             encryptedData = dataToStore
             encryptedPreviewData = item.previewData
             encryptedSearchText = item.searchText
             encryptedAppName = item.appName
+            encryptedSourceAnchor = encodedSourceAnchor
         }
 
         if let count: Int = await withDBAsync({
@@ -2622,6 +2672,7 @@ extension DeckSQLManager {
                 Col.ts <- item.timestamp,
                 Col.appPath <- item.appPath,
                 Col.appName <- encryptedAppName,
+                Col.sourceAnchor <- encryptedSourceAnchor,
                 Col.searchText <- encryptedSearchText,
                 Col.length <- item.contentLength,
                 Col.tagId <- item.tagId,
@@ -2638,7 +2689,10 @@ extension DeckSQLManager {
     func updateItemTag(id: Int64, tagId: Int) async {
         if let count: Int = await withDBAsync({
             guard let db = self.db, let table = self.table else { return 0 }
-            let query = table.filter(Col.id == id)
+            var query = table.filter(Col.id == id)
+            if tagId == DeckTag.importantTagId {
+                query = query.filter(Col.isTemporary == false)
+            }
             let update = query.update(Col.tagId <- tagId)
             return try db.run(update)
         }) {
@@ -2649,7 +2703,10 @@ extension DeckSQLManager {
     func updateItemTemporary(id: Int64, isTemporary: Bool) async {
         if let count: Int = await withDBAsync({
             guard let db = self.db, let table = self.table else { return 0 }
-            let query = table.filter(Col.id == id)
+            var query = table.filter(Col.id == id)
+            if isTemporary {
+                query = query.filter(Col.tagId != DeckTag.importantTagId)
+            }
             let update = query.update(Col.isTemporary <- isTemporary)
             return try db.run(update)
         }) {
@@ -3029,6 +3086,7 @@ extension DeckSQLManager {
             let timestamp = try row.get(Col.ts)
             let id = try row.get(Col.id)
             let rawAppName = try row.get(Col.appName)
+            let rawSourceAnchor = (try? row.get(Col.sourceAnchor)) ?? nil
             let appPath = try row.get(Col.appPath)
             let rawPreviewData = try row.get(Col.previewData)
             let rawSearchText = try row.get(Col.searchText)
@@ -3037,7 +3095,13 @@ extension DeckSQLManager {
             let blobPath = try row.get(Col.blobPath)
             let storedUniqueId = try row.get(Col.uniqueId)
             let storedItemType = try row.get(Col.itemType)
-            let isTemporary = (try? row.get(Col.isTemporary)) ?? false
+            let rawIsTemporary = (try? row.get(Col.isTemporary)) ?? false
+            let isTemporary = tagId == DeckTag.importantTagId ? false : rawIsTemporary
+            if tagId == DeckTag.importantTagId && rawIsTemporary {
+                Task { [weak self] in
+                    await self?.updateItemTemporary(id: id, isTemporary: false)
+                }
+            }
             
             // Decrypt data if security mode is enabled
             let shouldDecrypt = isEncrypted ?? DeckUserDefaults.securityModeEnabled
@@ -3045,6 +3109,8 @@ extension DeckSQLManager {
             let previewData = rawPreviewData.map { shouldDecrypt ? decryptData($0) : $0 }
             let searchText = shouldDecrypt ? decryptString(rawSearchText) : rawSearchText
             let appName = shouldDecrypt ? decryptString(rawAppName) : rawAppName
+            let sourceAnchorString = rawSourceAnchor.map { shouldDecrypt ? decryptString($0) : $0 }
+            let sourceAnchor = SourceAnchor.fromJSON(sourceAnchorString)
 
             var inlineData = data
             var dataIsFull = true
@@ -3070,6 +3136,7 @@ extension DeckSQLManager {
                 timestamp: timestamp,
                 appPath: appPath,
                 appName: appName,
+                sourceAnchor: sourceAnchor,
                 searchText: searchText,
                 contentLength: length,
                 tagId: tagId,
@@ -3117,7 +3184,7 @@ extension DeckSQLManager {
             let batchResult: (rows: [Row], count: Int)? = await withDBAsync {
                 guard let db = self.db, let table = self.table else { return ([], 0) }
                 let query = table
-                    .select(Col.id, Col.data, Col.previewData, Col.searchText, Col.appName)
+                    .select(Col.id, Col.data, Col.previewData, Col.searchText, Col.appName, Col.sourceAnchor)
                     .order(Col.id.asc)
                     .limit(batchSize, offset: offset)
                 let rows = Array(try db.prepare(query))
@@ -3143,11 +3210,13 @@ extension DeckSQLManager {
                     let rawPreviewData = try row.get(Col.previewData)
                     let rawSearchText = try row.get(Col.searchText)
                     let rawAppName = try row.get(Col.appName)
+                    let rawSourceAnchor = try row.get(Col.sourceAnchor)
 
                     let newData: Data
                     let newPreviewData: Data?
                     let newSearchText: String
                     let newAppName: String
+                    let newSourceAnchor: String?
 
                     if encrypt {
                         // Encrypting: data is currently unencrypted
@@ -3177,6 +3246,16 @@ extension DeckSQLManager {
                             return false
                         }
                         newAppName = encryptedAppName.base64EncodedString()
+                        if let rawSourceAnchor {
+                            guard let anchorData = rawSourceAnchor.data(using: .utf8),
+                                  let encryptedAnchor = SecurityService.shared.encrypt(anchorData) else {
+                                self.notifyEncryptionFailureIfNeeded()
+                                return false
+                            }
+                            newSourceAnchor = encryptedAnchor.base64EncodedString()
+                        } else {
+                            newSourceAnchor = nil
+                        }
                     } else {
                         // Decrypting: data is currently encrypted
                         newData = SecurityService.shared.decrypt(rawData) ?? rawData
@@ -3195,6 +3274,14 @@ extension DeckSQLManager {
                         } else {
                             newAppName = rawAppName
                         }
+                        if let rawSourceAnchor,
+                           let decoded = Data(base64Encoded: rawSourceAnchor),
+                           let decrypted = SecurityService.shared.decrypt(decoded),
+                           let str = String(data: decrypted, encoding: .utf8) {
+                            newSourceAnchor = str
+                        } else {
+                            newSourceAnchor = rawSourceAnchor
+                        }
                     }
 
                     // Update the row
@@ -3203,7 +3290,8 @@ extension DeckSQLManager {
                         Col.data <- newData,
                         Col.previewData <- newPreviewData,
                         Col.searchText <- newSearchText,
-                        Col.appName <- newAppName
+                        Col.appName <- newAppName,
+                        Col.sourceAnchor <- newSourceAnchor
                     )
                     try db.run(update)
                 }

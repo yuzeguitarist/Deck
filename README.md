@@ -30,10 +30,6 @@
   <img src="https://img.shields.io/badge/status-Free_for_now-brightgreen?style=flat-square" alt="Status">
 </p>
 
-<p align="center">
-  <img src="photos/DeckShow.png" alt="Deck Show" width="720">
-</p>
-
 ---
 
 ## Features (all currently free)
@@ -136,7 +132,7 @@ FAQ (unsigned builds):
 ## Screenshots
 
 <p align="center">
-  <img src="photos/DeckView.png" alt="Deck main view" width="720">
+  <img src="photos/DeckView2.png" alt="Deck main view" width="720">
 </p>
 <p align="center">
   <img src="photos/DeckSettings.jpg" alt="Deck settings" width="720">
@@ -305,7 +301,7 @@ brew install --cask deck
 ## 截图
 
 <p align="center">
-  <img src="photos/DeckView.png" alt="Deck 主界面" width="720">
+  <img src="photos/DeckView2.png" alt="Deck 主界面" width="720">
 </p>
 <p align="center">
   <img src="photos/DeckSettings.jpg" alt="Deck 设置" width="720">
