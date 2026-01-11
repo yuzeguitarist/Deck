@@ -2002,7 +2002,7 @@ final class DeckSQLManager: NSObject {
         }
 
         log.info("Large image migration completed: \(totalMigrated) items migrated")
-        vacuumDatabase(reason: "blob migration")
+        await vacuumDatabase(reason: "blob migration")
         return true
     }
 
@@ -2067,8 +2067,8 @@ final class DeckSQLManager: NSObject {
         }
     }
 
-    private func vacuumDatabase(reason: String) {
-        let didCheckpoint = withDB {
+    private func vacuumDatabase(reason: String) async {
+        let didCheckpoint = await withDBAsync {
             guard let db = self.db else { return false }
             try db.run("PRAGMA wal_checkpoint(TRUNCATE)")
             return true
@@ -2078,7 +2078,7 @@ final class DeckSQLManager: NSObject {
             log.info("WAL checkpoint completed (\(reason))")
         }
 
-        let didVacuum = withDB {
+        let didVacuum = await withDBAsync {
             guard let db = self.db else { return false }
             try db.run("VACUUM")
             return true
@@ -2090,8 +2090,8 @@ final class DeckSQLManager: NSObject {
     }
 
     private func scheduleDatabaseVacuum(reason: String) {
-        Task.detached(priority: .background) { [weak self] in
-            self?.vacuumDatabase(reason: reason)
+        Task(priority: .background) { [weak self] in
+            await self?.vacuumDatabase(reason: reason)
         }
     }
     
@@ -2495,52 +2495,62 @@ extension DeckSQLManager {
             return try db.scalar(table.count)
         } ?? 0
     }
-    
-    func insert(item: ClipboardItem) async -> Int64 {
-        await delete(filter: Col.uniqueId == item.uniqueId)
 
-        // Offload large image payloads to filesystem
+    private struct InsertPayload {
+        let uniqueId: String
+        let pasteboardType: String
+        let itemType: String
+        let data: Data
+        let previewData: Data?
+        let timestamp: Int64
+        let appPath: String
+        let appName: String
+        let sourceAnchor: String?
+        let searchText: String
+        let contentLength: Int
+        let tagId: Int
+        let blobPath: String?
+        let isTemporary: Bool
+        let searchTextPlain: String
+    }
+
+    private func prepareInsertPayload(for item: ClipboardItem) async -> InsertPayload? {
         var dataToStore = item.data
         var blobPath = item.blobPath
         var previewData = item.previewData
         let isSecurityMode = DeckUserDefaults.securityModeEnabled
 
         if item.itemType == .image && item.data.count > Const.largeBlobThreshold {
-            // Store large image to blob storage (auto-encrypts in security mode)
             if let path = BlobStorage.shared.store(data: item.data, uniqueId: item.uniqueId, encrypt: isSecurityMode) {
                 blobPath = path
 
-                // Pre-generate thumbnail for large images if not already present
                 if previewData == nil || previewData!.isEmpty {
                     previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
                     log.debug("Pre-generated thumbnail for large image (\(item.data.count) bytes)")
                 }
 
-                // Avoid storing duplicate preview data in both columns for blob-backed items.
                 dataToStore = Data()
             }
         } else if item.itemType == .image && item.data.count > 50 * 1024 && (previewData == nil || previewData!.isEmpty) {
-            // For medium-sized images (50KB-512KB), also pre-generate thumbnail
             previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
             log.debug("Pre-generated thumbnail for medium image (\(item.data.count) bytes)")
         }
 
-        // Encrypt sensitive data if security mode is enabled
+        let encodedSourceAnchor = item.sourceAnchor?.toJSON()
         let encryptedData: Data
         let encryptedPreviewData: Data?
         let encryptedSearchText: String
         let encryptedAppName: String
         let encryptedSourceAnchor: String?
-        let encodedSourceAnchor = item.sourceAnchor?.toJSON()
 
         if isSecurityMode {
             guard let data = encryptData(dataToStore),
                   let searchText = encryptString(item.searchText),
                   let appName = encryptString(item.appName) else {
-                return -1
+                return nil
             }
             if let previewData = previewData {
-                guard let encryptedPreview = encryptData(previewData) else { return -1 }
+                guard let encryptedPreview = encryptData(previewData) else { return nil }
                 encryptedPreviewData = encryptedPreview
             } else {
                 encryptedPreviewData = nil
@@ -2549,7 +2559,7 @@ extension DeckSQLManager {
             encryptedSearchText = searchText
             encryptedAppName = appName
             if let encodedSourceAnchor {
-                guard let encryptedAnchor = encryptString(encodedSourceAnchor) else { return -1 }
+                guard let encryptedAnchor = encryptString(encodedSourceAnchor) else { return nil }
                 encryptedSourceAnchor = encryptedAnchor
             } else {
                 encryptedSourceAnchor = nil
@@ -2562,33 +2572,121 @@ extension DeckSQLManager {
             encryptedSourceAnchor = encodedSourceAnchor
         }
 
-        let rowId: Int64? = await withDBAsync {
-            guard let db = self.db, let table = self.table else { return -1 }
+        return InsertPayload(
+            uniqueId: item.uniqueId,
+            pasteboardType: item.pasteboardType.rawValue,
+            itemType: item.itemType.rawValue,
+            data: encryptedData,
+            previewData: encryptedPreviewData,
+            timestamp: item.timestamp,
+            appPath: item.appPath,
+            appName: encryptedAppName,
+            sourceAnchor: encryptedSourceAnchor,
+            searchText: encryptedSearchText,
+            contentLength: item.contentLength,
+            tagId: item.tagId,
+            blobPath: blobPath,
+            isTemporary: item.isTemporary,
+            searchTextPlain: item.searchText
+        )
+    }
+    
+    func insert(item: ClipboardItem) async -> Int64 {
+        guard let payload = await prepareInsertPayload(for: item) else { return -1 }
+
+        let result: (rowId: Int64, deleted: Int)? = await withDBAsync {
+            guard let db = self.db, let table = self.table else { return (-1, 0) }
+            let deleteQuery = table.filter(Col.uniqueId == payload.uniqueId)
+            let deleted = try db.run(deleteQuery.delete())
             let insert = table.insert(
-                Col.uniqueId <- item.uniqueId,
-                Col.type <- item.pasteboardType.rawValue,
-                Col.itemType <- item.itemType.rawValue,
-                Col.data <- encryptedData,
-                Col.previewData <- encryptedPreviewData,
-                Col.ts <- item.timestamp,
-                Col.appPath <- item.appPath,
-                Col.appName <- encryptedAppName,
-                Col.sourceAnchor <- encryptedSourceAnchor,
-                Col.searchText <- encryptedSearchText,
-                Col.length <- item.contentLength,
-                Col.tagId <- item.tagId,
-                Col.blobPath <- blobPath,
-                Col.isTemporary <- item.isTemporary
+                Col.uniqueId <- payload.uniqueId,
+                Col.type <- payload.pasteboardType,
+                Col.itemType <- payload.itemType,
+                Col.data <- payload.data,
+                Col.previewData <- payload.previewData,
+                Col.ts <- payload.timestamp,
+                Col.appPath <- payload.appPath,
+                Col.appName <- payload.appName,
+                Col.sourceAnchor <- payload.sourceAnchor,
+                Col.searchText <- payload.searchText,
+                Col.length <- payload.contentLength,
+                Col.tagId <- payload.tagId,
+                Col.blobPath <- payload.blobPath,
+                Col.isTemporary <- payload.isTemporary
             )
-            return try db.run(insert)
+            let rowId = try db.run(insert)
+            return (rowId, deleted)
         }
 
-        if let rowId, rowId > 0 {
-            log.debug("Inserted item with id: \(rowId)")
-            scheduleSemanticEmbeddingUpdate(id: rowId, searchText: item.searchText)
-            return rowId
+        if let result {
+            if result.deleted > 0 {
+                invalidateSearchCache()
+            }
+            if result.rowId > 0 {
+                log.debug("Inserted item with id: \(result.rowId)")
+                scheduleSemanticEmbeddingUpdate(id: result.rowId, searchText: payload.searchTextPlain)
+                return result.rowId
+            }
         }
         return -1
+    }
+
+    func insertBatch(_ items: [ClipboardItem]) async -> [Int64] {
+        guard !items.isEmpty else { return [] }
+
+        var payloads: [InsertPayload] = []
+        payloads.reserveCapacity(items.count)
+        for item in items {
+            if let payload = await prepareInsertPayload(for: item) {
+                payloads.append(payload)
+            }
+        }
+
+        guard !payloads.isEmpty else { return [] }
+
+        let result: (rowIds: [Int64], deleted: Int)? = await withDBAsync {
+            guard let db = self.db, let table = self.table else { return ([], 0) }
+            var rowIds: [Int64] = []
+            var deletedTotal = 0
+
+            try db.transaction {
+                for payload in payloads {
+                    let deleteQuery = table.filter(Col.uniqueId == payload.uniqueId)
+                    deletedTotal += try db.run(deleteQuery.delete())
+                    let insert = table.insert(
+                        Col.uniqueId <- payload.uniqueId,
+                        Col.type <- payload.pasteboardType,
+                        Col.itemType <- payload.itemType,
+                        Col.data <- payload.data,
+                        Col.previewData <- payload.previewData,
+                        Col.ts <- payload.timestamp,
+                        Col.appPath <- payload.appPath,
+                        Col.appName <- payload.appName,
+                        Col.sourceAnchor <- payload.sourceAnchor,
+                        Col.searchText <- payload.searchText,
+                        Col.length <- payload.contentLength,
+                        Col.tagId <- payload.tagId,
+                        Col.blobPath <- payload.blobPath,
+                        Col.isTemporary <- payload.isTemporary
+                    )
+                    rowIds.append(try db.run(insert))
+                }
+            }
+
+            return (rowIds, deletedTotal)
+        }
+
+        guard let result else { return [] }
+        if result.deleted > 0 {
+            invalidateSearchCache()
+        }
+
+        for (index, rowId) in result.rowIds.enumerated() where rowId > 0 {
+            log.debug("Inserted item with id: \(rowId)")
+            scheduleSemanticEmbeddingUpdate(id: rowId, searchText: payloads[index].searchTextPlain)
+        }
+
+        return result.rowIds.filter { $0 > 0 }
     }
     
     func delete(filter: SQLite.Expression<Bool>) async {

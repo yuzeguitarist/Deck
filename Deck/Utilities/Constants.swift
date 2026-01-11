@@ -5,6 +5,7 @@
 //  Deck Clipboard Manager
 //
 
+import Foundation
 import SwiftUI
 
 enum Const {
@@ -21,8 +22,8 @@ enum Const {
     static let topBarHeight: CGFloat = 44.0
     static let settingWidth: CGFloat = {
         // Use wider window for English/German due to longer text
-        let languageCode = Locale.current.language.languageCode?.identifier ?? "zh"
-        return (languageCode == "en" || languageCode == "de") ? 720.0 : 600.0
+        let languageCode = Locale.preferredLanguages.first?.lowercased() ?? ""
+        return (languageCode.hasPrefix("en") || languageCode.hasPrefix("de")) ? 720.0 : 600.0
     }()
     static let settingHeight: CGFloat = 500.0
     
