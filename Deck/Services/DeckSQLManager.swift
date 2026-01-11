@@ -2002,7 +2002,7 @@ final class DeckSQLManager: NSObject {
         }
 
         log.info("Large image migration completed: \(totalMigrated) items migrated")
-        vacuumDatabase()
+        vacuumDatabase(reason: "blob migration")
         return true
     }
 
@@ -2067,13 +2067,31 @@ final class DeckSQLManager: NSObject {
         }
     }
 
-    private func vacuumDatabase() {
-        if withDB({
+    private func vacuumDatabase(reason: String) {
+        let didCheckpoint = withDB {
+            guard let db = self.db else { return false }
+            try db.run("PRAGMA wal_checkpoint(TRUNCATE)")
+            return true
+        } == true
+
+        if didCheckpoint {
+            log.info("WAL checkpoint completed (\(reason))")
+        }
+
+        let didVacuum = withDB {
             guard let db = self.db else { return false }
             try db.run("VACUUM")
             return true
-        }) == true {
-            log.info("Database vacuum completed after blob migration")
+        } == true
+
+        if didVacuum {
+            log.info("Database vacuum completed (\(reason))")
+        }
+    }
+
+    private func scheduleDatabaseVacuum(reason: String) {
+        Task.detached(priority: .background) { [weak self] in
+            self?.vacuumDatabase(reason: reason)
         }
     }
     
@@ -2599,6 +2617,7 @@ extension DeckSQLManager {
         dropVecTables()
         invalidateSearchCache()  // 清空所有搜索缓存
         log.info("Deleted all items from database")
+        scheduleDatabaseVacuum(reason: "delete all")
     }
 
     func delete(id: Int64) async {
