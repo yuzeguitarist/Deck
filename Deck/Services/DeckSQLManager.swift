@@ -3157,6 +3157,14 @@ extension DeckSQLManager {
         } ?? nil
     }
 
+    func fetchRow(uniqueId: String) async -> Row? {
+        return await withDBAsync { () throws -> Row? in
+            guard let db = self.db, let table = self.table else { return nil }
+            let query = table.filter(Col.uniqueId == uniqueId).limit(1)
+            return try db.pluck(query)
+        } ?? nil
+    }
+
     /// Fetch raw data payload for a single item (used for lazy loading).
     func fetchData(for id: Int64, isEncrypted: Bool? = nil) -> Data? {
         return withDB { () -> Data? in

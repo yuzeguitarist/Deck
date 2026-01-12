@@ -56,32 +56,37 @@ final class SecurityService {
         context.localizedCancelTitle = "取消"
         
         var error: NSError?
-        guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
-            log.warn("Biometrics not available: \(error?.localizedDescription ?? "unknown")")
-            return false
+        if context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) {
+            return await evaluate(policy: .deviceOwnerAuthenticationWithBiometrics, reason: reason, context: context)
         }
-        
-        do {
-            let success = try await context.evaluatePolicy(
-                .deviceOwnerAuthenticationWithBiometrics,
-                localizedReason: reason
-            )
-            
-            if success {
-                isAuthenticated = true
-                lastAuthTime = Date()
-            }
-            
-            return success
-        } catch {
-            log.warn("Authentication failed: \(error.localizedDescription)")
-            return false
+
+        if context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) {
+            return await evaluate(policy: .deviceOwnerAuthentication, reason: reason, context: context)
         }
+
+        log.warn("Authentication not available: \(error?.localizedDescription ?? "unknown")")
+        return false
     }
     
     func resetAuthentication() {
         isAuthenticated = false
         lastAuthTime = nil
+    }
+
+    private func evaluate(policy: LAPolicy, reason: String, context: LAContext) async -> Bool {
+        do {
+            let success = try await context.evaluatePolicy(policy, localizedReason: reason)
+
+            if success {
+                isAuthenticated = true
+                lastAuthTime = Date()
+            }
+
+            return success
+        } catch {
+            log.warn("Authentication failed: \(error.localizedDescription)")
+            return false
+        }
     }
     
     // MARK: - Encryption Key Management

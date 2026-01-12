@@ -22,6 +22,8 @@ Deck/Services/*
 !Deck/Services/DataExportService.swift
 !Deck/Services/DeckSQLManager.swift
 !Deck/Services/SecurityService.swift
+!Deck/Services/OrbitBridgeAuth.swift
+!Deck/Services/OrbitCLIBridgeService.swift
 
 # 允许公开的通用工具
 !Deck/Utilities/
