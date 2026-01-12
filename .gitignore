@@ -12,6 +12,10 @@ xcuserdata/
 # 不公开的根部敏感/辅助文档
 cursor-*.md
 
+# Orbit CLI bridge local artifacts (port 53129)
+orbit-bridge-53129*
+OrbitBridge-53129*
+
 # 默认忽略 App 源码
 Deck/*
 
@@ -22,8 +26,6 @@ Deck/Services/*
 !Deck/Services/DataExportService.swift
 !Deck/Services/DeckSQLManager.swift
 !Deck/Services/SecurityService.swift
-!Deck/Services/OrbitBridgeAuth.swift
-!Deck/Services/OrbitCLIBridgeService.swift
 
 # 允许公开的通用工具
 !Deck/Utilities/
