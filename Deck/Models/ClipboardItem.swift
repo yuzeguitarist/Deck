@@ -198,6 +198,28 @@ final class ClipboardItem: Identifiable, Equatable {
         return cachedFilePaths
     }
 
+    private var primaryFilePath: String? {
+        guard let paths = filePaths, let first = paths.first else { return nil }
+        if first.hasPrefix("file://"), let url = URL(string: first) {
+            return url.path
+        }
+        return first
+    }
+
+    var imagePasteboardType: PasteboardType {
+        if pasteboardType.isImage() {
+            return pasteboardType
+        }
+        guard pasteboardType == .fileURL, let path = primaryFilePath else {
+            return .png
+        }
+        let ext = (path as NSString).pathExtension.lowercased()
+        if !ext.isEmpty, let type = UTType(filenameExtension: ext), type.conforms(to: .image) {
+            return PasteboardType(type.identifier)
+        }
+        return .png
+    }
+
     /// OCR text for image items; ignores file path tokens for fileURL images.
     var ocrTextForImage: String? {
         guard itemType == .image || isFileURLImage else { return nil }
@@ -917,6 +939,12 @@ final class ClipboardItem: Identifiable, Equatable {
             // 使用 BlobStorage.load() 自动处理解密
             return BlobStorage.shared.load(path: blobPath)
         }
+        if itemType == .image, pasteboardType == .fileURL, let path = primaryFilePath {
+            let fileURL = URL(fileURLWithPath: path)
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                return try? Data(contentsOf: fileURL)
+            }
+        }
         return loadFullData()
     }
     
@@ -999,7 +1027,8 @@ extension ClipboardItem {
                 return nil
             }
         case .image:
-            provider.registerDataRepresentation(forTypeIdentifier: pasteboardType.rawValue, visibility: .all) { [weak self] completion in
+            let imageType = imagePasteboardType
+            provider.registerDataRepresentation(forTypeIdentifier: imageType.rawValue, visibility: .all) { [weak self] completion in
                 guard let data = self?.resolvedData() else {
                     completion(nil, nil)
                     return nil
@@ -1009,7 +1038,11 @@ extension ClipboardItem {
                 }
                 return nil
             }
-            provider.suggestedName = appName + "-" + timestamp.formattedDate()
+            if pasteboardType == .fileURL, let path = primaryFilePath {
+                provider.suggestedName = URL(fileURLWithPath: path).lastPathComponent
+            } else {
+                provider.suggestedName = appName + "-" + timestamp.formattedDate()
+            }
         case .file:
             if let paths = filePaths {
                 for path in paths {
