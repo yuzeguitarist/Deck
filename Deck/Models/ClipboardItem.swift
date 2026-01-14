@@ -377,22 +377,7 @@ final class ClipboardItem: Identifiable, Equatable {
             resolvedType = .string
             content = plainData
         } else if type.isFile() {
-            // 从 propertyList 读取，避免 NSSecureCoding 解码警告
-            if let urlStrings = pasteboard.propertyList(forType: .fileURL) as? [String] {
-                filePaths = urlStrings.compactMap { URL(string: $0)?.path }
-            } else if let urlString = pasteboard.propertyList(forType: .fileURL) as? String,
-                      let url = URL(string: urlString) {
-                filePaths = [url.path]
-            } else if let urlString = item.string(forType: .fileURL),
-                      let url = URL(string: urlString) {
-                filePaths = [url.path]
-            } else if let data = item.data(forType: .fileURL),
-                      let urlString = String(data: data, encoding: .utf8) {
-                // 方法 2: 从 data 解析
-                filePaths = urlString.components(separatedBy: "\n")
-                    .compactMap { URL(string: $0)?.path }
-                    .filter { !$0.isEmpty }
-            }
+            filePaths = Self.filePaths(from: pasteboard, item: item)
 
             guard !filePaths.isEmpty else { return nil }
 
@@ -465,6 +450,53 @@ final class ClipboardItem: Identifiable, Equatable {
             contentLength: length,
             tagId: -1
         )
+    }
+
+    private static func filePaths(from pasteboard: NSPasteboard, item: NSPasteboardItem) -> [String] {
+        if let urls = pasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [NSURL] {
+            let paths = urls.compactMap { $0.path }.filter { !$0.isEmpty }
+            if !paths.isEmpty {
+                return paths
+            }
+        }
+
+        if let urlStrings = pasteboard.propertyList(forType: .fileURL) as? [String] {
+            let paths = urlStrings.compactMap { resolveFilePathToken($0) }
+            if !paths.isEmpty {
+                return paths
+            }
+        } else if let urlString = pasteboard.propertyList(forType: .fileURL) as? String,
+                  let path = resolveFilePathToken(urlString) {
+            return [path]
+        }
+
+        if let urlString = item.string(forType: .fileURL),
+           let path = resolveFilePathToken(urlString) {
+            return [path]
+        }
+
+        if let data = item.data(forType: .fileURL),
+           let urlString = String(data: data, encoding: .utf8) {
+            let paths = urlString.components(separatedBy: "\n")
+                .compactMap { resolveFilePathToken($0) }
+            if !paths.isEmpty {
+                return paths
+            }
+        }
+
+        return []
+    }
+
+    private static func resolveFilePathToken(_ token: String) -> String? {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.hasPrefix("file://"), let url = URL(string: trimmed) {
+            return url.path
+        }
+        return trimmed
     }
 
     private static let microsoftSourcePrefix = "com.microsoft.ole.source."
