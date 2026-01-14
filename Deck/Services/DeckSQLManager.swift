@@ -586,6 +586,52 @@ final class DeckSQLManager: NSObject {
     }
 
     private func extractDBErrorDetails(_ error: Error) -> DBErrorDetails {
+        if let sqliteError = error as? SQLite.Result {
+            switch sqliteError {
+            case let .error(message, code, statement):
+                let debug = sqliteDebugMessage(message: message, statement: statement, extra: nil)
+                let criticalCodes: Set<Int32> = [
+                    SQLITE_IOERR,
+                    SQLITE_CORRUPT,
+                    SQLITE_NOTADB,
+                    SQLITE_READONLY,
+                    SQLITE_CANTOPEN,
+                    SQLITE_FULL
+                ]
+                return DBErrorDetails(
+                    message: message,
+                    debug: debug,
+                    domain: "SQLite.Result",
+                    code: code,
+                    isSQLiteDomain: true,
+                    isCriticalSQLiteCode: criticalCodes.contains(code)
+                )
+            case let .extendedError(message, extendedCode, statement):
+                let primaryCode = extendedCode & 0xFF
+                let debug = sqliteDebugMessage(
+                    message: message,
+                    statement: statement,
+                    extra: "extended_code=\(extendedCode)"
+                )
+                let criticalCodes: Set<Int32> = [
+                    SQLITE_IOERR,
+                    SQLITE_CORRUPT,
+                    SQLITE_NOTADB,
+                    SQLITE_READONLY,
+                    SQLITE_CANTOPEN,
+                    SQLITE_FULL
+                ]
+                return DBErrorDetails(
+                    message: message,
+                    debug: debug,
+                    domain: "SQLite.Result",
+                    code: primaryCode,
+                    isSQLiteDomain: true,
+                    isCriticalSQLiteCode: criticalCodes.contains(primaryCode)
+                )
+            }
+        }
+
         let nsError = error as NSError
         let domain = nsError.domain
         let code = Int32(nsError.code)
@@ -609,6 +655,21 @@ final class DeckSQLManager: NSObject {
             isSQLiteDomain: isSQLiteDomain,
             isCriticalSQLiteCode: isCriticalSQLiteCode
         )
+    }
+
+    private func sqliteDebugMessage(
+        message: String,
+        statement: SQLite.Statement?,
+        extra: String?
+    ) -> String {
+        var parts: [String] = [message]
+        if let statement {
+            parts.append("sql=\(statement)")
+        }
+        if let extra, !extra.isEmpty {
+            parts.append(extra)
+        }
+        return parts.joined(separator: " | ")
     }
 
     /// 发送数据库错误通知
@@ -889,6 +950,7 @@ final class DeckSQLManager: NSObject {
         vecLegacyTableCleaned = false
         vecMissingDimensionLogged.removeAll()
         db = try Connection(dbPath)
+        db?.usesExtendedErrorCodes = true
         db?.busyTimeout = 5.0
         if let db = db {
             // Use a modest mmap size to reduce read overhead without inflating heap usage.
@@ -898,6 +960,11 @@ final class DeckSQLManager: NSObject {
                 log.debug("Failed to set mmap_size: \(error.localizedDescription)")
             }
         }
+        let libVersion = String(cString: sqlite3_libversion())
+        let hasCodec = sqlite3_compileoption_used("SQLITE_HAS_CODEC") != 0
+        let hasFTS5 = sqlite3_compileoption_used("ENABLE_FTS5") != 0
+        let isReadonly = db?.readonly ?? false
+        log.info("SQLite ready (lib=\(libVersion), hasCodec=\(hasCodec), fts5=\(hasFTS5), readonly=\(isReadonly))")
         initializeSQLiteVecOnConnection()
         loadSQLiteVecExtensionIfAvailable()
     }
@@ -1556,6 +1623,9 @@ final class DeckSQLManager: NSObject {
                         try db.run(defaultSQL)
                     } catch {
                         log.error("Failed to create FTS5 table: \(error.localizedDescription)")
+                        if shouldDisableFTS(for: error) {
+                            disableFTS5(reason: error.localizedDescription)
+                        }
                         return
                     }
                 }
@@ -1564,6 +1634,9 @@ final class DeckSQLManager: NSObject {
                     try db.run(defaultSQL)
                 } catch {
                     log.error("Failed to create FTS5 table: \(error.localizedDescription)")
+                    if shouldDisableFTS(for: error) {
+                        disableFTS5(reason: error.localizedDescription)
+                    }
                     return
                 }
             }
@@ -1594,6 +1667,9 @@ final class DeckSQLManager: NSObject {
                 """)
             } catch {
                 log.error("Failed to create FTS5 triggers: \(error.localizedDescription)")
+                if shouldDisableFTS(for: error) {
+                    disableFTS5(reason: error.localizedDescription)
+                }
             }
 
             ftsUsesTrigram = createdWithTrigram
@@ -1602,6 +1678,27 @@ final class DeckSQLManager: NSObject {
         updateFTSTokenizerState()
         let usesTrigram = syncOnDBQueue { ftsUsesTrigram }
         log.info("FTS5 table and triggers created successfully (trigram=\(usesTrigram))")
+    }
+
+    private func shouldDisableFTS(for error: Error) -> Bool {
+        let message = error.localizedDescription.lowercased()
+        return message.contains("no such module: fts5")
+    }
+
+    private func disableFTS5(reason: String) {
+        syncOnDBQueue {
+            guard let db = db else { return }
+            do {
+                try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_ai")
+                try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_ad")
+                try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_au")
+                try db.run("DROP TABLE IF EXISTS ClipboardHistory_fts")
+                ftsUsesTrigram = false
+                log.warn("FTS5 disabled due to error: \(reason)")
+            } catch {
+                log.warn("Failed to disable FTS5 after error: \(error.localizedDescription)")
+            }
+        }
     }
 
     private func createEmbeddingTable() {
