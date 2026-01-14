@@ -208,6 +208,7 @@ import Foundation
 import SQLite
 import SQLite3
 import Darwin
+import Accelerate
 
 enum Col {
     static let id = Expression<Int64>("id")
@@ -366,7 +367,7 @@ final class DeckSQLManager: NSObject {
     // MARK: - Search Cache (搜索缓存 - 安全模式优化)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
-    /// 搜索缓存：避免重复解密和 lowercased 转换（仅安全模式下有效）
+    /// 搜索缓存：避免重复解密和 lowercased 转换（安全模式下会在失焦时清空）
     /// - Key: row.id (NSNumber)
     /// - Value: SearchCacheEntry (解密且小写化后的 searchText + appName)
     /// - Limit: 300 条（平衡性能与内存占用）
@@ -383,6 +384,15 @@ final class DeckSQLManager: NSObject {
         super.init()
         dbQueue.setSpecific(key: dbQueueKey, value: ())
         errorStateQueue.setSpecific(key: errorStateQueueKey, value: ())
+
+        // Security mode keeps some plaintext in memory caches (lowercased search strings). Clear them when inactive.
+        NotificationCenter.default.addObserver(self, selector: #selector(handleSensitiveCacheInvalidation), name: NSApplication.willResignActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(handleSensitiveCacheInvalidation), name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
+    }
+
+    @objc private func handleSensitiveCacheInvalidation() {
+        guard DeckUserDefaults.securityModeEnabled else { return }
+        invalidateSearchCache()
     }
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -586,52 +596,6 @@ final class DeckSQLManager: NSObject {
     }
 
     private func extractDBErrorDetails(_ error: Error) -> DBErrorDetails {
-        if let sqliteError = error as? SQLite.Result {
-            switch sqliteError {
-            case let .error(message, code, statement):
-                let debug = sqliteDebugMessage(message: message, statement: statement, extra: nil)
-                let criticalCodes: Set<Int32> = [
-                    SQLITE_IOERR,
-                    SQLITE_CORRUPT,
-                    SQLITE_NOTADB,
-                    SQLITE_READONLY,
-                    SQLITE_CANTOPEN,
-                    SQLITE_FULL
-                ]
-                return DBErrorDetails(
-                    message: message,
-                    debug: debug,
-                    domain: "SQLite.Result",
-                    code: code,
-                    isSQLiteDomain: true,
-                    isCriticalSQLiteCode: criticalCodes.contains(code)
-                )
-            case let .extendedError(message, extendedCode, statement):
-                let primaryCode = extendedCode & 0xFF
-                let debug = sqliteDebugMessage(
-                    message: message,
-                    statement: statement,
-                    extra: "extended_code=\(extendedCode)"
-                )
-                let criticalCodes: Set<Int32> = [
-                    SQLITE_IOERR,
-                    SQLITE_CORRUPT,
-                    SQLITE_NOTADB,
-                    SQLITE_READONLY,
-                    SQLITE_CANTOPEN,
-                    SQLITE_FULL
-                ]
-                return DBErrorDetails(
-                    message: message,
-                    debug: debug,
-                    domain: "SQLite.Result",
-                    code: primaryCode,
-                    isSQLiteDomain: true,
-                    isCriticalSQLiteCode: criticalCodes.contains(primaryCode)
-                )
-            }
-        }
-
         let nsError = error as NSError
         let domain = nsError.domain
         let code = Int32(nsError.code)
@@ -655,21 +619,6 @@ final class DeckSQLManager: NSObject {
             isSQLiteDomain: isSQLiteDomain,
             isCriticalSQLiteCode: isCriticalSQLiteCode
         )
-    }
-
-    private func sqliteDebugMessage(
-        message: String,
-        statement: SQLite.Statement?,
-        extra: String?
-    ) -> String {
-        var parts: [String] = [message]
-        if let statement {
-            parts.append("sql=\(statement)")
-        }
-        if let extra, !extra.isEmpty {
-            parts.append(extra)
-        }
-        return parts.joined(separator: " | ")
     }
 
     /// 发送数据库错误通知
@@ -950,7 +899,6 @@ final class DeckSQLManager: NSObject {
         vecLegacyTableCleaned = false
         vecMissingDimensionLogged.removeAll()
         db = try Connection(dbPath)
-        db?.usesExtendedErrorCodes = true
         db?.busyTimeout = 5.0
         if let db = db {
             // Use a modest mmap size to reduce read overhead without inflating heap usage.
@@ -960,11 +908,6 @@ final class DeckSQLManager: NSObject {
                 log.debug("Failed to set mmap_size: \(error.localizedDescription)")
             }
         }
-        let libVersion = String(cString: sqlite3_libversion())
-        let hasCodec = sqlite3_compileoption_used("SQLITE_HAS_CODEC") != 0
-        let hasFTS5 = sqlite3_compileoption_used("ENABLE_FTS5") != 0
-        let isReadonly = db?.readonly ?? false
-        log.info("SQLite ready (lib=\(libVersion), hasCodec=\(hasCodec), fts5=\(hasFTS5), readonly=\(isReadonly))")
         initializeSQLiteVecOnConnection()
         loadSQLiteVecExtensionIfAvailable()
     }
@@ -1472,19 +1415,22 @@ final class DeckSQLManager: NSObject {
     ) async -> [Row] {
         guard let regex = RegexCache.shared.regex(for: pattern) else { return [] }
 
-        var matchingRows: [Row] = []
+        var matchingIds: [Int64] = []
         let batchSize = 500
         var offset = 0
         let maxScan = 5000  // 安全模式下最多扫描 5000 条
 
-        while matchingRows.count < limit && offset < maxScan {
+        while matchingIds.count < limit && offset < maxScan {
             // 支持任务取消
             guard !Task.isCancelled else { break }
 
             let rows: [Row] = await withDBAsync {
                 guard let db = self.db, let table = self.table else { return [] }
                 // 构建基础查询
-                var query = table.order(Col.ts.desc).limit(batchSize, offset: offset)
+                var query = table
+                    .select(Col.id, Col.searchText)
+                    .order(Col.ts.desc)
+                    .limit(batchSize, offset: offset)
 
                 if let types = typeFilter, !types.isEmpty {
                     let typeCondition = types.map { Col.itemType == $0 }.reduce(
@@ -1506,16 +1452,17 @@ final class DeckSQLManager: NSObject {
             if rows.isEmpty { break }
 
             for row in rows {
-                guard matchingRows.count < limit else { break }
+                guard matchingIds.count < limit else { break }
                 guard !Task.isCancelled else { break }
 
                 do {
+                    let id = try row.get(Col.id)
                     let rawSearchText = try row.get(Col.searchText)
                     let searchText = decryptString(rawSearchText)
 
                     let range = NSRange(searchText.startIndex..., in: searchText)
                     if regex.firstMatch(in: searchText, range: range) != nil {
-                        matchingRows.append(row)
+                        matchingIds.append(id)
                     }
                 } catch {
                     continue
@@ -1531,11 +1478,41 @@ final class DeckSQLManager: NSObject {
             await Task.yield()
         }
 
-        if offset >= maxScan && matchingRows.count < limit {
+        if offset >= maxScan && matchingIds.count < limit {
             log.info("Security mode regex search reached scan limit (\(maxScan) items), results may be incomplete")
         }
 
-        return matchingRows
+        guard !matchingIds.isEmpty else { return [] }
+
+        let fullRows: [Row] = await withDBAsync {
+            guard let db = self.db, let table = self.table else { return [] }
+            var query = table.filter(matchingIds.contains(Col.id))
+
+            if let types = typeFilter, !types.isEmpty {
+                let typeCondition = types.map { Col.itemType == $0 }.reduce(
+                    Expression<Bool>(value: false)
+                ) { result, condition in
+                    result || condition
+                }
+                query = query.filter(typeCondition)
+            }
+
+            if let tagId = tagId, tagId != -1 {
+                query = query.filter(Col.tagId == tagId)
+            }
+
+            return Array(try db.prepare(query))
+        } ?? []
+
+        var rowsById: [Int64: Row] = [:]
+        rowsById.reserveCapacity(fullRows.count)
+        for row in fullRows {
+            if let id = try? row.get(Col.id) {
+                rowsById[id] = row
+            }
+        }
+
+        return matchingIds.compactMap { rowsById[$0] }
     }
 
     private func createTable() {
@@ -1623,9 +1600,6 @@ final class DeckSQLManager: NSObject {
                         try db.run(defaultSQL)
                     } catch {
                         log.error("Failed to create FTS5 table: \(error.localizedDescription)")
-                        if shouldDisableFTS(for: error) {
-                            disableFTS5(reason: error.localizedDescription)
-                        }
                         return
                     }
                 }
@@ -1634,9 +1608,6 @@ final class DeckSQLManager: NSObject {
                     try db.run(defaultSQL)
                 } catch {
                     log.error("Failed to create FTS5 table: \(error.localizedDescription)")
-                    if shouldDisableFTS(for: error) {
-                        disableFTS5(reason: error.localizedDescription)
-                    }
                     return
                 }
             }
@@ -1667,9 +1638,6 @@ final class DeckSQLManager: NSObject {
                 """)
             } catch {
                 log.error("Failed to create FTS5 triggers: \(error.localizedDescription)")
-                if shouldDisableFTS(for: error) {
-                    disableFTS5(reason: error.localizedDescription)
-                }
             }
 
             ftsUsesTrigram = createdWithTrigram
@@ -1678,27 +1646,6 @@ final class DeckSQLManager: NSObject {
         updateFTSTokenizerState()
         let usesTrigram = syncOnDBQueue { ftsUsesTrigram }
         log.info("FTS5 table and triggers created successfully (trigram=\(usesTrigram))")
-    }
-
-    private func shouldDisableFTS(for error: Error) -> Bool {
-        let message = error.localizedDescription.lowercased()
-        return message.contains("no such module: fts5")
-    }
-
-    private func disableFTS5(reason: String) {
-        syncOnDBQueue {
-            guard let db = db else { return }
-            do {
-                try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_ai")
-                try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_ad")
-                try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_au")
-                try db.run("DROP TABLE IF EXISTS ClipboardHistory_fts")
-                ftsUsesTrigram = false
-                log.warn("FTS5 disabled due to error: \(reason)")
-            } catch {
-                log.warn("Failed to disable FTS5 after error: \(error.localizedDescription)")
-            }
-        }
     }
 
     private func createEmbeddingTable() {
@@ -2327,17 +2274,13 @@ extension DeckSQLManager {
 
     private func normalizeVector(_ vector: [Float]) -> [Float] {
         guard !vector.isEmpty else { return vector }
-        var sum: Double = 0
-        for value in vector {
-            sum += Double(value) * Double(value)
-        }
-        let norm = sqrt(sum)
-        guard norm.isFinite, norm > 0 else { return vector }
-        let scale = Float(1.0 / norm)
+        var sumSquares: Float = 0
+        vDSP_svesq(vector, 1, &sumSquares, vDSP_Length(vector.count))
+        let norm = sqrt(sumSquares)
+        guard norm > 0 else { return vector }
         var normalized = vector
-        for index in normalized.indices {
-            normalized[index] *= scale
-        }
+        var scale = Float(1.0) / norm
+        vDSP_vsmul(normalized, 1, &scale, &normalized, 1, vDSP_Length(normalized.count))
         return normalized
     }
 
@@ -2514,7 +2457,7 @@ extension DeckSQLManager {
     // MARK: - Search Cache Helpers
 
     /// 获取缓存的搜索字符串，如果未缓存则解密并缓存
-    /// 安全模式下禁用缓存，避免明文在内存中长时间暴露
+    /// 安全模式下也使用缓存，但会在失焦/会话切换时清空以降低明文驻留
     /// - Parameters:
     ///   - id: 行 ID
     ///   - rawSearchText: 原始搜索文本（可能已加密）
@@ -2527,18 +2470,6 @@ extension DeckSQLManager {
         appName: String,
         isSecurityMode: Bool
     ) -> SearchCacheEntry {
-        // 安全模式下不使用缓存，避免明文在内存中长时间暴露
-        // 每次请求都实时解密，虽然性能略低但更安全
-        if isSecurityMode {
-            let searchText = decryptString(rawSearchText)
-            let resolvedAppName = decryptString(appName)
-            return SearchCacheEntry(
-                searchText: searchText.lowercased(),
-                appName: resolvedAppName.lowercased()
-            )
-        }
-
-        // 非安全模式下使用缓存优化性能
         let cacheKey = NSNumber(value: id)
 
         // 尝试从缓存获取
@@ -2546,10 +2477,20 @@ extension DeckSQLManager {
             return cached
         }
 
+        let resolvedSearchText: String
+        let resolvedAppName: String
+        if isSecurityMode {
+            resolvedSearchText = decryptString(rawSearchText)
+            resolvedAppName = decryptString(appName)
+        } else {
+            resolvedSearchText = rawSearchText
+            resolvedAppName = appName
+        }
+
         // 缓存未命中，小写化后存入缓存
         let entry = SearchCacheEntry(
-            searchText: rawSearchText.lowercased(),
-            appName: appName.lowercased()
+            searchText: resolvedSearchText.lowercased(),
+            appName: resolvedAppName.lowercased()
         )
 
         searchTextCache.setObject(entry, forKey: cacheKey)

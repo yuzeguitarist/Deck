@@ -17,6 +17,14 @@ final class SecurityService {
     private var isAuthenticated = false
     private var lastAuthTime: Date?
     private let authTimeout: TimeInterval = 300 // 5 minutes
+
+    // MARK: - Encryption Key Cache
+    /// Cache the resolved encryption key in memory to avoid hitting Keychain on every encrypt/decrypt.
+    /// Keep the TTL short to limit how long key material lives in RAM.
+    private let encryptionKeyCacheTTL: TimeInterval = 60
+    private let encryptionKeyLock = NSLock()
+    private var cachedEncryptionKey: SymmetricKey?
+    private var cachedEncryptionKeyLastAccess: Date?
     
     private init() {}
     
@@ -71,6 +79,8 @@ final class SecurityService {
     func resetAuthentication() {
         isAuthenticated = false
         lastAuthTime = nil
+        // Reduce lifetime of key material in memory when user is no longer authenticated.
+        clearCachedEncryptionKey()
     }
 
     private func evaluate(policy: LAPolicy, reason: String, context: LAContext) async -> Bool {
@@ -93,11 +103,46 @@ final class SecurityService {
     
     private let keychainService = "com.deck.encryption"
     private let keychainAccount = "master-key"
+
+    // MARK: - In-Memory Key Cache
+    private func cachedKeyIfValid(now: Date = Date()) -> SymmetricKey? {
+        encryptionKeyLock.lock()
+        defer { encryptionKeyLock.unlock() }
+        guard let key = cachedEncryptionKey,
+              let lastAccess = cachedEncryptionKeyLastAccess,
+              now.timeIntervalSince(lastAccess) < encryptionKeyCacheTTL else {
+            return nil
+        }
+        // Touch access time so bursts of encrypt/decrypt keep the key warm.
+        cachedEncryptionKeyLastAccess = now
+        return key
+    }
+
+    private func cacheKey(_ key: SymmetricKey, now: Date = Date()) {
+        encryptionKeyLock.lock()
+        cachedEncryptionKey = key
+        cachedEncryptionKeyLastAccess = now
+        encryptionKeyLock.unlock()
+    }
+
+    private func clearCachedEncryptionKey() {
+        encryptionKeyLock.lock()
+        cachedEncryptionKey = nil
+        cachedEncryptionKeyLastAccess = nil
+        encryptionKeyLock.unlock()
+    }
     
     func getOrCreateEncryptionKey() -> SymmetricKey? {
+        // Fast path: return cached key (avoids Keychain round-trips during heavy encrypt/decrypt bursts).
+        if let cached = cachedKeyIfValid() {
+            return cached
+        }
+
         // Try to get existing key from Keychain
         if let keyData = getKeyFromKeychain() {
-            return SymmetricKey(data: keyData)
+            let key = SymmetricKey(data: keyData)
+            cacheKey(key)
+            return key
         }
         
         // Generate new key
@@ -106,6 +151,7 @@ final class SecurityService {
         
         // Save to Keychain with biometric protection
         if saveKeyToKeychain(keyData) {
+            cacheKey(key)
             return key
         }
         
@@ -181,6 +227,7 @@ final class SecurityService {
             kSecAttrAccount as String: keychainAccount
         ]
         SecItemDelete(query as CFDictionary)
+        clearCachedEncryptionKey()
     }
     
     // MARK: - Data Encryption/Decryption
