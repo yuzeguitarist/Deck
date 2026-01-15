@@ -10,6 +10,32 @@ import AppKit
 import Foundation
 import JavaScriptCore
 import CryptoKit
+import Darwin
+
+private typealias JSGlobalContextGetGroupFunc = @convention(c) (JSGlobalContextRef?) -> JSContextGroupRef?
+private typealias JSContextGroupSetExecutionTimeLimitCallback = @convention(c) (JSContextRef?, JSValueRef?) -> Bool
+private typealias JSContextGroupSetExecutionTimeLimitFunc = @convention(c) (JSContextGroupRef?, Double, JSContextGroupSetExecutionTimeLimitCallback?, UnsafeMutableRawPointer?) -> Void
+
+private enum JSExecutionTimeLimiter {
+    static let handle: UnsafeMutableRawPointer? = dlopen(
+        "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore",
+        RTLD_NOW
+    )
+
+    static let getGroup: JSGlobalContextGetGroupFunc? = {
+        guard let handle, let symbol = dlsym(handle, "JSGlobalContextGetGroup") else { return nil }
+        return unsafeBitCast(symbol, to: JSGlobalContextGetGroupFunc.self)
+    }()
+
+    static let setLimit: JSContextGroupSetExecutionTimeLimitFunc? = {
+        guard let handle, let symbol = dlsym(handle, "JSContextGroupSetExecutionTimeLimit") else { return nil }
+        return unsafeBitCast(symbol, to: JSContextGroupSetExecutionTimeLimitFunc.self)
+    }()
+
+    static let callback: JSContextGroupSetExecutionTimeLimitCallback = { _, _ in
+        true
+    }
+}
 
 // MARK: - Script Plugin Model
 
@@ -453,8 +479,7 @@ final class ScriptPluginService {
     }
 
     /// 带超时的脚本执行
-    /// 注意：JavaScriptCore 没有真正的中断机制，死循环脚本会继续在后台运行直到完成
-    /// 但超时后会立即返回错误，不会阻塞调用者
+    /// 注意：执行超时后会中断 JS 运行，避免死循环长期占用执行队列
     private func executeScriptWithTimeout(plugin: ScriptPlugin, input: String) -> ScriptResult {
         let timeout = TimeInterval(DeckUserDefaults.scriptTimeout)
         let executionId = UUID().uuidString
@@ -503,7 +528,12 @@ final class ScriptPluginService {
                 return
             }
             
-            let result = self.executeScript(plugin: plugin, input: input, executionState: executionState)
+            let result = self.executeScript(
+                plugin: plugin,
+                input: input,
+                executionState: executionState,
+                timeout: timeout
+            )
             resultBox.setResult(result)
             semaphore.signal()
         }
@@ -518,8 +548,7 @@ final class ScriptPluginService {
             executionState.markInterrupted()
             finishTask(executionId)
             
-            log.warn("Script \(plugin.id) execution timed out after \(Int(timeout)) seconds. " +
-                     "Note: The script may continue running in background until completion.")
+            log.warn("Script \(plugin.id) execution timed out after \(Int(timeout)) seconds.")
             
             return ScriptResult(
                 success: false,
@@ -534,10 +563,15 @@ final class ScriptPluginService {
     }
 
     /// 执行脚本（内部方法，不带安全检查）
-    private func executeScript(plugin: ScriptPlugin, input: String, executionState: ExecutionState) -> ScriptResult {
+    private func executeScript(
+        plugin: ScriptPlugin,
+        input: String,
+        executionState: ExecutionState,
+        timeout: TimeInterval
+    ) -> ScriptResult {
         // 每次执行都创建新的 JSContext，确保干净的执行环境
         // 这样超时后旧的 context 会被丢弃，不影响后续执行
-        guard let context = createContext(for: plugin, executionState: executionState) else {
+        guard let context = createContext(for: plugin, executionState: executionState, timeout: timeout) else {
             return ScriptResult(success: false, output: nil, error: "无法创建 JavaScript 环境")
         }
 
@@ -576,8 +610,20 @@ final class ScriptPluginService {
     }
 
     /// 创建 JSContext
-    private func createContext(for plugin: ScriptPlugin, executionState: ExecutionState) -> JSContext? {
-        guard let context = JSContext() else { return nil }
+    private func createContext(
+        for plugin: ScriptPlugin,
+        executionState: ExecutionState,
+        timeout: TimeInterval
+    ) -> JSContext? {
+        let vm = JSVirtualMachine()
+        guard let context = JSContext(virtualMachine: vm) else { return nil }
+
+        if let getGroup = JSExecutionTimeLimiter.getGroup,
+           let setLimit = JSExecutionTimeLimiter.setLimit,
+           let group = getGroup(context.jsGlobalContextRef) {
+            let timeLimit = max(1, timeout)
+            setLimit(group, timeLimit, JSExecutionTimeLimiter.callback, nil)
+        }
 
         // 设置异常处理
         context.exceptionHandler = { _, exception in

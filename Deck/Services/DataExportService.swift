@@ -203,17 +203,20 @@ final class DataExportService {
                 let fileSize = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64 ?? 0
                 let isLargeFile = fileSize > 50 * 1024 * 1024  // > 50MB
 
-                let data: Data
-                if isLargeFile {
-                    // 使用内存映射读取大文件
-                    data = try Data(contentsOf: url, options: .mappedIfSafe)
-                    log.info("Importing large file (\(fileSize / 1024 / 1024) MB) using memory-mapped IO")
-                } else {
-                    data = try Data(contentsOf: url)
-                }
-
                 let decoder = JSONDecoder()
                 decoder.dateDecodingStrategy = .iso8601
+                
+                if isLargeFile {
+                    log.info("Importing large file (\(fileSize / 1024 / 1024) MB) using streaming parser")
+                    let importedCount = try await importLargeExport(from: url, decoder: decoder)
+                    await DeckDataStore.shared.loadInitialData()
+                    await MainActor.run {
+                        completion(.success(importedCount))
+                    }
+                    return
+                }
+
+                let data = try Data(contentsOf: url)
                 let exportData = try decoder.decode(ExportData.self, from: data)
 
                 // 批量导入并显示进度
@@ -260,6 +263,162 @@ final class DataExportService {
                 }
             }
         }
+    }
+
+    private func importLargeExport(from url: URL, decoder: JSONDecoder) async throws -> Int {
+        enum ParseState {
+            case seekingItemsKey
+            case seekingArrayStart
+            case readingItems
+            case done
+        }
+
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+
+        let itemsKey = Data(#""items""#.utf8)
+        let openBrace = UInt8(ascii: "{")
+        let closeBrace = UInt8(ascii: "}")
+        let openBracket = UInt8(ascii: "[")
+        let closeBracket = UInt8(ascii: "]")
+        let quote = UInt8(ascii: "\"")
+        let backslash = UInt8(ascii: "\\")
+
+        let chunkSize = 64 * 1024
+        let batchSize = 50
+
+        var buffer = Data()
+        var state: ParseState = .seekingItemsKey
+        var objectBuffer = Data()
+        var inString = false
+        var isEscaped = false
+        var depth = 0
+        var importedCount = 0
+        var reachedEOF = false
+
+        while !reachedEOF || !buffer.isEmpty {
+            if !reachedEOF && buffer.count < chunkSize {
+                let chunk = try handle.read(upToCount: chunkSize) ?? Data()
+                if chunk.isEmpty {
+                    reachedEOF = true
+                } else {
+                    buffer.append(chunk)
+                }
+            }
+
+            var madeProgress = false
+
+            switch state {
+            case .seekingItemsKey:
+                if let range = buffer.range(of: itemsKey) {
+                    let removeCount = buffer.distance(from: buffer.startIndex, to: range.upperBound)
+                    buffer.removeFirst(removeCount)
+                    state = .seekingArrayStart
+                    madeProgress = true
+                } else if buffer.count > itemsKey.count {
+                    buffer = buffer.suffix(itemsKey.count - 1)
+                    madeProgress = true
+                }
+
+            case .seekingArrayStart:
+                if let idx = buffer.firstIndex(of: openBracket) {
+                    let removeCount = buffer.distance(from: buffer.startIndex, to: idx) + 1
+                    buffer.removeFirst(removeCount)
+                    state = .readingItems
+                    madeProgress = true
+                } else if buffer.count > 1 {
+                    buffer = buffer.suffix(1)
+                    madeProgress = true
+                }
+
+            case .readingItems:
+                var cursor = 0
+                while cursor < buffer.count {
+                    let byte = buffer[cursor]
+                    if depth == 0 {
+                        if byte == openBrace {
+                            depth = 1
+                            inString = false
+                            isEscaped = false
+                            objectBuffer.removeAll(keepingCapacity: true)
+                            objectBuffer.append(byte)
+                        } else if byte == closeBracket {
+                            state = .done
+                            cursor += 1
+                            break
+                        }
+                    } else {
+                        objectBuffer.append(byte)
+                        if inString {
+                            if isEscaped {
+                                isEscaped = false
+                            } else if byte == backslash {
+                                isEscaped = true
+                            } else if byte == quote {
+                                inString = false
+                            }
+                        } else {
+                            if byte == quote {
+                                inString = true
+                            } else if byte == openBrace {
+                                depth += 1
+                            } else if byte == closeBrace {
+                                depth -= 1
+                                if depth == 0 {
+                                    let exportItem = try decoder.decode(ExportItem.self, from: objectBuffer)
+                                    let item = ClipboardItem(
+                                        pasteboardType: PasteboardType(exportItem.type),
+                                        data: exportItem.data,
+                                        previewData: exportItem.previewData,
+                                        timestamp: exportItem.timestamp,
+                                        appPath: exportItem.appPath,
+                                        appName: exportItem.appName,
+                                        sourceAnchor: exportItem.sourceAnchor,
+                                        searchText: exportItem.searchText,
+                                        contentLength: exportItem.contentLength,
+                                        tagId: exportItem.tagId,
+                                        isTemporary: exportItem.isTemporary ?? false,
+                                        uniqueId: exportItem.uniqueId
+                                    )
+                                    _ = await DeckSQLManager.shared.insert(item: item)
+                                    importedCount += 1
+
+                                    if importedCount % batchSize == 0 {
+                                        await Task.yield()
+                                        log.debug("Import progress: \(importedCount)")
+                                    }
+
+                                    objectBuffer.removeAll(keepingCapacity: true)
+                                }
+                            }
+                        }
+                    }
+                    cursor += 1
+                }
+
+                if cursor > 0 {
+                    buffer.removeFirst(cursor)
+                    madeProgress = true
+                }
+
+            case .done:
+                break
+            }
+
+            if state == .done {
+                break
+            }
+
+            if reachedEOF && !madeProgress {
+                break
+            }
+        }
+
+        if state != .done || depth != 0 {
+            throw ExportError.invalidFormat
+        }
+
+        return importedCount
     }
     
     // MARK: - Helpers

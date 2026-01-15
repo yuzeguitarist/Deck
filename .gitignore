@@ -12,6 +12,10 @@ xcuserdata/
 # 不公开的根部敏感/辅助文档
 cursor-*.md
 
+# 本地打包脚本/素材
+release.sh
+background.png
+
 # Orbit CLI bridge local artifacts (port 53129)
 orbit-bridge-53129*
 OrbitBridge-53129*
