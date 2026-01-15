@@ -1539,7 +1539,35 @@ final class DeckSQLManager: NSObject {
                 })
 
                 try db.run(tab.createIndex(Col.ts, ifNotExists: true))
-                try db.run(tab.createIndex(Col.uniqueId, ifNotExists: true))
+                // Create a partial unique index for non-empty unique_id to avoid sync duplicates.
+                do {
+                    try db.run("""
+                        CREATE UNIQUE INDEX IF NOT EXISTS idx_clipboardhistory_unique_id
+                        ON ClipboardHistory(unique_id)
+                        WHERE unique_id <> ''
+                        """)
+                } catch {
+                    log.error("Failed to create unique index for unique_id, attempting deduplication: \(error)")
+                    do {
+                        try db.run("""
+                            DELETE FROM ClipboardHistory
+                            WHERE unique_id <> ''
+                              AND id NOT IN (
+                                SELECT MAX(id) FROM ClipboardHistory
+                                WHERE unique_id <> ''
+                                GROUP BY unique_id
+                              )
+                            """)
+                        try db.run("""
+                            CREATE UNIQUE INDEX IF NOT EXISTS idx_clipboardhistory_unique_id
+                            ON ClipboardHistory(unique_id)
+                            WHERE unique_id <> ''
+                            """)
+                    } catch {
+                        log.error("Deduplication/unique index creation failed, falling back to non-unique index: \(error)")
+                        _ = try? db.run(tab.createIndex(Col.uniqueId, ifNotExists: true))
+                    }
+                }
                 try db.run(tab.createIndex(Col.tagId, ifNotExists: true))
                 try db.run(tab.createIndex(Col.itemType, ifNotExists: true))
 
@@ -2768,13 +2796,33 @@ extension DeckSQLManager {
     }
 
     func update(id: Int64, item: ClipboardItem) async {
-        // 与 insert 保持一致，安全模式下加密数据
+        // Keep update behavior aligned with insert, including blob storage handling.
         var dataToStore = item.data
-        if item.blobPath != nil {
-            if let preview = item.previewData, !preview.isEmpty {
+        var previewData = item.previewData
+        var blobPathToStore = item.blobPath
+        let isSecurityMode = DeckUserDefaults.securityModeEnabled
+
+        if item.itemType == .image, item.hasFullData, item.data.count > Const.largeBlobThreshold {
+            if let path = BlobStorage.shared.store(data: item.data, uniqueId: item.uniqueId, encrypt: isSecurityMode) {
+                blobPathToStore = path
+
+                if previewData == nil || previewData!.isEmpty {
+                    previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
+                    log.debug("Pre-generated thumbnail for large image (\(item.data.count) bytes) during update")
+                }
+
+                dataToStore = Data()
+            }
+        } else if item.itemType == .image, item.data.count > 50 * 1024, (previewData == nil || previewData!.isEmpty) {
+            previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
+            log.debug("Pre-generated thumbnail for medium image (\(item.data.count) bytes) during update")
+        }
+
+        if blobPathToStore != nil {
+            if let preview = previewData, !preview.isEmpty {
                 dataToStore = Data()
             } else {
-                dataToStore = item.previewData ?? item.data
+                dataToStore = previewData ?? dataToStore
             }
         } else if !item.hasFullData, let fullData = item.loadFullData() {
             dataToStore = fullData
@@ -2787,13 +2835,13 @@ extension DeckSQLManager {
         let encryptedSourceAnchor: String?
         let encodedSourceAnchor = item.sourceAnchor?.toJSON()
 
-        if DeckUserDefaults.securityModeEnabled {
+        if isSecurityMode {
             guard let data = encryptData(dataToStore),
                   let searchText = encryptString(item.searchText),
                   let appName = encryptString(item.appName) else {
                 return
             }
-            if let previewData = item.previewData {
+            if let previewData {
                 guard let encryptedPreview = encryptData(previewData) else { return }
                 encryptedPreviewData = encryptedPreview
             } else {
@@ -2810,15 +2858,16 @@ extension DeckSQLManager {
             }
         } else {
             encryptedData = dataToStore
-            encryptedPreviewData = item.previewData
+            encryptedPreviewData = previewData
             encryptedSearchText = item.searchText
             encryptedAppName = item.appName
             encryptedSourceAnchor = encodedSourceAnchor
         }
 
-        if let count: Int = await withDBAsync({
-            guard let db = self.db, let table = self.table else { return 0 }
+        let result: (count: Int, oldBlobPathToRemove: String?)? = await withDBAsync({
+            guard let db = self.db, let table = self.table else { return (0, nil) }
             let query = table.filter(Col.id == id)
+            let oldBlobPath = try? db.pluck(query.select(Col.blobPath))?.get(Col.blobPath)
             let update = query.update(
                 Col.type <- item.pasteboardType.rawValue,
                 Col.itemType <- item.itemType.rawValue,
@@ -2831,13 +2880,24 @@ extension DeckSQLManager {
                 Col.searchText <- encryptedSearchText,
                 Col.length <- item.contentLength,
                 Col.tagId <- item.tagId,
+                Col.blobPath <- blobPathToStore,
                 Col.isTemporary <- item.isTemporary
             )
-            return try db.run(update)
-        }) {
-            log.debug("Updated \(count) items")
+            let count = try db.run(update)
+            if count > 0, let old = oldBlobPath, old != blobPathToStore {
+                return (count, old)
+            }
+            return (count, nil)
+        })
+
+        if let result {
+            log.debug("Updated \(result.count) items")
             invalidateSearchCache(ids: [id])  // 失效被更新的项（searchText 可能已变化）
             scheduleSemanticEmbeddingUpdate(id: id, searchText: item.searchText)
+
+            if let oldPath = result.oldBlobPathToRemove {
+                BlobStorage.shared.remove(path: oldPath)
+            }
         }
     }
     
@@ -3198,7 +3258,7 @@ extension DeckSQLManager {
     func fetchRow(uniqueId: String) async -> Row? {
         return await withDBAsync { () throws -> Row? in
             guard let db = self.db, let table = self.table else { return nil }
-            let query = table.filter(Col.uniqueId == uniqueId).limit(1)
+            let query = table.filter(Col.uniqueId == uniqueId).order(Col.ts.desc).limit(1)
             return try db.pluck(query)
         } ?? nil
     }
