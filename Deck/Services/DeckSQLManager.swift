@@ -2543,8 +2543,8 @@ extension DeckSQLManager {
         invalidateSearchCache()
     }
 
-    func shrinkMemory() {
-        _ = withDB {
+    func shrinkMemory() async {
+        _ = await withDBAsync {
             guard let db = self.db else { return false }
             try db.run("PRAGMA shrink_memory")
             return true
@@ -3300,6 +3300,120 @@ extension DeckSQLManager {
             }
             return try db.scalar(query.count)
         } ?? 0
+    }
+
+    // MARK: - Lightweight Statistics Queries (avoid loading large blobs)
+
+    func count(since timestamp: Int64) async -> Int {
+        return await withDBAsync {
+            guard let db = self.db, let table = self.table else { return 0 }
+            let query = table.filter(Col.ts >= timestamp)
+            return try db.scalar(query.count)
+        } ?? 0
+    }
+
+    /// Fetch timestamps since the given unix timestamp (seconds).
+    /// Only selects the `ts` column to keep memory stable.
+    func fetchTimestamps(since timestamp: Int64) async -> [Int64] {
+        guard !Task.isCancelled else { return [] }
+        return await withDBAsync {
+            guard let db = self.db, let table = self.table else { return [] }
+            let query = table
+                .select(Col.ts)
+                .filter(Col.ts >= timestamp)
+                .order(Col.ts.desc)
+
+            var results: [Int64] = []
+            for row in try db.prepare(query) {
+                results.append(try row.get(Col.ts))
+
+                // Allow cooperative cancellation for very large datasets.
+                if results.count % 2000 == 0, Task.isCancelled { break }
+            }
+            return results
+        } ?? []
+    }
+
+    struct TypeCountRow: Sendable {
+        let type: String
+        let count: Int
+    }
+
+    struct AppPathCountRow: Sendable {
+        let appPath: String
+        let count: Int
+    }
+
+    /// Type distribution across the whole database (metadata-only, no blobs).
+    func fetchTypeCounts() async -> [TypeCountRow] {
+        guard !Task.isCancelled else { return [] }
+        return await withDBAsync {
+            guard let db = self.db else { return [] }
+
+            let sql = """
+            SELECT item_type, COUNT(*) AS c
+            FROM ClipboardHistory
+            GROUP BY item_type
+            ORDER BY c DESC
+            """
+
+            var results: [TypeCountRow] = []
+            let stmt = try db.prepare(sql)
+            while let row = try stmt.failableNext() {
+                guard let type = row[0] as? String,
+                      let countValue = self.bindingToInt64(row[1]) else {
+                    continue
+                }
+                results.append(
+                    TypeCountRow(
+                        type: type,
+                        count: Int(countValue)
+                    )
+                )
+
+                if results.count % 50 == 0, Task.isCancelled { break }
+            }
+            return results
+        } ?? []
+    }
+
+    /// Top app paths across the whole database (metadata-only, no blobs).
+    func fetchTopAppPaths(limit: Int = 5) async -> [AppPathCountRow] {
+        guard limit > 0 else { return [] }
+        guard !Task.isCancelled else { return [] }
+
+        // Avoid pathological values.
+        let safeLimit = max(1, min(limit, 50))
+
+        return await withDBAsync {
+            guard let db = self.db else { return [] }
+
+            let sql = """
+            SELECT app_path, COUNT(*) AS c
+            FROM ClipboardHistory
+            GROUP BY app_path
+            ORDER BY c DESC
+            LIMIT \(safeLimit)
+            """
+
+            var results: [AppPathCountRow] = []
+            results.reserveCapacity(safeLimit)
+
+            let stmt = try db.prepare(sql)
+            while let row = try stmt.failableNext() {
+                guard let appPath = row[0] as? String,
+                      let countValue = self.bindingToInt64(row[1]) else {
+                    continue
+                }
+                results.append(
+                    AppPathCountRow(
+                        appPath: appPath,
+                        count: Int(countValue)
+                    )
+                )
+            }
+            return results
+        } ?? []
     }
     
     func rowToClipboardItem(_ row: Row, isEncrypted: Bool? = nil, loadFullData: Bool = true) -> ClipboardItem? {
