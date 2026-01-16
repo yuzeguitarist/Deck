@@ -250,6 +250,18 @@ final class SecurityService {
         return decrypt(encryptedData, using: key)
     }
 
+    func decryptSilently(_ encryptedData: Data) -> Data? {
+        guard let key = getOrCreateEncryptionKey() else {
+            return nil
+        }
+        do {
+            let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
+            return try AES.GCM.open(sealedBox, using: key)
+        } catch {
+            return nil
+        }
+    }
+
     func encrypt(_ data: Data, using key: SymmetricKey) -> Data? {
         do {
             let sealedBox = try AES.GCM.seal(data, using: key)

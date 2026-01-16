@@ -135,7 +135,8 @@ final class ScriptPluginService {
     private var executionStates: [String: ExecutionState] = [:]
     private let scriptExecutionQueue = DispatchQueue(
         label: "deck.script.execution",
-        qos: .utility
+        qos: .utility,
+        attributes: .concurrent
     )
 
     private final class ExecutionState: @unchecked Sendable {

@@ -226,6 +226,7 @@ enum Col {
     static let tagId = Expression<Int>("tag_id")
     static let blobPath = Expression<String?>("blob_path")
     static let isTemporary = Expression<Bool>("is_temporary")
+    static let isEncrypted = Expression<Bool>("is_encrypted")
 }
 
 enum EmbeddingCol {
@@ -1536,6 +1537,7 @@ final class DeckSQLManager: NSObject {
                     t.column(Col.tagId, defaultValue: -1)
                     t.column(Col.blobPath)
                     t.column(Col.isTemporary, defaultValue: false)
+                    t.column(Col.isEncrypted, defaultValue: false)
                 })
 
                 try db.run(tab.createIndex(Col.ts, ifNotExists: true))
@@ -1772,7 +1774,8 @@ final class DeckSQLManager: NSObject {
     /// - 2: 添加语义向量缓存表
     /// - 3: 添加 is_temporary 列
     /// - 4: 添加 source_anchor 列（IDE 溯源元数据）
-    private static let currentSchemaVersion: Int32 = 4
+    /// - 5: 添加 is_encrypted 列（逐行加密状态）
+    private static let currentSchemaVersion: Int32 = 5
     private static let fileSearchTextBackfillTargetVersion = 1
 
     private func getSchemaVersion() -> Int32 {
@@ -1808,6 +1811,7 @@ final class DeckSQLManager: NSObject {
         let needsEmbeddingMigration = currentVersion < 2
         let needsTemporaryMigration = currentVersion < 3
         let needsSourceAnchorMigration = currentVersion < 4
+        let needsEncryptionStateMigration = currentVersion < 5
 
         // Migration 0 -> 1: 添加 blob_path 列
         if needsLargeImageMigration {
@@ -1836,6 +1840,9 @@ final class DeckSQLManager: NSObject {
             if needsSourceAnchorMigration {
                 addSourceAnchorColumnIfNeeded()
             }
+            if needsEncryptionStateMigration {
+                addEncryptionStateColumnIfNeeded()
+            }
 
             // 执行大图迁移，完成后再进行语义缓存回填
             let postMigration: (() async -> Void)?
@@ -1862,16 +1869,22 @@ final class DeckSQLManager: NSObject {
             if needsSourceAnchorMigration {
                 addSourceAnchorColumnIfNeeded()
             }
+            if needsEncryptionStateMigration {
+                addEncryptionStateColumnIfNeeded()
+            }
             backfillSemanticEmbeddingsIfNeeded(targetVersion: Self.currentSchemaVersion)
             return
         }
 
-        if needsTemporaryMigration || needsSourceAnchorMigration {
+        if needsTemporaryMigration || needsSourceAnchorMigration || needsEncryptionStateMigration {
             if needsTemporaryMigration {
                 addTemporaryColumnIfNeeded()
             }
             if needsSourceAnchorMigration {
                 addSourceAnchorColumnIfNeeded()
+            }
+            if needsEncryptionStateMigration {
+                addEncryptionStateColumnIfNeeded()
             }
             setSchemaVersion(Self.currentSchemaVersion)
         }
@@ -1908,6 +1921,24 @@ final class DeckSQLManager: NSObject {
             guard !columns.contains("source_anchor") else { return }
             try db.run("ALTER TABLE ClipboardHistory ADD COLUMN source_anchor TEXT")
             log.info("Added source_anchor column for IDE anchors")
+        }
+    }
+
+    private func addEncryptionStateColumnIfNeeded() {
+        withDB {
+            guard let db = self.db else { return }
+            let stmt = try db.prepare("PRAGMA table_info(ClipboardHistory)")
+            var columns: [String] = []
+            while let row = try stmt.failableNext() {
+                if let name = row[1] as? String {
+                    columns.append(name)
+                }
+            }
+            guard !columns.contains("is_encrypted") else { return }
+            try db.run("ALTER TABLE ClipboardHistory ADD COLUMN is_encrypted INTEGER NOT NULL DEFAULT 0")
+            let encryptedValue = DeckUserDefaults.securityModeEnabled ? 1 : 0
+            try db.run("UPDATE ClipboardHistory SET is_encrypted = ?", encryptedValue)
+            log.info("Added is_encrypted column for encryption state")
         }
     }
 
@@ -2200,8 +2231,8 @@ extension DeckSQLManager {
     /// 解密二进制数据（用于 data、embedding 列）
     /// - Parameter data: 加密的数据
     /// - Returns: 解密后的数据（安全模式下），或原始数据（非安全模式）
-    private func decryptData(_ data: Data) -> Data {
-        guard DeckUserDefaults.securityModeEnabled else { return data }
+    private func decryptData(_ data: Data, force: Bool = false) -> Data {
+        guard DeckUserDefaults.securityModeEnabled || force else { return data }
         return SecurityService.shared.decrypt(data) ?? data
     }
     
@@ -2226,12 +2257,47 @@ extension DeckSQLManager {
     /// 解密字符串（用于 search_text、app_name 列）
     /// - Parameter string: Base64 编码的加密数据
     /// - Returns: 解密后的字符串（安全模式下），或原始字符串（非安全模式）
-    private func decryptString(_ string: String) -> String {
-        guard DeckUserDefaults.securityModeEnabled else { return string }
+    private func decryptString(_ string: String, force: Bool = false) -> String {
+        guard DeckUserDefaults.securityModeEnabled || force else { return string }
         guard let data = Data(base64Encoded: string),
               let decrypted = SecurityService.shared.decrypt(data),
               let result = String(data: decrypted, encoding: .utf8) else { return string }
         return result
+    }
+
+    private func isEncryptedPayload(_ data: Data) -> Bool {
+        guard !data.isEmpty else { return false }
+        return SecurityService.shared.decryptSilently(data) != nil
+    }
+
+    private func isEncryptedStringPayload(_ string: String) -> Bool {
+        guard let decoded = Data(base64Encoded: string),
+              let decrypted = SecurityService.shared.decryptSilently(decoded),
+              String(data: decrypted, encoding: .utf8) != nil else { return false }
+        return true
+    }
+
+    private func encryptDataIfNeeded(_ data: Data) -> Data? {
+        if isEncryptedPayload(data) {
+            return data
+        }
+        return SecurityService.shared.encrypt(data)
+    }
+
+    private func decryptStringSilently(_ string: String) -> String {
+        guard let data = Data(base64Encoded: string),
+              let decrypted = SecurityService.shared.decryptSilently(data),
+              let result = String(data: decrypted, encoding: .utf8) else { return string }
+        return result
+    }
+
+    private func encryptStringIfNeeded(_ string: String) -> String? {
+        if isEncryptedStringPayload(string) {
+            return string
+        }
+        guard let data = string.data(using: .utf8),
+              let encrypted = SecurityService.shared.encrypt(data) else { return nil }
+        return encrypted.base64EncodedString()
     }
 
     private func notifyEncryptionFailureIfNeeded() {
@@ -2577,6 +2643,7 @@ extension DeckSQLManager {
         let tagId: Int
         let blobPath: String?
         let isTemporary: Bool
+        let isEncrypted: Bool
         let searchTextPlain: String
     }
 
@@ -2653,6 +2720,7 @@ extension DeckSQLManager {
             tagId: item.tagId,
             blobPath: blobPath,
             isTemporary: item.isTemporary,
+            isEncrypted: isSecurityMode,
             searchTextPlain: item.searchText
         )
     }
@@ -2678,7 +2746,8 @@ extension DeckSQLManager {
                 Col.length <- payload.contentLength,
                 Col.tagId <- payload.tagId,
                 Col.blobPath <- payload.blobPath,
-                Col.isTemporary <- payload.isTemporary
+                Col.isTemporary <- payload.isTemporary,
+                Col.isEncrypted <- payload.isEncrypted
             )
             let rowId = try db.run(insert)
             return (rowId, deleted)
@@ -2733,7 +2802,8 @@ extension DeckSQLManager {
                         Col.length <- payload.contentLength,
                         Col.tagId <- payload.tagId,
                         Col.blobPath <- payload.blobPath,
-                        Col.isTemporary <- payload.isTemporary
+                        Col.isTemporary <- payload.isTemporary,
+                        Col.isEncrypted <- payload.isEncrypted
                     )
                     rowIds.append(try db.run(insert))
                 }
@@ -2881,7 +2951,8 @@ extension DeckSQLManager {
                 Col.length <- item.contentLength,
                 Col.tagId <- item.tagId,
                 Col.blobPath <- blobPathToStore,
-                Col.isTemporary <- item.isTemporary
+                Col.isTemporary <- item.isTemporary,
+                Col.isEncrypted <- isSecurityMode
             )
             let count = try db.run(update)
             if count > 0, let old = oldBlobPath, old != blobPathToStore {
@@ -3271,7 +3342,7 @@ extension DeckSQLManager {
             guard let row = try db.pluck(query) else { return nil }
             let rawData = try row.get(Col.data)
             let shouldDecrypt = isEncrypted ?? DeckUserDefaults.securityModeEnabled
-            return shouldDecrypt ? decryptData(rawData) : rawData
+            return decryptData(rawData, force: shouldDecrypt)
         } ?? nil
     }
 
@@ -3433,6 +3504,7 @@ extension DeckSQLManager {
             let storedUniqueId = try row.get(Col.uniqueId)
             let storedItemType = try row.get(Col.itemType)
             let rawIsTemporary = (try? row.get(Col.isTemporary)) ?? false
+            let storedIsEncrypted = try? row.get(Col.isEncrypted)
             let isTemporary = tagId == DeckTag.importantTagId ? false : rawIsTemporary
             if tagId == DeckTag.importantTagId && rawIsTemporary {
                 Task { [weak self] in
@@ -3440,13 +3512,13 @@ extension DeckSQLManager {
                 }
             }
             
-            // Decrypt data if security mode is enabled
-            let shouldDecrypt = isEncrypted ?? DeckUserDefaults.securityModeEnabled
-            let data = shouldDecrypt ? decryptData(rawData) : rawData
-            let previewData = rawPreviewData.map { shouldDecrypt ? decryptData($0) : $0 }
-            let searchText = shouldDecrypt ? decryptString(rawSearchText) : rawSearchText
-            let appName = shouldDecrypt ? decryptString(rawAppName) : rawAppName
-            let sourceAnchorString = rawSourceAnchor.map { shouldDecrypt ? decryptString($0) : $0 }
+            // Decrypt data if needed (per-row or security mode).
+            let shouldDecrypt = isEncrypted ?? storedIsEncrypted ?? DeckUserDefaults.securityModeEnabled
+            let data = decryptData(rawData, force: shouldDecrypt)
+            let previewData = rawPreviewData.map { decryptData($0, force: shouldDecrypt) }
+            let searchText = decryptString(rawSearchText, force: shouldDecrypt)
+            let appName = decryptString(rawAppName, force: shouldDecrypt)
+            let sourceAnchorString = rawSourceAnchor.map { decryptString($0, force: shouldDecrypt) }
             let sourceAnchor = SourceAnchor.fromJSON(sourceAnchorString)
 
             var inlineData = data
@@ -3541,98 +3613,80 @@ extension DeckSQLManager {
             // 处理当前批次
             let batchSuccess = await withDBAsync {
                 guard let db = self.db, let table = self.table else { return false }
-                for row in batch.rows {
-                    let id = try row.get(Col.id)
-                    let rawData = try row.get(Col.data)
-                    let rawPreviewData = try row.get(Col.previewData)
-                    let rawSearchText = try row.get(Col.searchText)
-                    let rawAppName = try row.get(Col.appName)
-                    let rawSourceAnchor = try row.get(Col.sourceAnchor)
+                do {
+                    try db.transaction {
+                        for row in batch.rows {
+                            let id = try row.get(Col.id)
+                            let rawData = try row.get(Col.data)
+                            let rawPreviewData = try row.get(Col.previewData)
+                            let rawSearchText = try row.get(Col.searchText)
+                            let rawAppName = try row.get(Col.appName)
+                            let rawSourceAnchor = try row.get(Col.sourceAnchor)
 
-                    let newData: Data
-                    let newPreviewData: Data?
-                    let newSearchText: String
-                    let newAppName: String
-                    let newSourceAnchor: String?
+                            let newData: Data
+                            let newPreviewData: Data?
+                            let newSearchText: String
+                            let newAppName: String
+                            let newSourceAnchor: String?
 
-                    if encrypt {
-                        // Encrypting: data is currently unencrypted
-                        guard let encryptedData = SecurityService.shared.encrypt(rawData) else {
-                            self.notifyEncryptionFailureIfNeeded()
-                            return false
-                        }
-                        newData = encryptedData
-                        if let rawPreviewData = rawPreviewData {
-                            guard let encryptedPreview = SecurityService.shared.encrypt(rawPreviewData) else {
-                                self.notifyEncryptionFailureIfNeeded()
-                                return false
+                            if encrypt {
+                                guard let encryptedData = self.encryptDataIfNeeded(rawData) else {
+                                    self.notifyEncryptionFailureIfNeeded()
+                                    throw NSError(domain: "DeckSQL", code: -10, userInfo: nil)
+                                }
+                                newData = encryptedData
+                                if let rawPreviewData = rawPreviewData {
+                                    guard let encryptedPreview = self.encryptDataIfNeeded(rawPreviewData) else {
+                                        self.notifyEncryptionFailureIfNeeded()
+                                        throw NSError(domain: "DeckSQL", code: -11, userInfo: nil)
+                                    }
+                                    newPreviewData = encryptedPreview
+                                } else {
+                                    newPreviewData = nil
+                                }
+                                guard let encryptedSearch = self.encryptStringIfNeeded(rawSearchText) else {
+                                    self.notifyEncryptionFailureIfNeeded()
+                                    throw NSError(domain: "DeckSQL", code: -12, userInfo: nil)
+                                }
+                                newSearchText = encryptedSearch
+                                guard let encryptedAppName = self.encryptStringIfNeeded(rawAppName) else {
+                                    self.notifyEncryptionFailureIfNeeded()
+                                    throw NSError(domain: "DeckSQL", code: -13, userInfo: nil)
+                                }
+                                newAppName = encryptedAppName
+                                if let rawSourceAnchor {
+                                    guard let encryptedAnchor = self.encryptStringIfNeeded(rawSourceAnchor) else {
+                                        self.notifyEncryptionFailureIfNeeded()
+                                        throw NSError(domain: "DeckSQL", code: -14, userInfo: nil)
+                                    }
+                                    newSourceAnchor = encryptedAnchor
+                                } else {
+                                    newSourceAnchor = nil
+                                }
+                            } else {
+                                newData = SecurityService.shared.decryptSilently(rawData) ?? rawData
+                                newPreviewData = rawPreviewData.map { SecurityService.shared.decryptSilently($0) ?? $0 }
+                                newSearchText = self.decryptStringSilently(rawSearchText)
+                                newAppName = self.decryptStringSilently(rawAppName)
+                                newSourceAnchor = rawSourceAnchor.map { self.decryptStringSilently($0) }
                             }
-                            newPreviewData = encryptedPreview
-                        } else {
-                            newPreviewData = nil
-                        }
-                        guard let searchData = rawSearchText.data(using: .utf8),
-                              let encryptedSearch = SecurityService.shared.encrypt(searchData) else {
-                            self.notifyEncryptionFailureIfNeeded()
-                            return false
-                        }
-                        newSearchText = encryptedSearch.base64EncodedString()
-                        guard let appNameData = rawAppName.data(using: .utf8),
-                              let encryptedAppName = SecurityService.shared.encrypt(appNameData) else {
-                            self.notifyEncryptionFailureIfNeeded()
-                            return false
-                        }
-                        newAppName = encryptedAppName.base64EncodedString()
-                        if let rawSourceAnchor {
-                            guard let anchorData = rawSourceAnchor.data(using: .utf8),
-                                  let encryptedAnchor = SecurityService.shared.encrypt(anchorData) else {
-                                self.notifyEncryptionFailureIfNeeded()
-                                return false
-                            }
-                            newSourceAnchor = encryptedAnchor.base64EncodedString()
-                        } else {
-                            newSourceAnchor = nil
-                        }
-                    } else {
-                        // Decrypting: data is currently encrypted
-                        newData = SecurityService.shared.decrypt(rawData) ?? rawData
-                        newPreviewData = rawPreviewData.flatMap { SecurityService.shared.decrypt($0) }
-                        if let decoded = Data(base64Encoded: rawSearchText),
-                           let decrypted = SecurityService.shared.decrypt(decoded),
-                           let str = String(data: decrypted, encoding: .utf8) {
-                            newSearchText = str
-                        } else {
-                            newSearchText = rawSearchText
-                        }
-                        if let decoded = Data(base64Encoded: rawAppName),
-                           let decrypted = SecurityService.shared.decrypt(decoded),
-                           let str = String(data: decrypted, encoding: .utf8) {
-                            newAppName = str
-                        } else {
-                            newAppName = rawAppName
-                        }
-                        if let rawSourceAnchor,
-                           let decoded = Data(base64Encoded: rawSourceAnchor),
-                           let decrypted = SecurityService.shared.decrypt(decoded),
-                           let str = String(data: decrypted, encoding: .utf8) {
-                            newSourceAnchor = str
-                        } else {
-                            newSourceAnchor = rawSourceAnchor
+
+                            let query = table.filter(Col.id == id)
+                            let update = query.update(
+                                Col.data <- newData,
+                                Col.previewData <- newPreviewData,
+                                Col.searchText <- newSearchText,
+                                Col.appName <- newAppName,
+                                Col.sourceAnchor <- newSourceAnchor,
+                                Col.isEncrypted <- encrypt
+                            )
+                            try db.run(update)
                         }
                     }
-
-                    // Update the row
-                    let query = table.filter(Col.id == id)
-                    let update = query.update(
-                        Col.data <- newData,
-                        Col.previewData <- newPreviewData,
-                        Col.searchText <- newSearchText,
-                        Col.appName <- newAppName,
-                        Col.sourceAnchor <- newSourceAnchor
-                    )
-                    try db.run(update)
+                    return true
+                } catch {
+                    return false
                 }
-                return true
             }
 
             if batchSuccess != true {
@@ -3730,11 +3784,15 @@ extension DeckSQLManager {
 
                     let newEmbedding: Data
                     if encrypt {
-                        guard let encrypted = SecurityService.shared.encrypt(rawEmbedding) else {
-                            notifyEncryptionFailureIfNeeded()
-                            return
+                        if SecurityService.shared.decryptSilently(rawEmbedding) != nil {
+                            newEmbedding = rawEmbedding
+                        } else {
+                            guard let encrypted = SecurityService.shared.encrypt(rawEmbedding) else {
+                                notifyEncryptionFailureIfNeeded()
+                                return
+                            }
+                            newEmbedding = encrypted
                         }
-                        newEmbedding = encrypted
                     } else {
                         newEmbedding = SecurityService.shared.decrypt(rawEmbedding) ?? rawEmbedding
                     }

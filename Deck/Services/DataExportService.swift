@@ -18,6 +18,7 @@ final class DataExportService {
     private var lastExportedCount: Int = 0
     
     private init() {
+        cleanupExportTempDirectory()
         // 注册应用终止通知，确保清理临时文件
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
@@ -38,6 +39,19 @@ final class DataExportService {
         try? FileManager.default.removeItem(at: url)
         currentExportTempURL = nil
         log.debug("Cleaned up export temp file")
+    }
+
+    /// 启动时清理可能残留的导出临时目录
+    private func cleanupExportTempDirectory() {
+        guard let containerURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return
+        }
+        let privateTempDir = containerURL.appendingPathComponent("Deck/ExportTemp", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: privateTempDir.path) else { return }
+        let contents = (try? FileManager.default.contentsOfDirectory(at: privateTempDir, includingPropertiesForKeys: nil)) ?? []
+        for url in contents {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
     
     /// 获取安全的临时目录（优先使用应用私有目录）
@@ -81,6 +95,14 @@ final class DataExportService {
     // MARK: - Export
     
     func exportData(completion: @escaping (Result<URL, Error>) -> Void) {
+        exportDataInternal(targetURL: nil, completion: completion)
+    }
+
+    func exportData(to targetURL: URL, completion: @escaping (Result<URL, Error>) -> Void) {
+        exportDataInternal(targetURL: targetURL, completion: completion)
+    }
+
+    private func exportDataInternal(targetURL: URL?, completion: @escaping (Result<URL, Error>) -> Void) {
         Task {
             // Check if security mode is enabled - require authentication
             let isSecurityMode = DeckUserDefaults.securityModeEnabled
@@ -98,28 +120,37 @@ final class DataExportService {
             cleanupTempFile()
             
             do {
-                // 使用安全的临时目录（应用私有目录）
-                let tempDir = getSecureTempDirectory()
-                let fileName = "Deck_Export_\(formatDate(Date())).json"
-                let tempURL = tempDir.appendingPathComponent(fileName)
-                
-                // 记录当前临时文件以便清理
-                currentExportTempURL = tempURL
+                let outputURL: URL
+                if let targetURL {
+                    outputURL = targetURL
+                    if FileManager.default.fileExists(atPath: targetURL.path) {
+                        try FileManager.default.removeItem(at: targetURL)
+                    }
+                } else {
+                    // 使用安全的临时目录（应用私有目录）
+                    let tempDir = getSecureTempDirectory()
+                    let fileName = "Deck_Export_\(formatDate(Date())).json"
+                    let tempURL = tempDir.appendingPathComponent(fileName)
+                    outputURL = tempURL
+                    
+                    // 记录当前临时文件以便清理
+                    currentExportTempURL = tempURL
+                }
                 
                 let encoder = JSONEncoder()
                 encoder.dateEncodingStrategy = .iso8601
                 
                 let dateString = ISO8601DateFormatter().string(from: Date())
                 let header = #"{"version":1,"exportDate":""# + dateString + #""# + #","items":["#
-                try header.data(using: .utf8)?.write(to: tempURL)
+                try header.data(using: .utf8)?.write(to: outputURL)
                 
                 // 设置文件保护属性（仅限 macOS 具有此功能时）
                 try? FileManager.default.setAttributes(
                     [.protectionKey: FileProtectionType.complete],
-                    ofItemAtPath: tempURL.path
+                    ofItemAtPath: outputURL.path
                 )
                 
-                let handle = try FileHandle(forWritingTo: tempURL)
+                let handle = try FileHandle(forWritingTo: outputURL)
                 try handle.seekToEnd()
                 
                 var offset = 0
@@ -170,11 +201,15 @@ final class DataExportService {
                 lastExportedCount = exportedCount
                 
                 await MainActor.run {
-                    completion(.success(tempURL))
+                    completion(.success(outputURL))
                 }
             } catch {
                 // 出错时清理临时文件
-                cleanupTempFile()
+                if targetURL == nil {
+                    cleanupTempFile()
+                } else if let targetURL {
+                    try? FileManager.default.removeItem(at: targetURL)
+                }
                 lastExportedCount = 0
                 await MainActor.run {
                     completion(.failure(error))
@@ -453,25 +488,6 @@ final class DataExportService {
 
 extension DataExportService {
     func showExportPanel() {
-        // Export to temp first, then let user choose location
-        exportData { [weak self] result in
-            DispatchQueue.main.async {
-                switch result {
-                case .success(let tempURL):
-                    self?.showSavePanel(tempURL: tempURL)
-                    
-                case .failure(let error):
-                    let alert = NSAlert()
-                    alert.messageText = "导出失败"
-                    alert.informativeText = error.localizedDescription
-                    alert.alertStyle = .warning
-                    alert.runModal()
-                }
-            }
-        }
-    }
-    
-    private func showSavePanel(tempURL: URL) {
         let savePanel = NSSavePanel()
         savePanel.allowedContentTypes = [.json]
         savePanel.nameFieldStringValue = "Deck_Export_\(formatDate(Date())).json"
@@ -480,37 +496,28 @@ extension DataExportService {
         savePanel.message = "选择保存位置"
         
         savePanel.begin { [weak self] response in
-            defer {
-                // 无论成功或取消，都清理临时文件
-                self?.cleanupTempFile()
-            }
+            guard response == .OK, let targetURL = savePanel.url else { return }
             
-            guard response == .OK, let targetURL = savePanel.url else {
-                return
-            }
-            
-            do {
-                if FileManager.default.fileExists(atPath: targetURL.path) {
-                    try FileManager.default.removeItem(at: targetURL)
+            self?.exportData(to: targetURL) { [weak self] result in
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success(let url):
+                        NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: url.deletingLastPathComponent().path)
+                        
+                        let alert = NSAlert()
+                        alert.messageText = "导出成功"
+                        alert.informativeText = "已导出 \(self?.lastExportedCount ?? 0) 条记录"
+                        alert.alertStyle = .informational
+                        alert.runModal()
+                        
+                    case .failure(let error):
+                        let alert = NSAlert()
+                        alert.messageText = "导出失败"
+                        alert.informativeText = error.localizedDescription
+                        alert.alertStyle = .warning
+                        alert.runModal()
+                    }
                 }
-                try FileManager.default.moveItem(at: tempURL, to: targetURL)
-                
-                // 移动成功后清空记录（文件已不在临时位置）
-                self?.currentExportTempURL = nil
-                
-                NSWorkspace.shared.selectFile(targetURL.path, inFileViewerRootedAtPath: targetURL.deletingLastPathComponent().path)
-                
-                let alert = NSAlert()
-                alert.messageText = "导出成功"
-                alert.informativeText = "已导出 \(self?.lastExportedCount ?? 0) 条记录"
-                alert.alertStyle = .informational
-                alert.runModal()
-            } catch {
-                let alert = NSAlert()
-                alert.messageText = "导出失败"
-                alert.informativeText = error.localizedDescription
-                alert.alertStyle = .warning
-                alert.runModal()
             }
         }
     }
