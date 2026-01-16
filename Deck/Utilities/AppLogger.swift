@@ -230,4 +230,4 @@ final class AppLogger: @unchecked Sendable {
     }
 }
 
-let log = AppLogger.shared
+nonisolated(unsafe) let log = AppLogger.shared
