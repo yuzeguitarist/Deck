@@ -302,6 +302,10 @@ final class DeckSQLManager: NSObject {
     
     /// 自动备份间隔（24 小时）
     private let backupInterval: TimeInterval = 24 * 60 * 60
+
+    /// Startup integrity check interval (default: 24 hours).
+    private let integrityCheckInterval: TimeInterval = 24 * 60 * 60
+    private let integrityCheckLastRunKey = "com.deck.sqlite.integrityCheck.lastRun"
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // MARK: - Vector Index (向量索引 - sqlite-vec)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -736,9 +740,11 @@ final class DeckSQLManager: NSObject {
             }
         }
         
+        var restoredFromBackupAtStartup = false
         if !FileManager.default.fileExists(atPath: dbPath) &&
             FileManager.default.fileExists(atPath: backupPath) {
             if restoreDatabaseFromBackup(dbPath: dbPath, backupPath: backupPath) {
+                restoredFromBackupAtStartup = true
                 log.info("Restored database from backup at startup")
             }
         }
@@ -747,12 +753,12 @@ final class DeckSQLManager: NSObject {
             try syncOnDBQueue {
                 try openDatabase(at: dbPath)
 
-                if !performIntegrityCheck() {
+                if !performIntegrityCheckIfNeeded(force: restoredFromBackupAtStartup) {
                     log.warn("Database integrity check failed, attempting to restore from backup")
                     db = nil
                     if restoreDatabaseFromBackup(dbPath: dbPath, backupPath: backupPath) {
                         try openDatabase(at: dbPath)
-                        if !performIntegrityCheck() {
+                        if !performIntegrityCheckIfNeeded(force: true) {
                             handleDBError(NSError(domain: "DeckSQL", code: -2, userInfo: [
                                 NSLocalizedDescriptionKey: "Database integrity check failed after restore"
                             ]))
@@ -1122,8 +1128,36 @@ final class DeckSQLManager: NSObject {
         }
     }
 
+    /// Returns true only when embeddings exist and all vec tables are empty.
+    private func shouldScheduleVecIndexBackfill() -> Bool {
+        return syncOnDBQueue {
+            guard vecIndexEnabled, !DeckUserDefaults.securityModeEnabled else { return false }
+            guard let db = db else { return false }
+
+            guard (try? db.scalar("SELECT 1 FROM ClipboardHistory_embedding LIMIT 1")) != nil else {
+                return false
+            }
+
+            let tables = listVecTables()
+            for name in tables {
+                do {
+                    if (try db.scalar("SELECT rowid FROM \(name) LIMIT 1")) != nil {
+                        return false
+                    }
+                } catch {
+                    continue
+                }
+            }
+
+            return true
+        }
+    }
+
     private func scheduleVecIndexBackfillIfNeeded() {
-        guard syncOnDBQueue({ vecIndexEnabled }) else { return }
+        guard shouldScheduleVecIndexBackfill() else {
+            log.debug("Vec index backfill not needed; skip scheduling")
+            return
+        }
         let shouldStart = vecBackfillStateQueue.sync {
             if vecBackfillInProgress {
                 return false
@@ -1147,7 +1181,7 @@ final class DeckSQLManager: NSObject {
     }
 
     private func backfillVecIndexIfNeeded() async {
-        guard syncOnDBQueue({ vecIndexEnabled && db != nil }) else { return }
+        guard shouldScheduleVecIndexBackfill() else { return }
 
         let batchSize = 100
         let maxItems = DeckUserDefaults.securityModeEnabled ? 300 : 1000
@@ -1163,7 +1197,7 @@ final class DeckSQLManager: NSObject {
                     let sql = """
                         SELECT e.id, e.embedding
                         FROM ClipboardHistory_embedding e
-                        ORDER BY e.id ASC
+                        ORDER BY e.id DESC
                         LIMIT ? OFFSET ?
                     """
                     let stmt = try db.prepare(sql).bind(batchSize, offset)
@@ -1201,6 +1235,7 @@ final class DeckSQLManager: NSObject {
 
             offset += rows.count
             await Task.yield()
+            try? await Task.sleep(nanoseconds: 20_000_000)
         }
 
         if processed > 0 {
@@ -1212,6 +1247,22 @@ final class DeckSQLManager: NSObject {
         } else {
             log.debug("Vec index backfill completed: 0 items processed")
         }
+    }
+
+    private func performIntegrityCheckIfNeeded(force: Bool = false) -> Bool {
+        if !force {
+            if let lastRun = UserDefaults.standard.object(forKey: integrityCheckLastRunKey) as? Date {
+                if Date().timeIntervalSince(lastRun) < integrityCheckInterval {
+                    return true
+                }
+            }
+        }
+
+        let ok = performIntegrityCheck()
+        if ok {
+            UserDefaults.standard.set(Date(), forKey: integrityCheckLastRunKey)
+        }
+        return ok
     }
 
     private func performIntegrityCheck() -> Bool {
@@ -2389,31 +2440,50 @@ extension DeckSQLManager {
 
     private func updateVecIndex(id: Int64, vector: [Float]) {
         guard !vector.isEmpty else { return }
+        let canIndex = syncOnDBQueue { vecIndexEnabled } && !DeckUserDefaults.securityModeEnabled
+        guard canIndex else { return }
+
         let normalized = normalizeVector(vector)
-        syncOnDBQueue {
-            guard vecIndexEnabled, !DeckUserDefaults.securityModeEnabled else { return }
-            guard let db = db else { return }
+        guard !normalized.isEmpty else { return }
+
+        // Serialize outside dbQueue to avoid blocking DB operations on CPU work.
+        let payload = vectorToJSONString(normalized)
+
+        let success = withDB {
+            guard vecIndexEnabled, !DeckUserDefaults.securityModeEnabled else { return false }
+            guard let db = self.db else { return false }
             ensureVecTable(dimension: normalized.count)
             guard vecReadyDimensions.contains(normalized.count) else {
                 if vecMissingDimensionLogged.insert(normalized.count).inserted {
                     log.debug("Vec table not ready for dimension \(normalized.count); skipping updates")
                 }
-                return
+                return false
             }
+
             let tableName = vecTableName(for: normalized.count)
-            let payload = vectorToJSONString(normalized)
-            let success = withDB {
-                try db.run("DELETE FROM \(tableName) WHERE rowid = ?", id)
+            do {
                 try db.run(
-                    "INSERT INTO \(tableName)(rowid, embedding) VALUES (?, ?)",
+                    "INSERT OR REPLACE INTO \(tableName)(rowid, embedding) VALUES (?, ?)",
                     id,
                     payload
                 )
-                return true
+            } catch {
+                do {
+                    try db.run("DELETE FROM \(tableName) WHERE rowid = ?", id)
+                    try db.run(
+                        "INSERT INTO \(tableName)(rowid, embedding) VALUES (?, ?)",
+                        id,
+                        payload
+                    )
+                } catch {
+                    throw error
+                }
             }
-            if success != true {
-                log.debug("Vec index update failed for id=\(id), dim=\(normalized.count)")
-            }
+            return true
+        }
+
+        if success != true {
+            log.debug("Vec index update failed for id=\(id), dim=\(normalized.count)")
         }
     }
 
