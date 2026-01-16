@@ -103,22 +103,19 @@ final class DataExportService {
     }
 
     private func exportDataInternal(targetURL: URL?, completion: @escaping (Result<URL, Error>) -> Void) {
-        Task {
-            // Check if security mode is enabled - require authentication
+        Task { @MainActor in
             let isSecurityMode = DeckUserDefaults.securityModeEnabled
             if isSecurityMode {
                 let authenticated = await SecurityService.shared.authenticate(reason: "验证身份以导出数据")
                 guard authenticated else {
-                    await MainActor.run {
-                        completion(.failure(ExportError.authenticationFailed))
-                    }
+                    completion(.failure(ExportError.authenticationFailed))
                     return
                 }
             }
-            
+
             // 清理之前可能残留的临时文件
             cleanupTempFile()
-            
+
             do {
                 let outputURL: URL
                 if let targetURL {
@@ -127,95 +124,93 @@ final class DataExportService {
                         try FileManager.default.removeItem(at: targetURL)
                     }
                 } else {
-                    // 使用安全的临时目录（应用私有目录）
                     let tempDir = getSecureTempDirectory()
                     let fileName = "Deck_Export_\(formatDate(Date())).json"
                     let tempURL = tempDir.appendingPathComponent(fileName)
                     outputURL = tempURL
-                    
-                    // 记录当前临时文件以便清理
                     currentExportTempURL = tempURL
                 }
-                
-                let encoder = JSONEncoder()
-                encoder.dateEncodingStrategy = .iso8601
-                
-                let dateString = ISO8601DateFormatter().string(from: Date())
-                let header = #"{"version":1,"exportDate":""# + dateString + #""# + #","items":["#
-                try header.data(using: .utf8)?.write(to: outputURL)
-                
-                // 设置文件保护属性（仅限 macOS 具有此功能时）
-                try? FileManager.default.setAttributes(
-                    [.protectionKey: FileProtectionType.complete],
-                    ofItemAtPath: outputURL.path
-                )
-                
-                let handle = try FileHandle(forWritingTo: outputURL)
-                try handle.seekToEnd()
-                
-                var offset = 0
-                let batchSize = 500
-                var isFirst = true
-                var exportedCount = 0
-                
-                while true {
-                    let batch = await DeckSQLManager.shared.fetchAll(limit: batchSize, offset: offset, loadFullData: true)
-                    if batch.isEmpty { break }
 
-                    for item in batch {
-                        // 使用 resolvedData() 获取完整数据（包括 offload 到文件的大图）
-                        let fullData = item.resolvedData() ?? item.data
-                        let isLargeBlob = item.blobPath != nil
+                let exportedCount = try await Task.detached(priority: .utility) {
+                    try await Self.exportLargeDataset(to: outputURL)
+                }.value
 
-                        let exportItem = ExportItem(
-                            uniqueId: item.uniqueId,
-                            type: item.pasteboardType.rawValue,
-                            itemType: item.itemType.rawValue,
-                            data: fullData,
-                            previewData: item.previewData,
-                            timestamp: item.timestamp,
-                            appPath: item.appPath,
-                            appName: item.appName,
-                            sourceAnchor: item.sourceAnchor,
-                            searchText: item.searchText,
-                            contentLength: item.contentLength,
-                            tagId: item.tagId,
-                            isTemporary: item.isTemporary,
-                            isLargeBlob: isLargeBlob
-                        )
-                        let data = try encoder.encode(exportItem)
-                        if !isFirst {
-                            handle.write(Data([UInt8(ascii: ",")]))
-                        }
-                        handle.write(data)
-                        isFirst = false
-                        exportedCount += 1
-                    }
-
-                    offset += batch.count
-                    if batch.count < batchSize { break }
-                }
-                
-                handle.write(Data([UInt8(ascii: "]"), UInt8(ascii: "}")]))
-                try handle.close()
                 lastExportedCount = exportedCount
-                
-                await MainActor.run {
-                    completion(.success(outputURL))
-                }
+                completion(.success(outputURL))
             } catch {
-                // 出错时清理临时文件
-                if targetURL == nil {
-                    cleanupTempFile()
+                if targetURL == nil, let tempURL = currentExportTempURL {
+                    try? FileManager.default.removeItem(at: tempURL)
+                    currentExportTempURL = nil
                 } else if let targetURL {
                     try? FileManager.default.removeItem(at: targetURL)
                 }
                 lastExportedCount = 0
-                await MainActor.run {
-                    completion(.failure(error))
-                }
+                completion(.failure(error))
             }
         }
+    }
+
+    private static func exportLargeDataset(to outputURL: URL) async throws -> Int {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+
+        let dateString = ISO8601DateFormatter().string(from: Date())
+        let header = #"{"version":1,"exportDate":""# + dateString + #""# + #","items":["#
+        try header.data(using: .utf8)?.write(to: outputURL)
+
+        try? FileManager.default.setAttributes(
+            [.protectionKey: FileProtectionType.complete],
+            ofItemAtPath: outputURL.path
+        )
+
+        let handle = try FileHandle(forWritingTo: outputURL)
+        defer { try? handle.close() }
+        try handle.seekToEnd()
+
+        var offset = 0
+        let batchSize = 500
+        var isFirst = true
+        var exportedCount = 0
+
+        while true {
+            let batch = await DeckSQLManager.shared.fetchAll(limit: batchSize, offset: offset, loadFullData: true)
+            if batch.isEmpty { break }
+
+            for item in batch {
+                let fullData = item.resolvedData() ?? item.data
+                let isLargeBlob = item.blobPath != nil
+
+                let exportItem = ExportItem(
+                    uniqueId: item.uniqueId,
+                    type: item.pasteboardType.rawValue,
+                    itemType: item.itemType.rawValue,
+                    data: fullData,
+                    previewData: item.previewData,
+                    timestamp: item.timestamp,
+                    appPath: item.appPath,
+                    appName: item.appName,
+                    sourceAnchor: item.sourceAnchor,
+                    searchText: item.searchText,
+                    contentLength: item.contentLength,
+                    tagId: item.tagId,
+                    isTemporary: item.isTemporary,
+                    isLargeBlob: isLargeBlob
+                )
+                let data = try encoder.encode(exportItem)
+                if !isFirst {
+                    handle.write(Data([UInt8(ascii: ",")]))
+                }
+                handle.write(data)
+                isFirst = false
+                exportedCount += 1
+            }
+
+            offset += batch.count
+            if batch.count < batchSize { break }
+        }
+
+        handle.write(Data([UInt8(ascii: "]"), UInt8(ascii: "}")]))
+        return exportedCount
     }
     
     // MARK: - Import
