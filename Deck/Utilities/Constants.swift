@@ -18,7 +18,7 @@ enum Const {
     static let linkCardImageSize: CGSize = CGSize(width: 640.0, height: 360.0)
     
     // Window dimensions
-    static let windowHeight: CGFloat = 300.0
+    static let windowHeight: CGFloat = 305.0
     static let topBarHeight: CGFloat = 44.0
     static let settingWidth: CGFloat = {
         // Use wider window for English/German due to longer text
@@ -46,6 +46,9 @@ enum Const {
     }()
     
     static let smallRadius: CGFloat = 8.0
+    static let panelCornerRadius: CGFloat = 26.0
+    static let panelTopPadding: CGFloat = Const.space12 + 5.0
+    static let searchFieldRadius: CGFloat = 12.0
     
     // Icon sizes
     static let iconSize: CGFloat = 16.0
@@ -112,13 +115,18 @@ enum Const {
 
     /// 弹出窗口毛玻璃叠加层 - 增加背景不透明度
     static let panelOverlay: Color = Color(nsColor: NSColor(name: nil) { appearance in
-        if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        if #available(macOS 26.0, *) {
+            return isDark
+                ? NSColor.black.withAlphaComponent(0.10)
+                : NSColor.white.withAlphaComponent(0.06)
+        }
+        if isDark {
             // 深色模式：较浅的叠加层（避免太黑）
             return NSColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 0.55)
-        } else {
-            // 浅色模式：淡色半透明叠加
-            return NSColor(red: 0.96, green: 0.96, blue: 0.97, alpha: 0.5)
         }
+        // 浅色模式：淡色半透明叠加
+        return NSColor(red: 0.96, green: 0.96, blue: 0.97, alpha: 0.5)
     })
 
     /// 卡片阴影 - 浅色模式更明显的阴影
