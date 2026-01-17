@@ -257,11 +257,20 @@ final class DeckSQLManager: NSObject {
     // MARK: - Thread Safety (线程安全)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
-    /// 数据库操作队列：SQLite 连接非线程安全，所有 DB 操作必须在此队列上串行执行
-    /// - Label: "com.deck.sqlite.queue"
-    /// - QoS: .userInitiated - 用户发起的操作，需要快速响应
-    /// - 使用方式：通过 `withDB` / `withDBAsync` / `syncOnDBQueue` / `asyncOnDBQueue` 包装
-    private let dbQueue = DispatchQueue(label: "com.deck.sqlite.queue", qos: .userInitiated)
+    /// 数据库操作队列：SQLite 连接非线程安全，所有 DB 操作必须串行执行。
+    ///
+    /// 这里拆分为 *交互* 与 *后台维护* 两个队列，但它们都 target 到同一个串行 `dbSerialQueue`：
+    /// - 好处：
+    ///   - 用户触发的搜索/写入依然用 `.userInitiated` 保证响应
+    ///   - 后台 backfill / vacuum / migration 等用 `.utility`，避免抢占 CPU/能耗飙升
+    ///   - 仍然保证 SQLite 单连接串行访问（不会并发触碰 Connection）
+    private let dbSerialQueue = DispatchQueue(label: "com.deck.sqlite.queue.serial", qos: .utility)
+    private lazy var dbQueue: DispatchQueue = {
+        DispatchQueue(label: "com.deck.sqlite.queue.interactive", qos: .userInitiated, target: dbSerialQueue)
+    }()
+    private lazy var dbBackgroundQueue: DispatchQueue = {
+        DispatchQueue(label: "com.deck.sqlite.queue.background", qos: .utility, target: dbSerialQueue)
+    }()
     
     /// 队列检测 Key：用于判断当前代码是否已在 dbQueue 上执行
     /// - 作用：防止重复 dispatch 导致死锁（如在 dbQueue 上再次 sync 到 dbQueue）
@@ -387,7 +396,10 @@ final class DeckSQLManager: NSObject {
     /// - Note: 设置 `dbQueueKey` 用于检测当前是否在 dbQueue 上执行
     override private init() {
         super.init()
+        // 两个队列 target 到同一串行队列，因此三者都设置 specific key，保证死锁检测可靠。
+        dbSerialQueue.setSpecific(key: dbQueueKey, value: ())
         dbQueue.setSpecific(key: dbQueueKey, value: ())
+        dbBackgroundQueue.setSpecific(key: dbQueueKey, value: ())
         errorStateQueue.setSpecific(key: errorStateQueueKey, value: ())
 
         // Security mode keeps some plaintext in memory caches (lowercased search strings). Clear them when inactive.
@@ -427,6 +439,31 @@ final class DeckSQLManager: NSObject {
         }
         return try await withCheckedThrowingContinuation { continuation in
             dbQueue.async {
+                do {
+                    continuation.resume(returning: try work())
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// 在后台维护队列上同步执行代码块（防止死锁）
+    /// - Note: 该队列 QoS 更低，适合 migration/backfill/vacuum 等“非交互”工作。
+    private func syncOnDBBackgroundQueue<T>(_ work: () throws -> T) rethrows -> T {
+        if DispatchQueue.getSpecific(key: dbQueueKey) != nil {
+            return try work()
+        }
+        return try dbBackgroundQueue.sync(execute: work)
+    }
+
+    /// 在后台维护队列上异步执行代码块（防止死锁）
+    private func asyncOnDBBackgroundQueue<T>(_ work: @escaping () throws -> T) async throws -> T {
+        if DispatchQueue.getSpecific(key: dbQueueKey) != nil {
+            return try work()
+        }
+        return try await withCheckedThrowingContinuation { continuation in
+            dbBackgroundQueue.async {
                 do {
                     continuation.resume(returning: try work())
                 } catch {
@@ -500,6 +537,35 @@ final class DeckSQLManager: NSObject {
         do {
             let result = try await asyncOnDBQueue(work)
             // 操作成功，重置错误计数
+            syncOnErrorStateQueue {
+                consecutiveErrorCount = 0
+            }
+            return result
+        } catch {
+            handleDBError(error)
+            return nil
+        }
+    }
+
+    /// 在后台维护队列上异步执行数据库操作（带错误处理与文件有效性检查）。
+    ///
+    /// 适用场景：migrations / backfills / VACUUM / 大批量重算等。
+    /// 这样可以避免这些任务在 `.userInitiated` 下和用户交互抢 CPU，显著降低能耗与卡顿风险。
+    @discardableResult
+    private func withDBAsyncBackground<T>(_ work: @escaping () throws -> T) async -> T? {
+        if !isDatabaseFileValid() {
+            log.warn("Database file is invalid or missing, attempting to reinitialize...")
+            handleDBError(NSError(domain: "DeckSQL", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "Database file is invalid or missing"
+            ]))
+            DispatchQueue.main.async { [weak self] in
+                self?.reinitialize()
+            }
+            return nil
+        }
+
+        do {
+            let result = try await asyncOnDBBackgroundQueue(work)
             syncOnErrorStateQueue {
                 consecutiveErrorCount = 0
             }
@@ -1191,7 +1257,7 @@ final class DeckSQLManager: NSObject {
         while processed < maxItems {
             guard !Task.isCancelled else { break }
 
-            let rows: [(id: Int64, data: Data)] = syncOnDBQueue {
+            let rows: [(id: Int64, data: Data)] = syncOnDBBackgroundQueue {
                 guard let db = db else { return [] }
                 do {
                     let sql = """
@@ -2011,7 +2077,7 @@ final class DeckSQLManager: NSObject {
         while true {
             guard !Task.isCancelled else { break }
 
-            let rows: [Row] = await withDBAsync {
+            let rows: [Row] = await withDBAsyncBackground {
                 guard let db = self.db, let table = self.table else { return [] }
                 let query = table
                     .select(Col.id, Col.data, Col.searchText, Col.type)
@@ -2087,7 +2153,7 @@ final class DeckSQLManager: NSObject {
     }
 
     private func performLargeImageMigration() async -> Bool {
-        guard syncOnDBQueue({ db != nil && table != nil }) else { return false }
+        guard syncOnDBBackgroundQueue({ db != nil && table != nil }) else { return false }
 
         // 使用分页查询避免一次性加载全部数据
         let batchSize = 50
@@ -2102,7 +2168,7 @@ final class DeckSQLManager: NSObject {
             }
 
             // 每次只查询一批需要迁移的图片
-            let rows: [Row] = await withDBAsync {
+            let rows: [Row] = await withDBAsyncBackground {
                 guard let db = self.db, let table = self.table else { return [] }
                 let blobIsNil = Expression<Bool>("blob_path IS NULL")
                 let filter = (Col.itemType == ClipItemType.image.rawValue) && blobIsNil && (Col.id > lastId)
@@ -2137,7 +2203,7 @@ final class DeckSQLManager: NSObject {
                 // Avoid storing preview duplicates for blob-backed items.
                 guard let encryptedData = encryptData(Data()) else { return false }
 
-                _ = await withDBAsync {
+                _ = await withDBAsyncBackground {
                     guard let db = self.db, let table = self.table else { return }
                     let query = table.filter(Col.id == rowId)
                     try db.run(query.update(
@@ -2177,7 +2243,7 @@ final class DeckSQLManager: NSObject {
         while processed < maxItems {
             guard !Task.isCancelled else { break }
 
-            let rows: [(id: Int64, searchText: String)] = await withDBAsync {
+            let rows: [(id: Int64, searchText: String)] = await withDBAsyncBackground {
                 guard let db = self.db else { return [] }
                 let sql = """
                     SELECT ch.id, ch.search_text
@@ -2222,7 +2288,7 @@ final class DeckSQLManager: NSObject {
     }
 
     private func vacuumDatabase(reason: String) async {
-        let didCheckpoint = await withDBAsync {
+        let didCheckpoint = await withDBAsyncBackground {
             guard let db = self.db else { return false }
             try db.run("PRAGMA wal_checkpoint(TRUNCATE)")
             return true
@@ -2232,7 +2298,7 @@ final class DeckSQLManager: NSObject {
             log.info("WAL checkpoint completed (\(reason))")
         }
 
-        let didVacuum = await withDBAsync {
+        let didVacuum = await withDBAsyncBackground {
             guard let db = self.db else { return false }
             try db.run("VACUUM")
             return true
@@ -3072,8 +3138,13 @@ extension DeckSQLManager {
 
     /// 更新项目的 searchText（用于 OCR 结果）
     /// 注意：FTS 索引会通过 ClipboardHistory_au 触发器自动更新
-    func updateSearchText(id: Int64, searchText: String) async {
-        guard syncOnDBQueue({ db != nil && table != nil }) else {
+    /// 更新 searchText（主要由 OCR / 文件索引回填触发）。默认走后台 DB 队列，避免与用户交互抢 CPU。
+    func updateSearchText(id: Int64, searchText: String, useBackgroundQueue: Bool = true) async {
+        let isReady: Bool = useBackgroundQueue
+            ? syncOnDBBackgroundQueue({ db != nil && table != nil })
+            : syncOnDBQueue({ db != nil && table != nil })
+
+        guard isReady else {
             log.error("OCR DB: Database not initialized")
             return
         }
@@ -3086,12 +3157,21 @@ extension DeckSQLManager {
             return
         }
 
-        if let count: Int = await withDBAsync({
-            guard let db = self.db, let table = self.table else { return 0 }
-            let query = table.filter(Col.id == id)
-            let update = query.update(Col.searchText <- textToStore)
-            return try db.run(update)
-        }) {
+        let count: Int? = useBackgroundQueue
+            ? await withDBAsyncBackground({
+                guard let db = self.db, let table = self.table else { return 0 }
+                let query = table.filter(Col.id == id)
+                let update = query.update(Col.searchText <- textToStore)
+                return try db.run(update)
+            })
+            : await withDBAsync({
+                guard let db = self.db, let table = self.table else { return 0 }
+                let query = table.filter(Col.id == id)
+                let update = query.update(Col.searchText <- textToStore)
+                return try db.run(update)
+            })
+
+        if let count {
             log.info("OCR DB: Successfully updated searchText for \(count) items (FTS auto-synced via trigger)")
             invalidateSearchCache(ids: [id])
             scheduleSemanticEmbeddingUpdate(id: id, searchText: searchText)
@@ -3582,30 +3662,60 @@ extension DeckSQLManager {
                 }
             }
             
-            // Decrypt data if needed (per-row or security mode).
+            // Decrypt lightweight fields up-front (needed for list rendering / filtering).
             let shouldDecrypt = isEncrypted ?? storedIsEncrypted ?? DeckUserDefaults.securityModeEnabled
-            let data = decryptData(rawData, force: shouldDecrypt)
             let previewData = rawPreviewData.map { decryptData($0, force: shouldDecrypt) }
             let searchText = decryptString(rawSearchText, force: shouldDecrypt)
             let appName = decryptString(rawAppName, force: shouldDecrypt)
             let sourceAnchorString = rawSourceAnchor.map { decryptString($0, force: shouldDecrypt) }
             let sourceAnchor = SourceAnchor.fromJSON(sourceAnchorString)
 
-            var inlineData = data
-            var dataIsFull = true
+            // IMPORTANT:
+            // The history panel loads items with `loadFullData == false` (pagination).
+            // Previously we decrypted & inlined the full `data` blob for every item regardless,
+            // which caused memory to grow with scroll distance and spiked CPU during fast scrolling.
+            // Here we keep only lightweight inline payloads and lazily fetch full data on demand.
+
+            var inlineData = Data()
+            var dataIsFull = loadFullData
+
+            // Keep small payloads inline to avoid extra DB fetch for common items,
+            // but never keep large payloads inline when loadFullData == false.
+            let maxInlineBytesForNonImage: Int = 32 * 1024
+            // File URL payloads are typically small (newline-separated paths), but keep a higher
+            // ceiling to avoid breaking paste for multi-select file copies.
+            let maxInlineBytesForFile: Int = 256 * 1024
+            // If an image has no preview (e.g. very small images), keep a slightly larger inline
+            // budget so the UI can still render a thumbnail without fetching.
+            let maxInlineBytesForImageWithoutPreview: Int = 256 * 1024
+
+            let itemType = ClipItemType(rawValue: storedItemType)
 
             if blobPath != nil {
+                // Full payload is stored in an external blob. Keep a preview inline if present.
                 dataIsFull = false
-                if inlineData.isEmpty, let preview = previewData, !preview.isEmpty {
+                if let preview = previewData, !preview.isEmpty {
                     inlineData = preview
                 }
-            } else if !loadFullData,
-                      let itemType = ClipItemType(rawValue: storedItemType),
-                      itemType == .image,
-                      let preview = previewData,
-                      !preview.isEmpty {
+            } else if loadFullData {
+                // Caller explicitly asked for full data.
+                inlineData = decryptData(rawData, force: shouldDecrypt)
+                dataIsFull = true
+            } else if itemType == .image, let preview = previewData, !preview.isEmpty {
+                // Image list mode: keep only thumbnail inline.
                 inlineData = preview
                 dataIsFull = false
+            } else {
+                // Non-image list mode: inline only very small payloads; otherwise lazy-load.
+                let maxInlineBytes = (itemType == .file) ? maxInlineBytesForFile : maxInlineBytesForNonImage
+
+                if rawData.count <= maxInlineBytes || (itemType == .image && rawData.count <= maxInlineBytesForImageWithoutPreview) {
+                    inlineData = decryptData(rawData, force: shouldDecrypt)
+                    dataIsFull = true
+                } else {
+                    inlineData = Data()
+                    dataIsFull = false
+                }
             }
             
             let item = ClipboardItem(
