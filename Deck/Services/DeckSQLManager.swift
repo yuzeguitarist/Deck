@@ -264,7 +264,8 @@ final class DeckSQLManager: NSObject {
     ///   - 用户触发的搜索/写入依然用 `.userInitiated` 保证响应
     ///   - 后台 backfill / vacuum / migration 等用 `.utility`，避免抢占 CPU/能耗飙升
     ///   - 仍然保证 SQLite 单连接串行访问（不会并发触碰 Connection）
-    private let dbSerialQueue = DispatchQueue(label: "com.deck.sqlite.queue.serial", qos: .utility)
+    // Keep the serial queue user-initiated so panel-open queries are not downgraded.
+    private let dbSerialQueue = DispatchQueue(label: "com.deck.sqlite.queue.serial", qos: .userInitiated)
     private lazy var dbQueue: DispatchQueue = {
         DispatchQueue(label: "com.deck.sqlite.queue.interactive", qos: .userInitiated, target: dbSerialQueue)
     }()
@@ -454,7 +455,7 @@ final class DeckSQLManager: NSObject {
         if DispatchQueue.getSpecific(key: dbQueueKey) != nil {
             return try work()
         }
-        return try dbBackgroundQueue.sync(execute: work)
+        return try dbBackgroundQueue.sync(flags: .enforceQoS, execute: work)
     }
 
     /// 在后台维护队列上异步执行代码块（防止死锁）
@@ -463,7 +464,7 @@ final class DeckSQLManager: NSObject {
             return try work()
         }
         return try await withCheckedThrowingContinuation { continuation in
-            dbBackgroundQueue.async {
+            dbBackgroundQueue.async(qos: .utility, flags: .enforceQoS) {
                 do {
                     continuation.resume(returning: try work())
                 } catch {
@@ -795,6 +796,7 @@ final class DeckSQLManager: NSObject {
         let paths = databasePaths(for: basePath)
         let dbPath = paths.dbPath
         let backupPath = paths.backupPath
+        let backupEnabled = DeckUserDefaults.databaseAutoBackupEnabled
         
         var isDir = ObjCBool(false)
         if !FileManager.default.fileExists(atPath: basePath, isDirectory: &isDir) || !isDir.boolValue {
@@ -805,9 +807,14 @@ final class DeckSQLManager: NSObject {
                 return
             }
         }
+
+        if !backupEnabled {
+            removeRecoveryBackupFiles(at: backupPath)
+        }
         
         var restoredFromBackupAtStartup = false
-        if !FileManager.default.fileExists(atPath: dbPath) &&
+        if backupEnabled,
+            !FileManager.default.fileExists(atPath: dbPath) &&
             FileManager.default.fileExists(atPath: backupPath) {
             if restoreDatabaseFromBackup(dbPath: dbPath, backupPath: backupPath) {
                 restoredFromBackupAtStartup = true
@@ -822,16 +829,22 @@ final class DeckSQLManager: NSObject {
                 if !performIntegrityCheckIfNeeded(force: restoredFromBackupAtStartup) {
                     log.warn("Database integrity check failed, attempting to restore from backup")
                     db = nil
-                    if restoreDatabaseFromBackup(dbPath: dbPath, backupPath: backupPath) {
-                        try openDatabase(at: dbPath)
-                        if !performIntegrityCheckIfNeeded(force: true) {
-                            handleDBError(NSError(domain: "DeckSQL", code: -2, userInfo: [
-                                NSLocalizedDescriptionKey: "Database integrity check failed after restore"
+                    if backupEnabled {
+                        if restoreDatabaseFromBackup(dbPath: dbPath, backupPath: backupPath) {
+                            try openDatabase(at: dbPath)
+                            if !performIntegrityCheckIfNeeded(force: true) {
+                                handleDBError(NSError(domain: "DeckSQL", code: -2, userInfo: [
+                                    NSLocalizedDescriptionKey: "Database integrity check failed after restore"
+                                ]))
+                            }
+                        } else {
+                            handleDBError(NSError(domain: "DeckSQL", code: -3, userInfo: [
+                                NSLocalizedDescriptionKey: "Database integrity check failed and no backup available"
                             ]))
                         }
                     } else {
-                        handleDBError(NSError(domain: "DeckSQL", code: -3, userInfo: [
-                            NSLocalizedDescriptionKey: "Database integrity check failed and no backup available"
+                        handleDBError(NSError(domain: "DeckSQL", code: -4, userInfo: [
+                            NSLocalizedDescriptionKey: "Database integrity check failed and automatic backups are disabled"
                         ]))
                     }
                 }
@@ -847,8 +860,10 @@ final class DeckSQLManager: NSObject {
             Task { @MainActor in
                 DeckSQLManager.shared.ensureFTSTrigramIfAvailable()
             }
-            Task {
-                DeckSQLManager.shared.backupDatabaseIfNeeded(dbPath: dbPath, backupPath: backupPath)
+            if backupEnabled {
+                Task {
+                    DeckSQLManager.shared.backupDatabaseIfNeeded(dbPath: dbPath, backupPath: backupPath)
+                }
             }
         } catch {
             log.error("Database connection error: \(error.localizedDescription)")
@@ -1346,6 +1361,42 @@ final class DeckSQLManager: NSObject {
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // MARK: - Backup & Recovery (备份与恢复)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    /// 获取数据库恢复备份文件路径（Deck.sqlite3.bak）
+    func getDatabaseRecoveryBackupPath() -> String {
+        let basePath = getStoragePath()
+        return databasePaths(for: basePath).backupPath
+    }
+
+    /// 立即创建数据库恢复备份（可选同步执行）
+    func createDatabaseRecoveryBackupNow(synchronous: Bool = false) {
+        let basePath = getStoragePath()
+        let paths = databasePaths(for: basePath)
+        backupDatabaseIfNeeded(
+            dbPath: paths.dbPath,
+            backupPath: paths.backupPath,
+            force: true,
+            synchronous: synchronous
+        )
+    }
+
+    /// 删除数据库恢复备份文件
+    func deleteDatabaseRecoveryBackup() {
+        let basePath = getStoragePath()
+        let backupPath = databasePaths(for: basePath).backupPath
+        removeRecoveryBackupFiles(at: backupPath)
+    }
+
+    private func removeRecoveryBackupFiles(at backupPath: String) {
+        let fileManager = FileManager.default
+        let tempPath = backupPath + ".tmp"
+        if fileManager.fileExists(atPath: backupPath) {
+            try? fileManager.removeItem(atPath: backupPath)
+        }
+        if fileManager.fileExists(atPath: tempPath) {
+            try? fileManager.removeItem(atPath: tempPath)
+        }
+    }
     
     /// 自动备份数据库（如果需要）
     /// - Parameters:
@@ -1361,6 +1412,7 @@ final class DeckSQLManager: NSObject {
         force: Bool = false,
         synchronous: Bool = false
     ) {
+        guard DeckUserDefaults.databaseAutoBackupEnabled else { return }
         guard FileManager.default.fileExists(atPath: dbPath) else { return }
 
         if !force, let attrs = try? FileManager.default.attributesOfItem(atPath: backupPath),
