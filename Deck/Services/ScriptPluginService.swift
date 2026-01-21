@@ -131,6 +131,14 @@ final class ScriptPluginService {
     static let shared = ScriptPluginService()
 
     private(set) var plugins: [ScriptPlugin] = []
+    private let pluginsLock = NSLock()
+    private let maxManifestBytes = 64 * 1024
+    private let maxScriptBytes = 1 * 1024 * 1024
+    private let reloadQueue = DispatchQueue(label: "deck.script.reload", qos: .utility)
+    private let reloadLock = NSLock()
+    private var pendingReloadWorkItem: DispatchWorkItem?
+    private var lastReloadTime = Date.distantPast
+    private let minReloadInterval: TimeInterval = 0.3
     private let stateLock = NSLock()
     private var executionStates: [String: ExecutionState] = [:]
     private let scriptExecutionQueue = DispatchQueue(
@@ -183,6 +191,13 @@ final class ScriptPluginService {
                 log.error("Failed to create scripts directory: \(error)")
             }
         }
+    }
+
+    private func isURL(_ candidate: URL, within directory: URL) -> Bool {
+        let base = directory.resolvingSymlinksInPath().standardizedFileURL
+        let resolved = candidate.resolvingSymlinksInPath().standardizedFileURL
+        let basePath = base.path.hasSuffix("/") ? base.path : (base.path + "/")
+        return resolved.path.hasPrefix(basePath)
     }
 
     /// 创建示例脚本
@@ -328,18 +343,33 @@ final class ScriptPluginService {
 
     /// 重新加载所有插件
     func reloadPlugins() {
-        clearExecutionStates()
-        loadPlugins()
+        let now = Date()
+        reloadLock.lock()
+        let elapsed = now.timeIntervalSince(lastReloadTime)
+        let delay = elapsed >= minReloadInterval ? 0 : (minReloadInterval - elapsed)
+        pendingReloadWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.reloadLock.lock()
+            self.lastReloadTime = Date()
+            self.pendingReloadWorkItem = nil
+            self.reloadLock.unlock()
+            self.clearExecutionStates()
+            self.loadPlugins()
+        }
+        pendingReloadWorkItem = workItem
+        reloadLock.unlock()
+        reloadQueue.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     /// 加载所有插件
     private func loadPlugins() {
-        plugins.removeAll()
+        var loaded: [ScriptPlugin] = []
 
         let fm = FileManager.default
         guard let contents = try? fm.contentsOfDirectory(
             at: scriptsDirectoryURL,
-            includingPropertiesForKeys: [.isDirectoryKey],
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
             options: .skipsHiddenFiles
         ) else {
             log.warn("Cannot read scripts directory")
@@ -347,33 +377,80 @@ final class ScriptPluginService {
         }
 
         for url in contents {
-            guard let resourceValues = try? url.resourceValues(forKeys: [.isDirectoryKey]),
+            guard let resourceValues = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
                   resourceValues.isDirectory == true else {
                 continue
             }
 
+            if resourceValues.isSymbolicLink == true {
+                log.warn("Skipping symlinked plugin directory: \(url.path)")
+                continue
+            }
+
             if let plugin = loadPlugin(from: url) {
-                plugins.append(plugin)
+                loaded.append(plugin)
             }
         }
 
-        log.info("Loaded \(plugins.count) script plugins")
+        pluginsLock.lock()
+        plugins = loaded
+        pluginsLock.unlock()
+
+        log.info("Loaded \(loaded.count) script plugins")
     }
 
     /// 从目录加载单个插件
     private func loadPlugin(from directory: URL) -> ScriptPlugin? {
+        let fm = FileManager.default
         let manifestURL = directory.appendingPathComponent("manifest.json")
 
-        guard let manifestData = try? Data(contentsOf: manifestURL),
+        do {
+            let attrs = try fm.attributesOfItem(atPath: manifestURL.path)
+            if let fileType = attrs[.type] as? FileAttributeType, fileType != .typeRegular {
+                log.warn("Invalid manifest type in \(directory.lastPathComponent)")
+                return nil
+            }
+            let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+            if size <= 0 || size > maxManifestBytes {
+                log.warn("manifest.json too large (\(size) bytes), skipping plugin: \(directory.lastPathComponent)")
+                return nil
+            }
+        } catch {
+            log.warn("Invalid or missing manifest.json in \(directory.lastPathComponent)")
+            return nil
+        }
+
+        guard let manifestData = try? Data(contentsOf: manifestURL, options: [.mappedIfSafe]),
               let manifest = try? JSONDecoder().decode(ScriptManifest.self, from: manifestData) else {
             log.warn("Invalid or missing manifest.json in \(directory.lastPathComponent)")
             return nil
         }
 
-        let scriptPath = directory.appendingPathComponent(manifest.main).path
+        let scriptURL = directory.appendingPathComponent(manifest.main)
+        guard isURL(scriptURL, within: directory) else {
+            log.warn("Script path escapes plugin directory, skipping plugin: \(directory.lastPathComponent)")
+            return nil
+        }
+        let scriptPath = scriptURL.path
 
-        guard FileManager.default.fileExists(atPath: scriptPath) else {
+        guard fm.fileExists(atPath: scriptPath) else {
             log.warn("Script file not found: \(scriptPath)")
+            return nil
+        }
+
+        do {
+            let attrs = try fm.attributesOfItem(atPath: scriptPath)
+            if let fileType = attrs[.type] as? FileAttributeType, fileType != .typeRegular {
+                log.warn("Invalid script file type, skipping plugin: \(directory.lastPathComponent)")
+                return nil
+            }
+            let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+            if size <= 0 || size > maxScriptBytes {
+                log.warn("Script file too large (\(size) bytes), skipping plugin: \(directory.lastPathComponent)")
+                return nil
+            }
+        } catch {
+            log.warn("Failed to read script file attributes, skipping plugin: \(directory.lastPathComponent)")
             return nil
         }
 
@@ -393,11 +470,20 @@ final class ScriptPluginService {
     }
 
     private func computeScriptHash(at path: String) -> String? {
-        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+        do {
+            let attrs = try FileManager.default.attributesOfItem(atPath: path)
+            let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+            if size <= 0 || size > maxScriptBytes {
+                log.warn("Script file too large for hashing (\(size) bytes): \(path)")
+                return nil
+            }
+            let data = try Data(contentsOf: URL(fileURLWithPath: path), options: [.mappedIfSafe])
+            let hash = SHA256.hash(data: data)
+            return hash.compactMap { String(format: "%02x", $0) }.joined()
+        } catch {
+            log.warn("Failed to hash script file: \(error.localizedDescription)")
             return nil
         }
-        let hash = SHA256.hash(data: data)
-        return hash.compactMap { String(format: "%02x", $0) }.joined()
     }
 
     // MARK: - Script Execution
@@ -450,7 +536,12 @@ final class ScriptPluginService {
     }
 
     private func executeTransformInternal(pluginId: String, input: String) -> ScriptResult {
-        guard let plugin = plugins.first(where: { $0.id == pluginId }) else {
+        let plugin: ScriptPlugin? = {
+            pluginsLock.lock()
+            defer { pluginsLock.unlock() }
+            return plugins.first(where: { $0.id == pluginId })
+        }()
+        guard let plugin else {
             return ScriptResult(success: false, output: nil, error: "插件不存在")
         }
 
@@ -693,6 +784,17 @@ final class ScriptPluginService {
         }
 
         // 加载脚本
+        do {
+            let attrs = try FileManager.default.attributesOfItem(atPath: plugin.scriptPath)
+            let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+            guard size > 0, size <= maxScriptBytes else {
+                log.warn("Plugin script too large (\(size) bytes): \(plugin.scriptPath)")
+                return nil
+            }
+        } catch {
+            log.warn("Failed to stat plugin script: \(error.localizedDescription)")
+            return nil
+        }
         guard let scriptContent = try? String(contentsOfFile: plugin.scriptPath, encoding: .utf8) else {
             log.error("Failed to read script: \(plugin.scriptPath)")
             return nil
@@ -889,7 +991,11 @@ final class ScriptPluginService {
 
     /// 授权插件网络权限
     func authorizeNetworkPermission(for pluginId: String) {
-        let scriptHash = plugins.first(where: { $0.id == pluginId })?.scriptHash
+        let scriptHash: String? = {
+            pluginsLock.lock()
+            defer { pluginsLock.unlock() }
+            return plugins.first(where: { $0.id == pluginId })?.scriptHash
+        }()
         DeckUserDefaults.authorizeNetworkPlugin(pluginId: pluginId, scriptHash: scriptHash)
         log.info("Authorized network permission for plugin: \(pluginId)")
     }

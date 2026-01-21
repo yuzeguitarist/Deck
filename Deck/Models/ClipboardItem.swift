@@ -131,7 +131,7 @@ final class ClipboardItem: Identifiable, Equatable {
     private let dataLock = NSLock()
     
     @ObservationIgnored
-    private(set) lazy var itemType: ClipItemType = detectItemType()
+    private(set) var itemType: ClipItemType = .text
     
     @ObservationIgnored
     private var cachedThumbnail: NSImage?
@@ -304,6 +304,8 @@ final class ClipboardItem: Identifiable, Equatable {
                 cachedFilePaths = urlString.components(separatedBy: "\n").filter { !$0.isEmpty }
             }
         }
+
+        self.itemType = detectItemType()
     }
 
     var data: Data {
@@ -367,12 +369,15 @@ final class ClipboardItem: Identifiable, Equatable {
         var resolvedType = type
         log.debug("Creating item with type: \(type.rawValue)")
 
+        let plainTextCandidate = item.string(forType: .string)
+        let normalizedPlainTextCandidate = plainTextCandidate.map { Self.normalizedPlainText($0) } ?? ""
+        let hasPlainTextCandidate = !normalizedPlainTextCandidate.isEmpty
+
         var content: Data?
         var filePaths: [String] = []
         if (type == .rtfd || type == .flatRTFD),
-           let plain = item.string(forType: .string),
-           !Self.normalizedPlainText(plain).isEmpty,
-           let plainData = plain.data(using: .utf8) {
+           hasPlainTextCandidate,
+           let plainData = plainTextCandidate?.data(using: .utf8) {
             // Prefer plain text for RTFD to avoid heavy decoding and NSSecureCoding warnings.
             resolvedType = .string
             content = plainData
@@ -398,7 +403,13 @@ final class ClipboardItem: Identifiable, Equatable {
         var attributedString = NSAttributedString()
         
         if resolvedType.isText() {
-            attributedString = NSAttributedString(with: content, type: resolvedType) ?? NSAttributedString()
+            if (resolvedType == .rtf || resolvedType == .rtfd || resolvedType == .flatRTFD),
+               hasPlainTextCandidate {
+                // Avoid decoding RTF/RTFD when plain text is already available to sidestep Obj-C decode warnings.
+                attributedString = NSAttributedString(string: plainTextCandidate ?? "")
+            } else {
+                attributedString = NSAttributedString(with: content, type: resolvedType) ?? NSAttributedString()
+            }
             let trimmedText = Self.normalizedPlainText(attributedString.string)
 
             if trimmedText.isEmpty,
