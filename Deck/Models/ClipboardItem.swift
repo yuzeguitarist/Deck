@@ -1104,7 +1104,14 @@ extension ClipboardItem {
                     }
                 }
                 if paths.count == 1 {
-                    provider.suggestedName = URL(fileURLWithPath: paths[0]).lastPathComponent
+                    let fileName = URL(fileURLWithPath: paths[0]).lastPathComponent
+                    let baseName: String
+                    if let dotIndex = fileName.lastIndex(of: "."), dotIndex != fileName.startIndex {
+                        baseName = String(fileName[..<dotIndex])
+                    } else {
+                        baseName = fileName
+                    }
+                    provider.suggestedName = baseName
                 }
             }
         }
