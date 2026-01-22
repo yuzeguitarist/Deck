@@ -22,24 +22,159 @@ extension Data {
 
 extension String {
     func asCompleteURL() -> URL? {
-        let trimmed = self.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        
-        // Check if it's already a valid URL with scheme
-        if let url = URL(string: trimmed), let scheme = url.scheme,
-           ["http", "https", "ftp"].contains(scheme.lowercased()) {
+        var candidate = self.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !candidate.isEmpty else { return nil }
+
+        // Strip common wrappers like <...>, (...), [...], {...}, quotes.
+        if candidate.count >= 2 {
+            let first = candidate.first!
+            let last = candidate.last!
+            let pairs: [(Character, Character)] = [("<", ">"), ("(", ")"), ("[", "]"), ("{", "}"), ("\"", "\""), ("'", "'")]
+            if pairs.contains(where: { $0.0 == first && $0.1 == last }) {
+                candidate.removeFirst()
+                candidate.removeLast()
+                candidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+
+        candidate = trimTrailingURLPunctuation(candidate)
+        guard !candidate.isEmpty else { return nil }
+        guard candidate.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else { return nil }
+
+        let lower = candidate.lowercased()
+        guard !lower.hasPrefix("mailto:") else { return nil }
+
+        func buildURL(_ string: String) -> URL? {
+            if let url = URL(string: string) { return url }
+            if let encoded = string.addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed) {
+                return URL(string: encoded)
+            }
+            return nil
+        }
+
+        func isIPv4(_ host: String) -> Bool {
+            let parts = host.split(separator: ".")
+            guard parts.count == 4 else { return false }
+            for part in parts {
+                guard let value = Int(part), (0...255).contains(value) else { return false }
+            }
+            return true
+        }
+
+        func isValidHost(_ host: String) -> Bool {
+            if host == "localhost" { return true }
+            if isIPv4(host) { return true }
+            if host.contains(":") { return true } // IPv6 literal
+
+            let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.")
+            if host.rangeOfCharacter(from: allowed.inverted) != nil { return false }
+            if host.contains("..") { return false }
+
+            let labels = host.split(separator: ".")
+            guard labels.count >= 2 else { return false }
+            for label in labels {
+                if label.isEmpty { return false }
+                if label.count > 63 { return false }
+                if label.hasPrefix("-") || label.hasSuffix("-") { return false }
+            }
+            return true
+        }
+
+        // Already has a scheme: accept common web schemes only.
+        if let url = buildURL(candidate),
+           let scheme = url.scheme?.lowercased(),
+           ["http", "https", "ftp"].contains(scheme) {
+            guard let host = url.host, isValidHost(host) else { return nil }
             return url
         }
-        
-        // Try adding https:// prefix for domain-like strings
-        let pattern = #"^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+.*$"#
-        if trimmed.range(of: pattern, options: .regularExpression) != nil {
-            if let url = URL(string: "https://\(trimmed)") {
+
+        // www.* shorthand
+        if lower.hasPrefix("www.") {
+            let normalized = "https://" + candidate
+            if let url = buildURL(normalized), let host = url.host, isValidHost(host) {
                 return url
             }
         }
-        
+
+        // Handle localhost / IPs without scheme.
+        let hostPart = candidate.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true).first ?? Substring(candidate)
+        let host = String(hostPart.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: true).first ?? hostPart)
+        if host == "localhost" || isIPv4(host) {
+            let normalized = "http://" + candidate
+            if let url = buildURL(normalized), let urlHost = url.host, isValidHost(urlHost) {
+                return url
+            }
+        }
+
+        // Bare domain validation (avoid matching "Foo.swift" as URL).
+        guard !candidate.contains("@") else { return nil }
+        let domainPattern = #"^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+(?:[A-Za-z]{2,63})(?::\d{2,5})?(?:/[^\s]*)?$"#
+        if candidate.range(of: domainPattern, options: .regularExpression) != nil {
+            let hostPart = candidate.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: true).first ?? Substring(candidate)
+            let hostOnly = String(hostPart.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: true).first ?? hostPart)
+            if let tld = hostOnly.split(separator: ".").last {
+                let tldLower = tld.lowercased()
+                if !Self.blockedBareDomainTLDs.contains(tldLower) {
+                    let hasPathOrPort = candidate.contains("/") || candidate.contains(":")
+                    if hasPathOrPort || Self.commonBareDomainTLDs.contains(tldLower) {
+                        let normalized = "https://" + candidate
+                        if let url = buildURL(normalized), let urlHost = url.host, isValidHost(urlHost) {
+                            return url
+                        }
+                    }
+                }
+            }
+        }
+
         return nil
+    }
+
+    private static let urlTrailingPunctuation: Set<Character> = [
+        ".", ",", ";", ":", "!", "?", "'", "\"",
+        "，", "。", "；", "：", "！", "？", "、", "…"
+    ]
+
+    private static let urlTrailingBracketPairs: [Character: Character] = [
+        ")": "(", "]": "[", "}": "{", ">": "<",
+        "）": "（", "】": "【", "》": "《"
+    ]
+
+    private static let blockedBareDomainTLDs: Set<String> = [
+        // Common file / code extensions to reduce false positives for bare-domain detection.
+        "swift", "js", "ts", "py", "json", "yaml", "yml", "md", "txt", "csv", "log", "plist",
+        "c", "h", "m", "mm", "cpp", "hpp", "java", "kt", "cs", "rs", "go", "rb", "php",
+        "html", "css", "sql", "sh", "bat",
+        // Common asset / archive extensions.
+        "png", "jpg", "jpeg", "gif", "webp", "heic", "tiff", "bmp", "svg", "icns", "ico",
+        "pdf", "zip", "tar", "gz", "bz2", "7z", "dmg", "pkg", "app"
+    ]
+
+    private static let commonBareDomainTLDs: Set<String> = [
+        "com", "net", "org", "edu", "gov", "mil",
+        "io", "ai", "app", "dev", "co", "me", "info", "biz", "name", "pro",
+        "cn", "jp", "kr", "uk", "de", "fr", "es", "it", "nl", "ru", "br", "in", "au", "ca", "us",
+        "ch", "se", "no", "fi", "dk", "pl", "tr", "mx", "id", "sg", "hk", "tw", "vn", "th", "my", "ph", "za", "nz",
+        "tech", "site", "online", "store", "blog", "cloud"
+    ]
+
+    private func trimTrailingURLPunctuation(_ input: String) -> String {
+        var output = input
+        while let last = output.last {
+            if Self.urlTrailingPunctuation.contains(last) {
+                output.removeLast()
+                continue
+            }
+            if let opener = Self.urlTrailingBracketPairs[last] {
+                let opens = output.filter { $0 == opener }.count
+                let closes = output.filter { $0 == last }.count
+                if closes > opens {
+                    output.removeLast()
+                    continue
+                }
+            }
+            break
+        }
+        return output
     }
     
     var isHexColor: Bool {

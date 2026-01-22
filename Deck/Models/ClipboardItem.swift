@@ -111,10 +111,12 @@ final class ClipboardItem: Identifiable, Equatable {
             guard searchText != oldValue else { return }
             base64ImageChecked = false
             cachedBase64Image = nil
+            analysisLock.lock()
             cachedSmartAnalysis = nil
             cachedIsMarkdown = nil
             cachedCalculationResult = nil
             calculationResultChecked = false
+            analysisLock.unlock()
         }
     }
     let contentLength: Int
@@ -129,6 +131,9 @@ final class ClipboardItem: Identifiable, Equatable {
 
     @ObservationIgnored
     private let dataLock = NSLock()
+
+    @ObservationIgnored
+    private let analysisLock = NSLock()
     
     @ObservationIgnored
     private(set) var itemType: ClipItemType = .text
@@ -670,16 +675,23 @@ final class ClipboardItem: Identifiable, Equatable {
             log.debug("Returning .file")
             return .file
         case .rtf, .rtfd, .flatRTFD:
-            let text = searchText
-            if text.isHexColor { return .color }
-            if text.asCompleteURL() != nil { return .url }
-            if text.isCodeSnippet { return .code }
+            let rawText = searchText
+            let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isHexColor { return .color }
+            // URL detection should win over code detection (e.g. URLs inside markdown/rtf).
+            if trimmed.asCompleteURL() != nil { return .url }
+            let sample = rawText.count > Const.maxSmartAnalysisLength ? String(rawText.prefix(Const.maxSmartAnalysisLength)) : rawText
+            if let language = SmartTextService.shared.detectCodeLanguage(in: sample), language != .markdown { return .code }
+            if rawText.isCodeSnippet { return .code }
             return .richText
         case .string:
-            let text = String(data: data, encoding: .utf8) ?? ""
-            if text.isHexColor { return .color }
-            if text.asCompleteURL() != nil { return .url }
-            if text.isCodeSnippet { return .code }
+            let rawText = String(data: data, encoding: .utf8) ?? ""
+            let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isHexColor { return .color }
+            if trimmed.asCompleteURL() != nil { return .url }
+            let sample = rawText.count > Const.maxSmartAnalysisLength ? String(rawText.prefix(Const.maxSmartAnalysisLength)) : rawText
+            if let language = SmartTextService.shared.detectCodeLanguage(in: sample), language != .markdown { return .code }
+            if rawText.isCodeSnippet { return .code }
             return .text
         default:
             return .text
@@ -992,11 +1004,17 @@ final class ClipboardItem: Identifiable, Equatable {
     }
     
     var smartAnalysis: SmartTextService.DetectionResult {
+        analysisLock.lock()
         if let cachedSmartAnalysis {
+            analysisLock.unlock()
             return cachedSmartAnalysis
         }
+        analysisLock.unlock()
+
         let result = SmartTextService.shared.analyze(analysisSample)
+        analysisLock.lock()
         cachedSmartAnalysis = result
+        analysisLock.unlock()
         return result
     }
     
@@ -1005,11 +1023,17 @@ final class ClipboardItem: Identifiable, Equatable {
     }
     
     var isMarkdown: Bool {
+        analysisLock.lock()
         if let cachedIsMarkdown {
+            analysisLock.unlock()
             return cachedIsMarkdown
         }
+        analysisLock.unlock()
+
         let detected = SmartTextService.shared.isMarkdown(analysisSample)
+        analysisLock.lock()
         cachedIsMarkdown = detected
+        analysisLock.unlock()
         return detected
     }
 
@@ -1019,23 +1043,34 @@ final class ClipboardItem: Identifiable, Equatable {
         guard DeckUserDefaults.instantCalculation else {
             return nil
         }
+        analysisLock.lock()
         if calculationResultChecked {
-            return cachedCalculationResult
+            let cached = cachedCalculationResult
+            analysisLock.unlock()
+            return cached
         }
+        analysisLock.unlock()
         // 只对文本类型且长度合适的内容进行计算
         guard itemType == .text || itemType == .code else {
+            analysisLock.lock()
             calculationResultChecked = true
+            analysisLock.unlock()
             return nil
         }
-        cachedCalculationResult = SmartTextService.shared.detectAndCalculate(searchText)
+        let result = SmartTextService.shared.detectAndCalculate(searchText)
+        analysisLock.lock()
+        cachedCalculationResult = result
         calculationResultChecked = true
-        return cachedCalculationResult
+        analysisLock.unlock()
+        return result
     }
 
     var hasSmartContent: Bool {
         let analysis = smartAnalysis
         return !analysis.emails.isEmpty ||
+               !analysis.urls.isEmpty ||
                !analysis.phones.isEmpty ||
+               !analysis.ipAddresses.isEmpty ||
                analysis.codeLanguage != nil ||
                analysis.jwt != nil ||
                isMarkdown ||
