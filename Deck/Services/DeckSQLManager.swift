@@ -393,6 +393,10 @@ final class DeckSQLManager: NSObject {
         return cache
     }()
 
+    /// Backfill cache for legacy rows with empty unique_id values.
+    /// Keeps a stable generated UUID per row until the DB update succeeds.
+    private var pendingUniqueIdBackfill: [Int64: String] = [:]
+
     /// 单例初始化（设置队列检测机制）
     /// - Note: 设置 `dbQueueKey` 用于检测当前是否在 dbQueue 上执行
     override private init() {
@@ -2842,7 +2846,14 @@ extension DeckSQLManager {
         let isSecurityMode = DeckUserDefaults.securityModeEnabled
 
         if item.itemType == .image && item.data.count > Const.largeBlobThreshold {
-            if let path = BlobStorage.shared.store(data: item.data, uniqueId: item.uniqueId, encrypt: isSecurityMode) {
+            // Large image blobs can be 10s-100s of MB. Persisting them synchronously on the
+            // caller's executor (often MainActor via UI-driven insert) causes visible UI stalls.
+            // Offload to BlobStorage's IO queue while preserving the exact insert semantics.
+            if let path = await BlobStorage.shared.storeAsync(
+                data: item.data,
+                uniqueId: item.uniqueId,
+                encrypt: isSecurityMode
+            ) {
                 blobPath = path
 
                 if previewData == nil || previewData!.isEmpty {
@@ -3061,7 +3072,13 @@ extension DeckSQLManager {
         let isSecurityMode = DeckUserDefaults.securityModeEnabled
 
         if item.itemType == .image, item.hasFullData, item.data.count > Const.largeBlobThreshold {
-            if let path = BlobStorage.shared.store(data: item.data, uniqueId: item.uniqueId, encrypt: isSecurityMode) {
+            // Large updates can also be triggered from UI flows (e.g., edits / reprocessing).
+            // Persist off the caller's executor to keep UI responsive.
+            if let path = await BlobStorage.shared.storeAsync(
+                data: item.data,
+                uniqueId: item.uniqueId,
+                encrypt: isSecurityMode
+            ) {
                 blobPathToStore = path
 
                 if previewData == nil || previewData!.isEmpty {
@@ -3272,9 +3289,10 @@ extension DeckSQLManager {
         return await withDBAsync {
             guard let db = self.db else { return [] }
             let sql = """
-                SELECT rowid FROM ClipboardHistory_fts
+                SELECT rowid, bm25(ClipboardHistory_fts) AS score
+                FROM ClipboardHistory_fts
                 WHERE ClipboardHistory_fts MATCH ?
-                ORDER BY rank
+                ORDER BY score
                 LIMIT ?
             """
             let stmt = try db.prepare(sql).bind(ftsQuery, limit)
@@ -3511,6 +3529,25 @@ extension DeckSQLManager {
         return rows.compactMap { rowToClipboardItem($0, loadFullData: loadFullData) }
     }
 
+    func fetchAllBeforeCursor(
+        limit: Int = 10000,
+        beforeTimestamp: Int64? = nil,
+        beforeId: Int64? = nil,
+        loadFullData: Bool = false
+    ) async -> [ClipboardItem] {
+        let rows = await withDBAsync { () throws -> [Row] in
+            guard let db = self.db, let table = self.table else { return [Row]() }
+            var query = table
+            if let beforeTimestamp, let beforeId {
+                let cursorFilter = (Col.ts < beforeTimestamp) || (Col.ts == beforeTimestamp && Col.id < beforeId)
+                query = query.filter(cursorFilter)
+            }
+            query = query.order(Col.ts.desc, Col.id.desc).limit(limit)
+            return Array(try db.prepare(query))
+        } ?? []
+        return rows.compactMap { rowToClipboardItem($0, loadFullData: loadFullData) }
+    }
+
     func fetchAll(limit: Int = 10000, offset: Int = 0, loadFullData: Bool = false) -> [ClipboardItem] {
         let rows = withDB { () throws -> [Row] in
             guard let db = self.db, let table = self.table else { return [Row]() }
@@ -3536,6 +3573,30 @@ extension DeckSQLManager {
         } ?? nil
     }
 
+    /// Ensure a non-empty unique_id for the given item, backfilling legacy rows if needed.
+    func ensureNonEmptyUniqueId(for item: ClipboardItem) async -> String {
+        if !item.uniqueId.isEmpty { return item.uniqueId }
+        guard let id = item.id else { return UUID().uuidString }
+
+        if let row = await fetch(id: id),
+           let existing = try? row.get(Col.uniqueId),
+           !existing.isEmpty {
+            return existing
+        }
+
+        let resolvedUniqueId = syncOnDBQueue {
+            if let pending = pendingUniqueIdBackfill[id] {
+                return pending
+            }
+            let newId = UUID().uuidString
+            pendingUniqueIdBackfill[id] = newId
+            return newId
+        }
+
+        backfillUniqueIdIfNeeded(id: id, uniqueId: resolvedUniqueId)
+        return resolvedUniqueId
+    }
+
     /// Fetch raw data payload for a single item (used for lazy loading).
     func fetchData(for id: Int64, isEncrypted: Bool? = nil) -> Data? {
         return withDB { () -> Data? in
@@ -3548,15 +3609,28 @@ extension DeckSQLManager {
         } ?? nil
     }
 
-    /// 批量获取多个 ID 的记录，使用单次 SQL 查询
+    /// 批量获取多个 ID 的记录（自动分块避免 SQLite 变量上限）
     func fetchBatch(ids: [Int64]) async -> [Row] {
         guard !ids.isEmpty else { return [] }
-        return await withDBAsync {
-            guard let db = self.db, let table = self.table else { return [] }
-            // 使用 WHERE id IN (...) 查询
-            let query = table.filter(ids.contains(Col.id))
-            return Array(try db.prepare(query))
-        } ?? []
+        // SQLite 默认变量限制 999，分块查询避免超限
+        let chunkSize = 900
+        var results: [Row] = []
+        results.reserveCapacity(ids.count)
+
+        var start = 0
+        while start < ids.count {
+            let end = min(start + chunkSize, ids.count)
+            let chunk = Array(ids[start..<end])
+            let rows: [Row] = await withDBAsync {
+                guard let db = self.db, let table = self.table else { return [Row]() }
+                let query = table.filter(chunk.contains(Col.id))
+                return Array(try db.prepare(query))
+            } ?? []
+            results.append(contentsOf: rows)
+            start = end
+        }
+
+        return results
     }
 
     func count(typeFilter: [String]? = nil) async -> Int {
@@ -3688,6 +3762,23 @@ extension DeckSQLManager {
             return results
         } ?? []
     }
+
+    private func backfillUniqueIdIfNeeded(id: Int64, uniqueId: String) {
+        Task { [weak self] in
+            guard let self else { return }
+            let didUpdate = await self.withDBAsync {
+                guard let db = self.db, let table = self.table else { return false }
+                let query = table.filter(Col.id == id && Col.uniqueId == "")
+                return try db.run(query.update(Col.uniqueId <- uniqueId)) > 0
+            } ?? false
+
+            if didUpdate {
+                _ = self.syncOnDBQueue {
+                    self.pendingUniqueIdBackfill.removeValue(forKey: id)
+                }
+            }
+        }
+    }
     
     func rowToClipboardItem(_ row: Row, isEncrypted: Bool? = nil, loadFullData: Bool = true) -> ClipboardItem? {
         do {
@@ -3704,6 +3795,20 @@ extension DeckSQLManager {
             let tagId = try row.get(Col.tagId)
             let blobPath = try row.get(Col.blobPath)
             let storedUniqueId = try row.get(Col.uniqueId)
+            let resolvedUniqueId: String
+            if storedUniqueId.isEmpty {
+                resolvedUniqueId = syncOnDBQueue {
+                    if let pending = pendingUniqueIdBackfill[id] {
+                        return pending
+                    }
+                    let newId = UUID().uuidString
+                    pendingUniqueIdBackfill[id] = newId
+                    return newId
+                }
+                backfillUniqueIdIfNeeded(id: id, uniqueId: resolvedUniqueId)
+            } else {
+                resolvedUniqueId = storedUniqueId
+            }
             let storedItemType = try row.get(Col.itemType)
             let rawIsTemporary = (try? row.get(Col.isTemporary)) ?? false
             let storedIsEncrypted = try? row.get(Col.isEncrypted)
@@ -3743,11 +3848,16 @@ extension DeckSQLManager {
 
             let itemType = ClipItemType(rawValue: storedItemType)
 
-            if blobPath != nil {
-                // Full payload is stored in an external blob. Keep a preview inline if present.
-                dataIsFull = false
-                if let preview = previewData, !preview.isEmpty {
-                    inlineData = preview
+            if let blobPath {
+                // Full payload is stored in an external blob. Only load it if explicitly requested.
+                if loadFullData, let fullData = BlobStorage.shared.load(path: blobPath) {
+                    inlineData = fullData
+                    dataIsFull = true
+                } else {
+                    dataIsFull = false
+                    if let preview = previewData, !preview.isEmpty {
+                        inlineData = preview
+                    }
                 }
             } else if loadFullData {
                 // Caller explicitly asked for full data.
@@ -3783,7 +3893,7 @@ extension DeckSQLManager {
                 tagId: tagId,
                 isTemporary: isTemporary,
                 id: id,
-                uniqueId: storedUniqueId,
+                uniqueId: resolvedUniqueId,
                 blobPath: blobPath,
                 dataIsFull: dataIsFull
             )

@@ -68,13 +68,13 @@ final class DataExportService {
     
     // MARK: - Export Format
     
-    struct ExportData: Codable {
+    nonisolated struct ExportData: Codable, Sendable {
         let version: Int
         let exportDate: Date
         let items: [ExportItem]
     }
     
-    struct ExportItem: Codable {
+    nonisolated struct ExportItem: Codable, Sendable {
         let uniqueId: String
         let type: String
         let itemType: String
@@ -167,13 +167,19 @@ final class DataExportService {
         defer { try? handle.close() }
         try handle.seekToEnd()
 
-        var offset = 0
         let batchSize = 500
         var isFirst = true
         var exportedCount = 0
+        var cursorTimestamp: Int64?
+        var cursorId: Int64?
 
         while true {
-            let batch = await DeckSQLManager.shared.fetchAll(limit: batchSize, offset: offset, loadFullData: true)
+            let batch = await DeckSQLManager.shared.fetchAllBeforeCursor(
+                limit: batchSize,
+                beforeTimestamp: cursorTimestamp,
+                beforeId: cursorId,
+                loadFullData: true
+            )
             if batch.isEmpty { break }
 
             for item in batch {
@@ -205,8 +211,11 @@ final class DataExportService {
                 exportedCount += 1
             }
 
-            offset += batch.count
             if batch.count < batchSize { break }
+
+            guard let last = batch.last, let lastId = last.id else { break }
+            cursorTimestamp = last.timestamp
+            cursorId = lastId
         }
 
         handle.write(Data([UInt8(ascii: "]"), UInt8(ascii: "}")]))
@@ -229,59 +238,41 @@ final class DataExportService {
             }
 
             do {
-                // 检查文件大小，对于大文件使用内存映射减少复制
-                let fileSize = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64 ?? 0
-                let isLargeFile = fileSize > 50 * 1024 * 1024  // > 50MB
+                let importedCount = try await Task.detached(priority: .utility) {
+                    // 检查文件大小，对于大文件使用内存映射减少复制
+                    let fileSize = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64 ?? 0
+                    let isLargeFile = fileSize > 50 * 1024 * 1024  // > 50MB
 
-                let decoder = JSONDecoder()
-                decoder.dateDecodingStrategy = .iso8601
-                
-                if isLargeFile {
-                    log.info("Importing large file (\(fileSize / 1024 / 1024) MB) using streaming parser")
-                    let importedCount = try await importLargeExport(from: url, decoder: decoder)
-                    await DeckDataStore.shared.loadInitialData()
-                    await MainActor.run {
-                        completion(.success(importedCount))
+                    let decoder = JSONDecoder()
+                    decoder.dateDecodingStrategy = .iso8601
+                    
+                    if isLargeFile {
+                        await log.info("Importing large file (\(fileSize / 1024 / 1024) MB) using streaming parser")
+                        return try await Self.importLargeExport(from: url, decoder: decoder)
                     }
-                    return
-                }
 
-                let data = try Data(contentsOf: url)
-                let exportData = try decoder.decode(ExportData.self, from: data)
+                    let data = try Data(contentsOf: url)
+                    let exportData = try decoder.decode(ExportData.self, from: data)
 
-                // 批量导入并显示进度
-                var importedCount = 0
-                let totalCount = exportData.items.count
-                let batchSize = 50
+                    // 批量导入并显示进度
+                    var importedCount = 0
+                    let totalCount = exportData.items.count
+                    let batchSize = 50
 
-                for (index, exportItem) in exportData.items.enumerated() {
-                    // 对于大图，insert 方法会自动处理 blob offload
-                    let item = ClipboardItem(
-                        pasteboardType: PasteboardType(exportItem.type),
-                        data: exportItem.data,
-                        previewData: exportItem.previewData,
-                        timestamp: exportItem.timestamp,
-                        appPath: exportItem.appPath,
-                        appName: exportItem.appName,
-                        sourceAnchor: exportItem.sourceAnchor,
-                        searchText: exportItem.searchText,
-                        contentLength: exportItem.contentLength,
-                        tagId: exportItem.tagId,
-                        isTemporary: exportItem.isTemporary ?? false,
-                        uniqueId: exportItem.uniqueId
-                    )
+                    for (index, exportItem) in exportData.items.enumerated() {
+                        await Self.insertExportItem(exportItem)
+                        importedCount += 1
 
-                    _ = await DeckSQLManager.shared.insert(item: item)
-                    importedCount += 1
-
-                    // 每批次后让出执行，避免长时间阻塞
-                    if (index + 1) % batchSize == 0 {
-                        await Task.yield()
-                        log.debug("Import progress: \(importedCount)/\(totalCount)")
+                        // 每批次后让出执行，避免长时间阻塞
+                        if (index + 1) % batchSize == 0 {
+                            await Task.yield()
+                            await log.debug("Import progress: \(importedCount)/\(totalCount)")
+                        }
                     }
-                }
 
-                // Reload data
+                    return importedCount
+                }.value
+
                 await DeckDataStore.shared.loadInitialData()
 
                 await MainActor.run {
@@ -295,7 +286,7 @@ final class DataExportService {
         }
     }
 
-    private func importLargeExport(from url: URL, decoder: JSONDecoder) async throws -> Int {
+    nonisolated private static func importLargeExport(from url: URL, decoder: JSONDecoder) async throws -> Int {
         enum ParseState {
             case seekingItemsKey
             case seekingArrayStart
@@ -396,26 +387,12 @@ final class DataExportService {
                                 depth -= 1
                                 if depth == 0 {
                                     let exportItem = try decoder.decode(ExportItem.self, from: objectBuffer)
-                                    let item = ClipboardItem(
-                                        pasteboardType: PasteboardType(exportItem.type),
-                                        data: exportItem.data,
-                                        previewData: exportItem.previewData,
-                                        timestamp: exportItem.timestamp,
-                                        appPath: exportItem.appPath,
-                                        appName: exportItem.appName,
-                                        sourceAnchor: exportItem.sourceAnchor,
-                                        searchText: exportItem.searchText,
-                                        contentLength: exportItem.contentLength,
-                                        tagId: exportItem.tagId,
-                                        isTemporary: exportItem.isTemporary ?? false,
-                                        uniqueId: exportItem.uniqueId
-                                    )
-                                    _ = await DeckSQLManager.shared.insert(item: item)
+                                    await Self.insertExportItem(exportItem)
                                     importedCount += 1
 
                                     if importedCount % batchSize == 0 {
                                         await Task.yield()
-                                        log.debug("Import progress: \(importedCount)")
+                                        await log.debug("Import progress: \(importedCount)")
                                     }
 
                                     objectBuffer.removeAll(keepingCapacity: true)
@@ -449,6 +426,27 @@ final class DataExportService {
         }
 
         return importedCount
+    }
+
+    @MainActor
+    private static func insertExportItem(_ exportItem: ExportItem) async {
+        // 对于大图，insert 方法会自动处理 blob offload
+        let item = ClipboardItem(
+            pasteboardType: PasteboardType(exportItem.type),
+            data: exportItem.data,
+            previewData: exportItem.previewData,
+            timestamp: exportItem.timestamp,
+            appPath: exportItem.appPath,
+            appName: exportItem.appName,
+            sourceAnchor: exportItem.sourceAnchor,
+            searchText: exportItem.searchText,
+            contentLength: exportItem.contentLength,
+            tagId: exportItem.tagId,
+            isTemporary: exportItem.isTemporary ?? false,
+            uniqueId: exportItem.uniqueId
+        )
+
+        _ = await DeckSQLManager.shared.insert(item: item)
     }
     
     // MARK: - Helpers
