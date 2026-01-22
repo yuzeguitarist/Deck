@@ -46,8 +46,8 @@ enum Const {
     }()
     
     static let smallRadius: CGFloat = 8.0
-    static let panelCornerRadius: CGFloat = 26.0
-    static let panelTopPadding: CGFloat = Const.space12 + 5.0
+    static let panelCornerRadius: CGFloat = 28.0
+    static let panelTopPadding: CGFloat = Const.space12 + 2.0
     static let searchFieldRadius: CGFloat = 12.0
     
     // Icon sizes
