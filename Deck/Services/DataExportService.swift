@@ -156,7 +156,10 @@ final class DataExportService {
 
         let dateString = ISO8601DateFormatter().string(from: Date())
         let header = #"{"version":1,"exportDate":""# + dateString + #""# + #","items":["#
-        try header.data(using: .utf8)?.write(to: outputURL)
+        guard let headerData = header.data(using: .utf8) else {
+            throw ExportError.invalidFormat
+        }
+        try headerData.write(to: outputURL)
 
         try? FileManager.default.setAttributes(
             [.protectionKey: FileProtectionType.complete],
@@ -204,9 +207,9 @@ final class DataExportService {
                 )
                 let data = try encoder.encode(exportItem)
                 if !isFirst {
-                    handle.write(Data([UInt8(ascii: ",")]))
+                    try handle.write(contentsOf: Data([UInt8(ascii: ",")]))
                 }
-                handle.write(data)
+                try handle.write(contentsOf: data)
                 isFirst = false
                 exportedCount += 1
             }
@@ -218,7 +221,7 @@ final class DataExportService {
             cursorId = lastId
         }
 
-        handle.write(Data([UInt8(ascii: "]"), UInt8(ascii: "}")]))
+        try handle.write(contentsOf: Data([UInt8(ascii: "]"), UInt8(ascii: "}")]))
         return exportedCount
     }
     

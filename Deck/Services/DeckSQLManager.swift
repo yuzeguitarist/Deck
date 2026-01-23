@@ -1659,25 +1659,36 @@ final class DeckSQLManager: NSObject {
 
         guard !matchingIds.isEmpty else { return [] }
 
-        let fullRows: [Row] = await withDBAsync {
-            guard let db = self.db, let table = self.table else { return [] }
-            var query = table.filter(matchingIds.contains(Col.id))
+        // 分块查询避免 SQLite 变量上限
+        let chunkSize = 900
+        var fullRows: [Row] = []
+        fullRows.reserveCapacity(matchingIds.count)
+        var start = 0
+        while start < matchingIds.count {
+            let end = min(start + chunkSize, matchingIds.count)
+            let chunk = Array(matchingIds[start..<end])
+            let chunkRows: [Row] = await withDBAsync {
+                guard let db = self.db, let table = self.table else { return [] }
+                var query = table.filter(chunk.contains(Col.id))
 
-            if let types = typeFilter, !types.isEmpty {
-                let typeCondition = types.map { Col.itemType == $0 }.reduce(
-                    Expression<Bool>(value: false)
-                ) { result, condition in
-                    result || condition
+                if let types = typeFilter, !types.isEmpty {
+                    let typeCondition = types.map { Col.itemType == $0 }.reduce(
+                        Expression<Bool>(value: false)
+                    ) { result, condition in
+                        result || condition
+                    }
+                    query = query.filter(typeCondition)
                 }
-                query = query.filter(typeCondition)
-            }
 
-            if let tagId = tagId, tagId != -1 {
-                query = query.filter(Col.tagId == tagId)
-            }
+                if let tagId = tagId, tagId != -1 {
+                    query = query.filter(Col.tagId == tagId)
+                }
 
-            return Array(try db.prepare(query))
-        } ?? []
+                return Array(try db.prepare(query))
+            } ?? []
+            fullRows.append(contentsOf: chunkRows)
+            start = end
+        }
 
         var rowsById: [Int64: Row] = [:]
         rowsById.reserveCapacity(fullRows.count)
@@ -3480,27 +3491,36 @@ extension DeckSQLManager {
         let matchingIds = await searchFTS(keyword: keyword, limit: limit * 2)
         guard !matchingIds.isEmpty else { return [] }
 
-        let rows = await withDBAsync { () throws -> [Row] in
-            guard let db = self.db, let table = self.table else { return [Row]() }
-            // Build query with additional filters
-            var query = table.filter(matchingIds.contains(Col.id))
+        // 分块查询避免 SQLite 变量上限
+        let chunkSize = 900
+        var rows: [Row] = []
+        rows.reserveCapacity(matchingIds.count)
+        var start = 0
+        while start < matchingIds.count {
+            let end = min(start + chunkSize, matchingIds.count)
+            let chunk = Array(matchingIds[start..<end])
+            let chunkRows = await withDBAsync { () throws -> [Row] in
+                guard let db = self.db, let table = self.table else { return [Row]() }
+                var query = table.filter(chunk.contains(Col.id))
 
-            if let types = typeFilter, !types.isEmpty {
-                let typeCondition = types.map { Col.itemType == $0 }.reduce(
-                    Expression<Bool>(value: false)
-                ) { result, condition in
-                    result || condition
+                if let types = typeFilter, !types.isEmpty {
+                    let typeCondition = types.map { Col.itemType == $0 }.reduce(
+                        Expression<Bool>(value: false)
+                    ) { result, condition in
+                        result || condition
+                    }
+                    query = query.filter(typeCondition)
                 }
-                query = query.filter(typeCondition)
-            }
 
-            if let tagId = tagId, tagId != -1 {
-                query = query.filter(Col.tagId == tagId)
-            }
+                if let tagId = tagId, tagId != -1 {
+                    query = query.filter(Col.tagId == tagId)
+                }
 
-            query = query.limit(matchingIds.count)
-            return Array(try db.prepare(query))
-        } ?? []
+                return Array(try db.prepare(query))
+            } ?? []
+            rows.append(contentsOf: chunkRows)
+            start = end
+        }
         guard rows.count > 1 else { return rows }
 
         var rowsById: [Int64: Row] = [:]
@@ -3927,7 +3947,7 @@ extension DeckSQLManager {
 
         // 使用分批处理避免一次性加载全表到内存
         let batchSize = 100
-        var offset = 0
+        var lastId: Int64 = 0
         var totalProcessed = 0
         var hasError = false
 
@@ -3937,8 +3957,9 @@ extension DeckSQLManager {
                 guard let db = self.db, let table = self.table else { return ([], 0) }
                 let query = table
                     .select(Col.id, Col.data, Col.previewData, Col.searchText, Col.appName, Col.sourceAnchor)
+                    .filter(Col.id > lastId)
                     .order(Col.id.asc)
-                    .limit(batchSize, offset: offset)
+                    .limit(batchSize)
                 let rows = Array(try db.prepare(query))
                 return (rows, rows.count)
             }
@@ -4038,7 +4059,12 @@ extension DeckSQLManager {
             }
 
             totalProcessed += batch.count
-            offset += batchSize
+            if let lastRow = batch.rows.last, let newLastId = try? lastRow.get(Col.id) {
+                if newLastId <= lastId { break }
+                lastId = newLastId
+            } else {
+                break
+            }
 
             // 批次间让出 CPU，避免长时间阻塞
             await Task.yield()
@@ -4105,7 +4131,7 @@ extension DeckSQLManager {
     private func migrateEmbeddingEncryption(encrypt: Bool) async {
         let tab = Table("ClipboardHistory_embedding")
         let batchSize = 200
-        var offset = 0
+        var lastId: Int64 = 0
 
         while true {
             guard !Task.isCancelled else { break }
@@ -4113,45 +4139,62 @@ extension DeckSQLManager {
             let rows: [Row] = await withDBAsync {
                 guard let db = self.db else { return [] }
                 let query = tab.select(EmbeddingCol.id, EmbeddingCol.embedding)
+                    .filter(EmbeddingCol.id > lastId)
                     .order(EmbeddingCol.id.asc)
-                    .limit(batchSize, offset: offset)
+                    .limit(batchSize)
                 return Array(try db.prepare(query))
             } ?? []
 
             guard !rows.isEmpty else { break }
 
-            for row in rows {
+            var lastBatchId = lastId
+            if let lastRow = rows.last, let id = try? lastRow.get(EmbeddingCol.id) {
+                lastBatchId = id
+            }
+            var shouldAbort = false
+            let batchSuccess = await withDBAsync {
+                guard let db = self.db else { return false }
                 do {
-                    let id = try row.get(EmbeddingCol.id)
-                    let rawEmbedding = try row.get(EmbeddingCol.embedding)
+                    try db.transaction {
+                        for row in rows {
+                            if shouldAbort { break }
+                            do {
+                                let id = try row.get(EmbeddingCol.id)
+                                let rawEmbedding = try row.get(EmbeddingCol.embedding)
 
-                    let newEmbedding: Data
-                    if encrypt {
-                        if SecurityService.shared.decryptSilently(rawEmbedding) != nil {
-                            newEmbedding = rawEmbedding
-                        } else {
-                            guard let encrypted = SecurityService.shared.encrypt(rawEmbedding) else {
-                                notifyEncryptionFailureIfNeeded()
-                                return
+                                let newEmbedding: Data
+                                if encrypt {
+                                    if SecurityService.shared.decryptSilently(rawEmbedding) != nil {
+                                        newEmbedding = rawEmbedding
+                                    } else if let encrypted = SecurityService.shared.encrypt(rawEmbedding) {
+                                        newEmbedding = encrypted
+                                    } else {
+                                        self.notifyEncryptionFailureIfNeeded()
+                                        shouldAbort = true
+                                        break
+                                    }
+                                } else {
+                                    newEmbedding = SecurityService.shared.decrypt(rawEmbedding) ?? rawEmbedding
+                                }
+
+                                let updateQuery = tab.filter(EmbeddingCol.id == id)
+                                try db.run(updateQuery.update(EmbeddingCol.embedding <- newEmbedding))
+                            } catch {
+                                continue
                             }
-                            newEmbedding = encrypted
                         }
-                    } else {
-                        newEmbedding = SecurityService.shared.decrypt(rawEmbedding) ?? rawEmbedding
                     }
-
-                    _ = await withDBAsync {
-                        guard let db = self.db else { return }
-                        let updateQuery = tab.filter(EmbeddingCol.id == id)
-                        try db.run(updateQuery.update(EmbeddingCol.embedding <- newEmbedding))
-                    }
+                    return !shouldAbort
                 } catch {
-                    continue
+                    return false
                 }
             }
 
+            guard batchSuccess == true else { return }
+            if lastBatchId <= lastId { break }
+            lastId = lastBatchId
+
             if rows.count < batchSize { break }
-            offset += batchSize
             await Task.yield()
         }
 

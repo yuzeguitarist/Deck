@@ -146,6 +146,14 @@ final class ScriptPluginService {
         qos: .utility,
         attributes: .concurrent
     )
+    private let defaultPluginAuthor = "Deck"
+    private let legacyDefaultPluginDirectoryNames: Set<String> = [
+        "base64-encode",
+        "base64-decode",
+        "url-encode",
+        "url-decode",
+        "json-format"
+    ]
 
     private final class ExecutionState: @unchecked Sendable {
         private let lock = NSLock()
@@ -184,13 +192,12 @@ final class ScriptPluginService {
             do {
                 try fm.createDirectory(at: scriptsDirectoryURL, withIntermediateDirectories: true)
                 log.info("Created scripts directory: \(scriptsDirectoryURL.path)")
-
-                // 创建示例脚本
-                createExampleScripts()
             } catch {
                 log.error("Failed to create scripts directory: \(error)")
+                return
             }
         }
+        migrateDefaultScripts()
     }
 
     private func isURL(_ candidate: URL, within directory: URL) -> Bool {
@@ -202,58 +209,12 @@ final class ScriptPluginService {
 
     /// 创建示例脚本
     private func createExampleScripts() {
-        // 创建 base64-encode 示例
-        let base64Dir = scriptsDirectoryURL.appendingPathComponent("base64-encode", isDirectory: true)
-        createExampleScript(
-            at: base64Dir,
-            manifest: ScriptManifest(
-                name: "Base64 编码",
-                description: "将文本转换为 Base64 编码",
-                author: "Deck",
-                version: "1.0.0",
-                main: "index.js",
-                icon: "lock",
-                permissions: nil
-            ),
-            script: """
-            function transform(input) {
-                return btoa(unescape(encodeURIComponent(input)));
-            }
-            """
-        )
-
-        // 创建 base64-decode 示例
-        let base64DecodeDir = scriptsDirectoryURL.appendingPathComponent("base64-decode", isDirectory: true)
-        createExampleScript(
-            at: base64DecodeDir,
-            manifest: ScriptManifest(
-                name: "Base64 解码",
-                description: "将 Base64 编码转换回文本",
-                author: "Deck",
-                version: "1.0.0",
-                main: "index.js",
-                icon: "lock.open",
-                permissions: nil
-            ),
-            script: """
-            function transform(input) {
-                try {
-                    return decodeURIComponent(escape(atob(input)));
-                } catch (e) {
-                    return "解码失败: " + e.message;
-                }
-            }
-            """
-        )
-
-        // 创建 word-count 示例
-        let wordCountDir = scriptsDirectoryURL.appendingPathComponent("word-count", isDirectory: true)
-        createExampleScript(
-            at: wordCountDir,
+        createDefaultScript(
+            directoryName: "word-count",
             manifest: ScriptManifest(
                 name: "字数统计",
                 description: "统计文本的字符数、单词数和行数",
-                author: "Deck",
+                author: defaultPluginAuthor,
                 version: "1.0.0",
                 main: "index.js",
                 icon: "number",
@@ -274,51 +235,231 @@ final class ScriptPluginService {
             """
         )
 
-        // 创建 url-encode 示例
-        let urlEncodeDir = scriptsDirectoryURL.appendingPathComponent("url-encode", isDirectory: true)
-        createExampleScript(
-            at: urlEncodeDir,
+        createDefaultScript(
+            directoryName: "remove-emoji",
             manifest: ScriptManifest(
-                name: "URL 编码",
-                description: "对文本进行 URL 编码",
-                author: "Deck",
+                name: "去除表情符号",
+                description: "移除文本中的表情符号",
+                author: defaultPluginAuthor,
                 version: "1.0.0",
                 main: "index.js",
-                icon: "link",
+                icon: "face.smiling",
                 permissions: nil
             ),
             script: """
-            function transform(input) {
-                return encodeURIComponent(input);
-            }
-            """
-        )
-
-        // 创建 url-decode 示例
-        let urlDecodeDir = scriptsDirectoryURL.appendingPathComponent("url-decode", isDirectory: true)
-        createExampleScript(
-            at: urlDecodeDir,
-            manifest: ScriptManifest(
-                name: "URL 解码",
-                description: "对 URL 编码的文本进行解码",
-                author: "Deck",
-                version: "1.0.0",
-                main: "index.js",
-                icon: "link",
-                permissions: nil
-            ),
-            script: """
-            function transform(input) {
+            function buildEmojiRegex() {
                 try {
-                    return decodeURIComponent(input);
+                    return new RegExp(
+                        "[\\\\p{Extended_Pictographic}\\\\p{Emoji_Presentation}\\\\p{Emoji}\\\\uFE0F\\\\uFE0E\\\\u200D\\\\u{1F3FB}-\\\\u{1F3FF}]",
+                        "gu"
+                    );
                 } catch (e) {
-                    return "解码失败: " + e.message;
+                    return /[\\u{1F300}-\\u{1FAFF}\\u{2600}-\\u{27BF}\\u{1F1E6}-\\u{1F1FF}\\u{1F3FB}-\\u{1F3FF}\\uFE0F\\uFE0E\\u200D]/gu;
                 }
             }
+
+            function transform(input) {
+                if (!input) {
+                    return "";
+                }
+                const emojiRegex = buildEmojiRegex();
+                let output = input.replace(emojiRegex, "");
+                output = output.replace(/[\\uFE0F\\uFE0E\\u200D]/g, "");
+                return output;
+            }
             """
         )
 
-        log.info("Created example scripts")
+        createDefaultScript(
+            directoryName: "strip-markdown",
+            manifest: ScriptManifest(
+                name: "去除 Markdown 格式",
+                description: "删除 Markdown 语法，保留纯文本内容",
+                author: defaultPluginAuthor,
+                version: "1.0.0",
+                main: "index.js",
+                icon: "doc.plaintext",
+                permissions: nil
+            ),
+            script: """
+            function transform(input) {
+                if (!input) {
+                    return "";
+                }
+
+                let text = input.replace(/\\r\\n?/g, "\\n");
+
+                text = text.replace(/```([\\s\\S]*?)```/g, function(_, code) {
+                    return code;
+                });
+                text = text.replace(/`([^`]+)`/g, "$1");
+
+                text = text.replace(/!\\[([^\\]]*)\\]\\([^\\)]+\\)/g, "$1");
+                text = text.replace(/\\[([^\\]]+)\\]\\([^\\)]+\\)/g, "$1");
+                text = text.replace(/<((?:https?:\\/\\/|mailto:)[^>]+)>/g, "$1");
+
+                text = text.replace(/^\\s{0,3}#{1,6}\\s+/gm, "");
+                text = text.replace(/^\\s{0,3}>\\s?/gm, "");
+                text = text.replace(/^\\s*([-*+]|\\d+\\.)\\s+/gm, "");
+                text = text.replace(/^\\s*([-*_])(?:\\s*\\1){2,}\\s*$/gm, "");
+
+                text = text.replace(/~~(.*?)~~/g, "$1");
+                text = text.replace(/(\\*\\*|__)(.*?)\\1/g, "$2");
+                text = text.replace(/(\\*|_)(.*?)\\1/g, "$2");
+
+                text = text.replace(/^\\s*\\|?(\\s*:?-+:?\\s*\\|)+\\s*$/gm, "");
+                text = text.replace(/\\|/g, " ");
+
+                text = text.replace(/<\\/?.*?>/g, "");
+                text = text.replace(/\\\\([\\\\`*_{}\\[\\]()#+\\-.!])/g, "$1");
+
+                return text;
+            }
+            """
+        )
+
+        createDefaultScript(
+            directoryName: "remove-empty-lines",
+            manifest: ScriptManifest(
+                name: "去空行",
+                description: "删除空白行，仅保留有内容的行",
+                author: defaultPluginAuthor,
+                version: "1.0.0",
+                main: "index.js",
+                icon: "line.3.horizontal.decrease",
+                permissions: nil
+            ),
+            script: """
+            function transform(input) {
+                if (!input) {
+                    return "";
+                }
+                return String(input)
+                    .replace(/\\r\\n?/g, "\\n")
+                    .split("\\n")
+                    .filter(function(line) { return line.trim().length > 0; })
+                    .join("\\n");
+            }
+            """
+        )
+
+        createDefaultScript(
+            directoryName: "extract-urls",
+            manifest: ScriptManifest(
+                name: "提取 URL",
+                description: "提取文本中的 URL（基于 Deck SmartText 逻辑）",
+                author: defaultPluginAuthor,
+                version: "1.0.0",
+                main: "index.js",
+                icon: "link",
+                permissions: nil
+            ),
+            script: """
+            function transform(input) {
+                return Deck.detectURLs(String(input || ""));
+            }
+            """
+        )
+
+        createDefaultScript(
+            directoryName: "extract-emails",
+            manifest: ScriptManifest(
+                name: "提取邮箱",
+                description: "提取文本中的邮箱地址（基于 Deck SmartText 逻辑）",
+                author: defaultPluginAuthor,
+                version: "1.0.0",
+                main: "index.js",
+                icon: "envelope",
+                permissions: nil
+            ),
+            script: """
+            function transform(input) {
+                return Deck.detectEmails(String(input || ""));
+            }
+            """
+        )
+
+        createDefaultScript(
+            directoryName: "line-number",
+            manifest: ScriptManifest(
+                name: "行号前缀",
+                description: "为每行添加行号前缀",
+                author: defaultPluginAuthor,
+                version: "1.0.0",
+                main: "index.js",
+                icon: "list.number",
+                permissions: nil
+            ),
+            script: """
+            function transform(input) {
+                if (input === null || input === undefined) {
+                    return "";
+                }
+                var lines = String(input).replace(/\\r\\n?/g, "\\n").split("\\n");
+                return lines.map(function(line, index) {
+                    return (index + 1) + ". " + line;
+                }).join("\\n");
+            }
+            """
+        )
+
+        log.info("Created default scripts")
+    }
+
+    private func migrateDefaultScripts() {
+        removeLegacyDefaultScripts()
+        createExampleScripts()
+    }
+
+    private func removeLegacyDefaultScripts() {
+        let fm = FileManager.default
+        for name in legacyDefaultPluginDirectoryNames {
+            let directory = scriptsDirectoryURL.appendingPathComponent(name, isDirectory: true)
+            guard let values = try? directory.resourceValues(forKeys: [.isDirectoryKey]),
+                  values.isDirectory == true else { continue }
+            guard shouldRemoveLegacyDefaultScript(at: directory) else { continue }
+            do {
+                try fm.removeItem(at: directory)
+                log.info("Removed legacy default script: \(name)")
+            } catch {
+                log.warn("Failed to remove legacy default script \(name): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func createDefaultScript(
+        directoryName: String,
+        manifest: ScriptManifest,
+        script: String
+    ) {
+        let directory = scriptsDirectoryURL.appendingPathComponent(directoryName, isDirectory: true)
+        guard shouldOverwriteDefaultScript(at: directory) else { return }
+        createExampleScript(at: directory, manifest: manifest, script: script)
+    }
+
+    private func shouldOverwriteDefaultScript(at directory: URL) -> Bool {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: directory.path) else { return true }
+        guard let manifest = loadManifest(at: directory) else { return true }
+        if manifest.author == defaultPluginAuthor {
+            return true
+        }
+        log.info("Skipping default script overwrite for user plugin: \(directory.lastPathComponent)")
+        return false
+    }
+
+    private func shouldRemoveLegacyDefaultScript(at directory: URL) -> Bool {
+        guard let manifest = loadManifest(at: directory) else { return true }
+        return manifest.author == defaultPluginAuthor
+    }
+
+    private func loadManifest(at directory: URL) -> ScriptManifest? {
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        guard let data = try? Data(contentsOf: manifestURL, options: [.mappedIfSafe]),
+              let manifest = try? JSONDecoder().decode(ScriptManifest.self, from: data) else {
+            return nil
+        }
+        return manifest
     }
 
     private func createExampleScript(at directory: URL, manifest: ScriptManifest, script: String) {
@@ -745,6 +886,19 @@ final class ScriptPluginService {
         }
         context.setObject(checkInterrupt, forKeyedSubscript: "__deckCheckInterrupt" as NSString)
 
+        // SmartText bridge (URL / Email detection)
+        let detectURLs: @convention(block) (String) -> String = { text in
+            let urls = SmartTextService.shared.detectURLs(in: text).map { $0.absoluteString }
+            return urls.joined(separator: "\n")
+        }
+        context.setObject(detectURLs, forKeyedSubscript: "__deckDetectURLs" as NSString)
+
+        let detectEmails: @convention(block) (String) -> String = { text in
+            let emails = SmartTextService.shared.detectEmails(in: text)
+            return emails.joined(separator: "\n")
+        }
+        context.setObject(detectEmails, forKeyedSubscript: "__deckDetectEmails" as NSString)
+
         // 添加 console.log 支持
         let consoleLog: @convention(block) (String) -> Void = { message in
             log.debug("[JS \(plugin.id)] \(message)")
@@ -767,7 +921,9 @@ final class ScriptPluginService {
                     if (__deckCheckInterrupt()) {
                         throw new Error('Script interrupted by timeout');
                     }
-                }
+                },
+                detectURLs: function(text) { return __deckDetectURLs(String(text || "")); },
+                detectEmails: function(text) { return __deckDetectEmails(String(text || "")); }
             };
         """)
 
