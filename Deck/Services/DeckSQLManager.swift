@@ -972,7 +972,8 @@ final class DeckSQLManager: NSObject {
     }
     
     private func defaultStoragePath() -> String {
-        NSSearchPathForDirectoriesInDomains(.applicationSupportDirectory, .userDomainMask, true).first!
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?.path
+            ?? (NSHomeDirectory() as NSString).appendingPathComponent("Library/Application Support")
     }
     
     func getStorageDirectory() -> String {

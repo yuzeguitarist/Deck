@@ -240,7 +240,8 @@ final class DataExportService {
             do {
                 let importedCount = try await Task.detached(priority: .utility) {
                     // 检查文件大小，对于大文件使用内存映射减少复制
-                    let fileSize = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int64 ?? 0
+                    let attrs = try FileManager.default.attributesOfItem(atPath: url.path)
+                    let fileSize = (attrs[.size] as? NSNumber)?.int64Value ?? (attrs[.size] as? Int64) ?? 0
                     let isLargeFile = fileSize > 50 * 1024 * 1024  // > 50MB
 
                     let decoder = JSONDecoder()
@@ -306,6 +307,7 @@ final class DataExportService {
         let backslash = UInt8(ascii: "\\")
 
         let chunkSize = 64 * 1024
+        let maxObjectBytes = 200 * 1024 * 1024
         let batchSize = 50
 
         var buffer = Data()
@@ -363,6 +365,7 @@ final class DataExportService {
                             isEscaped = false
                             objectBuffer.removeAll(keepingCapacity: true)
                             objectBuffer.append(byte)
+                            if objectBuffer.count > maxObjectBytes { throw ExportError.invalidFormat }
                         } else if byte == closeBracket {
                             state = .done
                             cursor += 1
@@ -370,6 +373,7 @@ final class DataExportService {
                         }
                     } else {
                         objectBuffer.append(byte)
+                        if objectBuffer.count > maxObjectBytes { throw ExportError.invalidFormat }
                         if inString {
                             if isEscaped {
                                 isEscaped = false
@@ -428,7 +432,6 @@ final class DataExportService {
         return importedCount
     }
 
-    @MainActor
     private static func insertExportItem(_ exportItem: ExportItem) async {
         // 对于大图，insert 方法会自动处理 blob offload
         let item = ClipboardItem(

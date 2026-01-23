@@ -392,9 +392,17 @@ final class ScriptPluginService {
             }
         }
 
-        pluginsLock.lock()
-        plugins = loaded
-        pluginsLock.unlock()
+        let apply: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.pluginsLock.lock()
+            self.plugins = loaded
+            self.pluginsLock.unlock()
+        }
+        if Thread.isMainThread {
+            apply()
+        } else {
+            DispatchQueue.main.async(execute: apply)
+        }
 
         log.info("Loaded \(loaded.count) script plugins")
     }

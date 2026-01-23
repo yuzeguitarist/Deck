@@ -37,6 +37,8 @@ final class SecurityService {
     }
     
     var biometricType: String {
+        var error: NSError?
+        _ = context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
         switch context.biometryType {
         case .touchID:
             return "Touch ID"
