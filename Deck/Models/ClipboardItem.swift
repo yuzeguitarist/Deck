@@ -41,6 +41,7 @@ extension PasteboardType {
     static let chromiumSourceUrl = NSPasteboard.PasteboardType(rawValue: "org.chromium.source-url")
     static let chromiumSourceToken = NSPasteboard.PasteboardType(rawValue: "org.chromium.internal.source-rfh-token")
     static let notesRichText = NSPasteboard.PasteboardType(rawValue: "com.apple.notes.richtext")
+    static let deckUnsupported = NSPasteboard.PasteboardType(rawValue: "com.deck.unsupported")
     
     func isImage() -> Bool {
         if [.png, .tiff, .jpeg, .heic, .heif, .gif, .webp, .bmp].contains(self) { return true }
@@ -185,6 +186,10 @@ final class ClipboardItem: Identifiable, Equatable {
             return searchText.asCompleteURL()
         }
         return nil
+    }
+
+    var isUnsupported: Bool {
+        pasteboardType == .deckUnsupported
     }
     
     var colorValue: NSColor? {
