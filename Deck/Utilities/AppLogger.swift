@@ -51,7 +51,7 @@ enum LogLevel: String, CaseIterable, Comparable {
     }
 }
 
-final class AppLogger {
+final class AppLogger: @unchecked Sendable {
     static let shared = AppLogger()
     
     private let osLogger: os.Logger

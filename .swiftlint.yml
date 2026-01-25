@@ -1,5 +1,4 @@
 # SwiftLint Configuration for Deck
-# 针对高质量 macOS 项目的宽松配置
 
 disabled_rules:
   - trailing_whitespace       # 尾随空格

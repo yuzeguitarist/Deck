@@ -4,7 +4,7 @@
 
 First off, thanks for taking the time to contribute!
 
-> **Important**: This is a **partially open-source** project. Only non-core modules are available for contribution. Core features (context awareness, scripting engine, etc.) are proprietary and not included in this repository.
+> **Important**: This is a **partially open-source** project. Only non-core modules are available for contribution. Core features (context awareness, scripting engine, core UI/UX, etc.) are proprietary and not included in this repository.
 
 ## Table of Contents
 
@@ -26,7 +26,6 @@ This project and everyone participating in it is governed by our [Code of Conduc
 ### What You Can Contribute
 
 - Bug fixes for open-sourced modules
-- UI/UX improvements
 - Documentation improvements
 - Performance optimizations for open-sourced parts
 - Localization / translations
@@ -37,6 +36,7 @@ This project and everyone participating in it is governed by our [Code of Conduc
 - Core clipboard engine modifications
 - Context awareness features
 - Scripting engine
+- Core UI/UX code and design assets
 - Pro/paid feature implementations
 - License key / activation system
 
@@ -192,7 +192,6 @@ Before pushing to your fork, you MUST run the code quality script:
 - [ ] All CI checks pass
 - [ ] PR template is filled out completely
 - [ ] Related issue is linked (if applicable)
-- [ ] Screenshots/videos for UI changes
 - [ ] Documentation updated (if applicable)
 
 ### Review Process
@@ -279,7 +278,7 @@ docs(readme): update installation instructions
 
 首先，感谢你抽出时间来贡献！
 
-> **重要提示**：本项目为 **部分开源**。仅非核心模块开放贡献。核心功能（上下文感知、脚本引擎等）为闭源，不包含在本仓库中。
+> **重要提示**：本项目为 **部分开源**。仅非核心模块开放贡献。核心功能（上下文感知、脚本引擎、核心 UI/UX 等）为闭源，不包含在本仓库中。
 
 ## 目录
 
@@ -301,7 +300,6 @@ docs(readme): update installation instructions
 ### 可以贡献的内容
 
 - 开源模块的 Bug 修复
-- UI/UX 改进
 - 文档改进
 - 开源部分的性能优化
 - 本地化 / 翻译
@@ -312,6 +310,7 @@ docs(readme): update installation instructions
 - 核心剪贴板引擎修改
 - 上下文感知功能
 - 脚本引擎
+- 核心 UI/UX 代码与设计资源
 - 专业版/付费功能实现
 - 授权码/激活系统
 
@@ -467,7 +466,6 @@ main          <- 仅稳定发布版本（受保护）
 - [ ] 所有 CI 检查通过
 - [ ] PR 模板完整填写
 - [ ] 关联相关 Issue（如适用）
-- [ ] UI 更改附截图/视频
 - [ ] 文档已更新（如适用）
 
 ### 审核流程

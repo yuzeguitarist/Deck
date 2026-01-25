@@ -6,8 +6,8 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 1.x.x   | :white_check_mark: |
-| < 1.0   | :x:                |
+| > 1.0   | Yes |
+| < 1.0   | No                |
 
 ## Reporting a Vulnerability
 
@@ -69,8 +69,8 @@ The following are in scope:
 
 | 版本 | 支持状态 |
 | ---- | -------- |
-| 1.x.x | :white_check_mark: |
-| < 1.0 | :x: |
+| > 1.0 | Yes |
+| < 1.0 | No |
 
 ## 报告漏洞
 
@@ -106,7 +106,6 @@ The following are in scope:
 
 - Deck macOS 应用程序
 - 任何数据处理或存储机制
-- 认证/授权（专业版功能）
 
 ### 范围外
 

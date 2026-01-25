@@ -12,9 +12,12 @@ struct DeckTag: Identifiable, Equatable, Codable {
     var name: String
     var colorIndex: Int
     var isSystem: Bool
+
+    static let importantTagId: Int = -2
     
     static let colorPalette: [Color] = [
         .gray.opacity(0.8),
+        // Row 1
         .blue,
         .green,
         .purple,
@@ -22,9 +25,16 @@ struct DeckTag: Identifiable, Equatable, Codable {
         .orange,
         .yellow,
         .pink,
+        Color(red: 0.95, green: 0.3, blue: 0.3),  // 亮红
+        // Row 2
         .cyan,
         .brown,
-        .indigo
+        .indigo,
+        .mint,
+        .teal,
+        Color(red: 0.6, green: 0.4, blue: 0.8),   // 淡紫色
+        Color(red: 0.95, green: 0.6, blue: 0.7),  // 珊瑚粉
+        Color(red: 0.4, green: 0.7, blue: 0.4)    // 草绿
     ]
     
     var color: Color {
@@ -70,6 +80,10 @@ struct DeckTag: Identifiable, Equatable, Codable {
             return nil
         }
     }
+
+    var isImportant: Bool {
+        id == DeckTag.importantTagId
+    }
     
     init(id: Int, name: String, color: Color, isSystem: Bool) {
         self.id = id
@@ -97,7 +111,8 @@ struct DeckTag: Identifiable, Equatable, Codable {
             DeckTag(id: 1, name: String(localized: "全部"), color: .gray.opacity(0.8), isSystem: true),
             DeckTag(id: 2, name: String(localized: "文本"), color: .blue, isSystem: true),
             DeckTag(id: 3, name: String(localized: "图片"), color: .green, isSystem: true),
-            DeckTag(id: 4, name: String(localized: "文件"), color: .purple, isSystem: true)
+            DeckTag(id: 4, name: String(localized: "文件"), color: .purple, isSystem: true),
+            DeckTag(id: DeckTag.importantTagId, name: String(localized: "重要"), color: .red, isSystem: true)
         ]
     }
 }

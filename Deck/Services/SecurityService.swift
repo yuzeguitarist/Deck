@@ -17,6 +17,14 @@ final class SecurityService {
     private var isAuthenticated = false
     private var lastAuthTime: Date?
     private let authTimeout: TimeInterval = 300 // 5 minutes
+
+    // MARK: - Encryption Key Cache
+    /// Cache the resolved encryption key in memory to avoid hitting Keychain on every encrypt/decrypt.
+    /// Keep the TTL short to limit how long key material lives in RAM.
+    private let encryptionKeyCacheTTL: TimeInterval = 60
+    private let encryptionKeyLock = NSLock()
+    private var cachedEncryptionKey: SymmetricKey?
+    private var cachedEncryptionKeyLastAccess: Date?
     
     private init() {}
     
@@ -29,6 +37,8 @@ final class SecurityService {
     }
     
     var biometricType: String {
+        var error: NSError?
+        _ = context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error)
         switch context.biometryType {
         case .touchID:
             return "Touch ID"
@@ -56,22 +66,34 @@ final class SecurityService {
         context.localizedCancelTitle = "取消"
         
         var error: NSError?
-        guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
-            log.warn("Biometrics not available: \(error?.localizedDescription ?? "unknown")")
-            return false
+        if context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) {
+            return await evaluate(policy: .deviceOwnerAuthenticationWithBiometrics, reason: reason, context: context)
         }
-        
+
+        if context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) {
+            return await evaluate(policy: .deviceOwnerAuthentication, reason: reason, context: context)
+        }
+
+        log.warn("Authentication not available: \(error?.localizedDescription ?? "unknown")")
+        return false
+    }
+    
+    func resetAuthentication() {
+        isAuthenticated = false
+        lastAuthTime = nil
+        // Reduce lifetime of key material in memory when user is no longer authenticated.
+        clearCachedEncryptionKey()
+    }
+
+    private func evaluate(policy: LAPolicy, reason: String, context: LAContext) async -> Bool {
         do {
-            let success = try await context.evaluatePolicy(
-                .deviceOwnerAuthenticationWithBiometrics,
-                localizedReason: reason
-            )
-            
+            let success = try await context.evaluatePolicy(policy, localizedReason: reason)
+
             if success {
                 isAuthenticated = true
                 lastAuthTime = Date()
             }
-            
+
             return success
         } catch {
             log.warn("Authentication failed: \(error.localizedDescription)")
@@ -79,20 +101,50 @@ final class SecurityService {
         }
     }
     
-    func resetAuthentication() {
-        isAuthenticated = false
-        lastAuthTime = nil
-    }
-    
     // MARK: - Encryption Key Management
     
     private let keychainService = "com.deck.encryption"
     private let keychainAccount = "master-key"
+
+    // MARK: - In-Memory Key Cache
+    private func cachedKeyIfValid(now: Date = Date()) -> SymmetricKey? {
+        encryptionKeyLock.lock()
+        defer { encryptionKeyLock.unlock() }
+        guard let key = cachedEncryptionKey,
+              let lastAccess = cachedEncryptionKeyLastAccess,
+              now.timeIntervalSince(lastAccess) < encryptionKeyCacheTTL else {
+            return nil
+        }
+        // Touch access time so bursts of encrypt/decrypt keep the key warm.
+        cachedEncryptionKeyLastAccess = now
+        return key
+    }
+
+    private func cacheKey(_ key: SymmetricKey, now: Date = Date()) {
+        encryptionKeyLock.lock()
+        cachedEncryptionKey = key
+        cachedEncryptionKeyLastAccess = now
+        encryptionKeyLock.unlock()
+    }
+
+    private func clearCachedEncryptionKey() {
+        encryptionKeyLock.lock()
+        cachedEncryptionKey = nil
+        cachedEncryptionKeyLastAccess = nil
+        encryptionKeyLock.unlock()
+    }
     
     func getOrCreateEncryptionKey() -> SymmetricKey? {
+        // Fast path: return cached key (avoids Keychain round-trips during heavy encrypt/decrypt bursts).
+        if let cached = cachedKeyIfValid() {
+            return cached
+        }
+
         // Try to get existing key from Keychain
         if let keyData = getKeyFromKeychain() {
-            return SymmetricKey(data: keyData)
+            let key = SymmetricKey(data: keyData)
+            cacheKey(key)
+            return key
         }
         
         // Generate new key
@@ -101,6 +153,7 @@ final class SecurityService {
         
         // Save to Keychain with biometric protection
         if saveKeyToKeychain(keyData) {
+            cacheKey(key)
             return key
         }
         
@@ -176,6 +229,7 @@ final class SecurityService {
             kSecAttrAccount as String: keychainAccount
         ]
         SecItemDelete(query as CFDictionary)
+        clearCachedEncryptionKey()
     }
     
     // MARK: - Data Encryption/Decryption
@@ -186,13 +240,7 @@ final class SecurityService {
             return nil
         }
         
-        do {
-            let sealedBox = try AES.GCM.seal(data, using: key)
-            return sealedBox.combined
-        } catch {
-            log.error("Encryption failed: \(error)")
-            return nil
-        }
+        return encrypt(data, using: key)
     }
     
     func decrypt(_ encryptedData: Data) -> Data? {
@@ -201,6 +249,32 @@ final class SecurityService {
             return nil
         }
         
+        return decrypt(encryptedData, using: key)
+    }
+
+    func decryptSilently(_ encryptedData: Data) -> Data? {
+        guard let key = getOrCreateEncryptionKey() else {
+            return nil
+        }
+        do {
+            let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
+            return try AES.GCM.open(sealedBox, using: key)
+        } catch {
+            return nil
+        }
+    }
+
+    func encrypt(_ data: Data, using key: SymmetricKey) -> Data? {
+        do {
+            let sealedBox = try AES.GCM.seal(data, using: key)
+            return sealedBox.combined
+        } catch {
+            log.error("Encryption failed: \(error)")
+            return nil
+        }
+    }
+
+    func decrypt(_ encryptedData: Data, using key: SymmetricKey) -> Data? {
         do {
             let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
             return try AES.GCM.open(sealedBox, using: key)
