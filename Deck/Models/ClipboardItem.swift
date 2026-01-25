@@ -106,6 +106,7 @@ final class ClipboardItem: Identifiable, Equatable {
     private(set) var timestamp: Int64
     let appPath: String
     let appName: String
+    var customTitle: String?
     var sourceAnchor: SourceAnchor?
     var searchText: String {
         didSet {
@@ -186,6 +187,26 @@ final class ClipboardItem: Identifiable, Equatable {
             return searchText.asCompleteURL()
         }
         return nil
+    }
+
+    var displayTitle: String? {
+        let trimmed = customTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+
+    var searchableText: String {
+        var parts: [String] = []
+        if let title = displayTitle {
+            parts.append(title)
+        }
+        if !searchText.isEmpty {
+            parts.append(searchText)
+        }
+        if !appName.isEmpty {
+            parts.append(appName)
+        }
+        return parts.joined(separator: "\n")
     }
 
     var isUnsupported: Bool {
@@ -281,6 +302,7 @@ final class ClipboardItem: Identifiable, Equatable {
         timestamp: Int64,
         appPath: String,
         appName: String,
+        customTitle: String? = nil,
         sourceAnchor: SourceAnchor? = nil,
         searchText: String,
         contentLength: Int,
@@ -299,6 +321,7 @@ final class ClipboardItem: Identifiable, Equatable {
         self.timestamp = timestamp
         self.appPath = appPath
         self.appName = appName
+        self.customTitle = Self.normalizedCustomTitle(customTitle)
         self.sourceAnchor = sourceAnchor
         self.searchText = searchText
         self.contentLength = contentLength
@@ -539,6 +562,15 @@ final class ClipboardItem: Identifiable, Equatable {
             .replacingOccurrences(of: "\u{200B}", with: "")
             .replacingOccurrences(of: "\u{FEFF}", with: "")
         return stripped.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func normalizedCustomTitle(_ title: String?) -> String? {
+        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trimmed, !trimmed.isEmpty else { return nil }
+        if trimmed.count > Const.customTitleMaxLength {
+            return String(trimmed.prefix(Const.customTitleMaxLength))
+        }
+        return trimmed
     }
 
     private static func imageDataFromPasteboard(_ pasteboard: NSPasteboard) -> Data? {
