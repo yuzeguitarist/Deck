@@ -57,6 +57,7 @@ final class AppLogger: @unchecked Sendable {
     private let osLogger: os.Logger
     private let logQueue = DispatchQueue(label: "com.deck.logger", qos: .utility)
     private nonisolated(unsafe) var logFileURL: URL?
+    private let iso8601Formatter = ISO8601DateFormatter()
     
     #if DEBUG
     var minimumLogLevel: LogLevel = .debug
@@ -145,7 +146,7 @@ final class AppLogger: @unchecked Sendable {
         logQueue.async { [weak self] in
             guard let self = self, let logURL = self.logFileURL else { return }
             
-            let timestamp = ISO8601DateFormatter().string(from: Date())
+            let timestamp = self.iso8601Formatter.string(from: Date())
             let logEntry = "[\(timestamp)] [\(level.rawValue)] \(message)\n"
             
             guard let data = logEntry.data(using: .utf8) else { return }
