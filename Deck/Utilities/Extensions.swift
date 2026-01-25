@@ -129,36 +129,6 @@ extension String {
         return nil
     }
 
-    // MARK: - Pasteboard / file URL token helpers
-    private static let deckFileURLPrefix = "file://"
-
-    func deckResolvedLocalFilePath() -> String {
-        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.hasPrefix(Self.deckFileURLPrefix) else { return trimmed }
-        if let url = URL(string: trimmed), url.isFileURL {
-            return url.path
-        }
-        let encoded = trimmed
-            .replacingOccurrences(of: " ", with: "%20")
-            .replacingOccurrences(of: "#", with: "%23")
-            .replacingOccurrences(of: "?", with: "%3F")
-        if let url = URL(string: encoded), url.isFileURL {
-            return url.path
-        }
-        var remainder = String(trimmed.dropFirst(Self.deckFileURLPrefix.count))
-        if remainder.hasPrefix("localhost/") {
-            remainder = String(remainder.dropFirst("localhost".count))
-        }
-        if !remainder.hasPrefix("/") { remainder = "/" + remainder }
-        return remainder.removingPercentEncoding ?? remainder
-    }
-
-    func deckResolvedLocalFileURL() -> URL? {
-        let path = deckResolvedLocalFilePath()
-        guard !path.isEmpty else { return nil }
-        return URL(fileURLWithPath: path)
-    }
-
     private static let urlTrailingPunctuation: Set<Character> = [
         ".", ",", ";", ":", "!", "?", "'", "\"",
         "，", "。", "；", "：", "！", "？", "、", "…"

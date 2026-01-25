@@ -231,7 +231,10 @@ final class ClipboardItem: Identifiable, Equatable {
 
     private var primaryFilePath: String? {
         guard let paths = filePaths, let first = paths.first else { return nil }
-        return first.deckResolvedLocalFilePath()
+        if first.hasPrefix("file://"), let url = URL(string: first) {
+            return url.path
+        }
+        return first
     }
 
     var imagePasteboardType: PasteboardType {
@@ -372,8 +375,8 @@ final class ClipboardItem: Identifiable, Equatable {
         return inlineData
     }
     
-    convenience init?(with pasteboard: NSPasteboard) {
-        guard let item = pasteboard.pasteboardItems?.first else { return nil }
+    convenience init?(with pasteboard: NSPasteboard, pasteboardItem: NSPasteboardItem? = nil) {
+        guard let item = pasteboardItem ?? pasteboard.pasteboardItems?.first else { return nil }
         
         let app = NSWorkspace.shared.frontmostApplication
         let filteredTypes = Self.filteredPasteboardTypes(from: item.types)
@@ -534,7 +537,10 @@ final class ClipboardItem: Identifiable, Equatable {
     private static func resolveFilePathToken(_ token: String) -> String? {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        return trimmed.deckResolvedLocalFilePath()
+        if trimmed.hasPrefix("file://"), let url = URL(string: trimmed) {
+            return url.path
+        }
+        return trimmed
     }
 
     private static let microsoftSourcePrefix = "com.microsoft.ole.source."
@@ -630,7 +636,7 @@ final class ClipboardItem: Identifiable, Equatable {
     /// 检查文件是否为 PDF
     var isPDF: Bool {
         guard itemType == .file, let paths = filePaths, let firstPath = paths.first else { return false }
-        let ext = (firstPath.deckResolvedLocalFilePath() as NSString).pathExtension.lowercased()
+        let ext = (firstPath as NSString).pathExtension.lowercased()
         return Self.pdfExtensions.contains(ext)
     }
 
@@ -638,7 +644,12 @@ final class ClipboardItem: Identifiable, Equatable {
     var isFileURLImage: Bool {
         guard pasteboardType == .fileURL, let paths = filePaths, !paths.isEmpty else { return false }
         return paths.allSatisfy { path in
-            let resolvedPath = path.deckResolvedLocalFilePath()
+            let resolvedPath: String
+            if path.hasPrefix("file://"), let url = URL(string: path) {
+                resolvedPath = url.path
+            } else {
+                resolvedPath = path
+            }
             let ext = (resolvedPath as NSString).pathExtension.lowercased()
             if Self.imageExtensions.contains(ext) { return true }
             if !ext.isEmpty, let type = UTType(filenameExtension: ext), type.conforms(to: .image) {
@@ -651,20 +662,20 @@ final class ClipboardItem: Identifiable, Equatable {
     /// 获取第一个 PDF 文件路径
     var firstPDFPath: String? {
         guard isPDF, let paths = filePaths else { return nil }
-        return paths.first?.deckResolvedLocalFilePath()
+        return paths.first
     }
 
     /// 检查文件是否为 Markdown
     var isMarkdownFile: Bool {
         guard itemType == .file, let paths = filePaths, let firstPath = paths.first else { return false }
-        let ext = (firstPath.deckResolvedLocalFilePath() as NSString).pathExtension.lowercased()
+        let ext = (firstPath as NSString).pathExtension.lowercased()
         return Self.markdownExtensions.contains(ext)
     }
 
     /// 获取第一个 Markdown 文件路径
     var firstMarkdownPath: String? {
         guard isMarkdownFile, let paths = filePaths else { return nil }
-        return paths.first?.deckResolvedLocalFilePath()
+        return paths.first
     }
 
     /// Checks if the item is a single Office document that can use QuickLook.
@@ -672,11 +683,10 @@ final class ClipboardItem: Identifiable, Equatable {
         guard itemType == .file, let paths = filePaths, paths.count == 1, let firstPath = paths.first else {
             return nil
         }
-        let resolved = firstPath.deckResolvedLocalFilePath()
-        let ext = (resolved as NSString).pathExtension.lowercased()
+        let ext = (firstPath as NSString).pathExtension.lowercased()
         guard Self.officeExtensions.contains(ext) else { return nil }
-        guard FileManager.default.fileExists(atPath: resolved) else { return nil }
-        return resolved
+        guard FileManager.default.fileExists(atPath: firstPath) else { return nil }
+        return firstPath
     }
     
     private func detectItemType() -> ClipItemType {
