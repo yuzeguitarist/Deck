@@ -94,6 +94,21 @@ enum ClipItemType: String, Codable, Sendable {
     }
 }
 
+struct FigmaClipboardMeta: Decodable {
+    let fileKey: String?
+    let pasteID: Int?
+    let dataType: String?
+}
+
+struct FigmaClipboardPayload {
+    let html: String
+    let figmaBase64: String
+    let figmetaBase64: String?
+    let meta: FigmaClipboardMeta?
+    let sourceURL: String?
+    let pasteboardTypes: [String]
+}
+
 @Observable
 final class ClipboardItem: Identifiable, Equatable {
     var id: Int64?
@@ -177,6 +192,12 @@ final class ClipboardItem: Identifiable, Equatable {
 
     @ObservationIgnored
     private var calculationResultChecked: Bool = false
+
+    @ObservationIgnored
+    private var figmaPayloadChecked: Bool = false
+
+    @ObservationIgnored
+    private var cachedFigmaPayload: FigmaClipboardPayload?
     
     var url: URL? {
         if pasteboardType == .string {
@@ -212,6 +233,29 @@ final class ClipboardItem: Identifiable, Equatable {
     var isUnsupported: Bool {
         pasteboardType == .deckUnsupported
     }
+
+    var figmaClipboardPayload: FigmaClipboardPayload? {
+        analysisLock.lock()
+        if figmaPayloadChecked {
+            let cached = cachedFigmaPayload
+            analysisLock.unlock()
+            return cached
+        }
+        analysisLock.unlock()
+
+        let result = resolveFigmaPayload()
+        analysisLock.lock()
+        if result.shouldCache {
+            figmaPayloadChecked = true
+            cachedFigmaPayload = result.payload
+        }
+        analysisLock.unlock()
+        return result.payload
+    }
+
+    var isFigmaClipboard: Bool {
+        figmaClipboardPayload != nil
+    }
     
     var colorValue: NSColor? {
         if cachedColorValue != nil { return cachedColorValue }
@@ -219,6 +263,155 @@ final class ClipboardItem: Identifiable, Equatable {
         let text = String(data: data, encoding: .utf8) ?? ""
         cachedColorValue = text.hexColor
         return cachedColorValue
+    }
+
+    private func resolveFigmaPayload() -> (payload: FigmaClipboardPayload?, shouldCache: Bool) {
+        guard isUnsupported else { return (nil, true) }
+        guard let payloadData = resolvedData(), !payloadData.isEmpty else {
+            log.debug("Figma payload: empty data (id=\(id ?? -1), uniqueId=\(uniqueId))")
+            return (nil, false)
+        }
+        if let payload = UnsupportedPasteboardPayload.decode(from: payloadData) {
+            if payload.items.isEmpty {
+                log.debug("Figma payload: no items (id=\(id ?? -1))")
+                return (nil, true)
+            }
+
+            if let extracted = Self.extractFigmaPayload(from: payload.items, id: id) {
+                return (extracted, true)
+            }
+
+            log.debug("Figma payload: no figma marker in HTML (id=\(id ?? -1))")
+            return (nil, true)
+        }
+
+        log.debug("Figma payload: decode failed, trying plist fallback (id=\(id ?? -1), size=\(payloadData.count))")
+        if let extracted = Self.extractFigmaPayloadFromPlistFallback(payloadData, id: id) {
+            log.debug("Figma payload: parsed via plist fallback (id=\(id ?? -1))")
+            return (extracted, true)
+        }
+
+        log.debug("Figma payload: plist fallback failed (id=\(id ?? -1), size=\(payloadData.count))")
+        return (nil, true)
+    }
+
+    private static func extractFigmaPayload(
+        from items: [UnsupportedPasteboardItem],
+        id: Int64?
+    ) -> FigmaClipboardPayload? {
+        for item in items {
+            guard let html = item.htmlString(), !html.isEmpty else { continue }
+            if let payload = buildFigmaPayload(
+                from: html,
+                sourceURLData: item.dataByType["org.chromium.source-url"],
+                pasteboardTypes: item.types,
+                id: id
+            ) {
+                return payload
+            }
+        }
+        return nil
+    }
+
+    private static func extractFigmaPayloadFromPlistFallback(
+        _ data: Data,
+        id: Int64?
+    ) -> FigmaClipboardPayload? {
+        guard let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+              let dict = plist as? [String: Any],
+              let items = dict["items"] as? [[String: Any]] else {
+            return nil
+        }
+
+        for item in items {
+            let dataByType = item["dataByType"] as? [String: Any] ?? [:]
+            let stringByType = item["stringByType"] as? [String: Any] ?? [:]
+            let html = decodeHTMLFromAny(stringByType["public.html"])
+                ?? decodeHTMLFromAny(dataByType["public.html"])
+            guard let html, !html.isEmpty else { continue }
+            let sourceURLData = decodeDataFromAny(dataByType["org.chromium.source-url"])
+            let types = (item["types"] as? [String])
+                ?? Array(Set(dataByType.keys).union(stringByType.keys)).sorted()
+            if let payload = buildFigmaPayload(
+                from: html,
+                sourceURLData: sourceURLData,
+                pasteboardTypes: types,
+                id: id
+            ) {
+                return payload
+            }
+        }
+        return nil
+    }
+
+    private static func buildFigmaPayload(
+        from html: String,
+        sourceURLData: Data?,
+        pasteboardTypes: [String],
+        id: Int64?
+    ) -> FigmaClipboardPayload? {
+        guard let figmaBase64 = extractHTMLMarker("figma", from: html) else {
+            log.debug("Figma payload: figma marker not found or extract failed (id=\(id ?? -1))")
+            return nil
+        }
+        let figmetaBase64 = extractHTMLMarker("figmeta", from: html)
+        let meta: FigmaClipboardMeta?
+        if let figmetaBase64 {
+            meta = decodeFigmaMeta(figmetaBase64)
+        } else {
+            meta = nil
+        }
+        let sourceURL = decodeStringFromData(sourceURLData)
+        log.debug("Figma payload: parsed (id=\(id ?? -1), fileKey=\(meta?.fileKey ?? ""), pasteID=\(meta?.pasteID ?? -1))")
+        return FigmaClipboardPayload(
+            html: html,
+            figmaBase64: figmaBase64,
+            figmetaBase64: figmetaBase64,
+            meta: meta,
+            sourceURL: sourceURL,
+            pasteboardTypes: pasteboardTypes
+        )
+    }
+
+    private static func decodeDataFromAny(_ value: Any?) -> Data? {
+        if let data = value as? Data { return data }
+        if let data = value as? NSData { return data as Data }
+        return nil
+    }
+
+    private static func decodeHTMLFromAny(_ value: Any?) -> String? {
+        if let text = value as? String { return text }
+        guard let data = decodeDataFromAny(value) else { return nil }
+        if let text = decodeStringFromData(data) { return text }
+        let lossy = String(decoding: data, as: UTF8.self)
+        return lossy.isEmpty ? nil : lossy
+    }
+
+    private static func extractHTMLMarker(_ name: String, from html: String) -> String? {
+        let startMarker = "(\(name))"
+        let endMarker = "(/\(name))"
+
+        guard let startRange = html.range(of: startMarker) else { return nil }
+        guard let endRange = html.range(of: endMarker, range: startRange.upperBound..<html.endIndex) else { return nil }
+
+        let payload = html[startRange.upperBound..<endRange.lowerBound]
+        let trimmed = payload.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : String(trimmed)
+    }
+
+    private static func decodeFigmaMeta(_ base64: String) -> FigmaClipboardMeta? {
+        let cleaned = base64.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = Data(base64Encoded: cleaned) else { return nil }
+        return try? JSONDecoder().decode(FigmaClipboardMeta.self, from: data)
+    }
+
+    private static func decodeStringFromData(_ data: Data?) -> String? {
+        guard let data else { return nil }
+        if let text = String(data: data, encoding: .utf8) { return text }
+        if let text = String(data: data, encoding: .utf16) { return text }
+        if let text = String(data: data, encoding: .utf16LittleEndian) { return text }
+        if let text = String(data: data, encoding: .utf16BigEndian) { return text }
+        return nil
     }
     
     var filePaths: [String]? {
@@ -229,12 +422,19 @@ final class ClipboardItem: Identifiable, Equatable {
         return cachedFilePaths
     }
 
+    private static func normalizeFilePath(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("file://") else { return trimmed }
+        if let url = URL(string: trimmed) { return url.path }
+        let spaceEscaped = trimmed.replacingOccurrences(of: " ", with: "%20")
+        if let url = URL(string: spaceEscaped) { return url.path }
+        let stripped = trimmed.replacingOccurrences(of: "file://", with: "")
+        return stripped.removingPercentEncoding ?? stripped
+    }
+
     private var primaryFilePath: String? {
         guard let paths = filePaths, let first = paths.first else { return nil }
-        if first.hasPrefix("file://"), let url = URL(string: first) {
-            return url.path
-        }
-        return first
+        return Self.normalizeFilePath(first)
     }
 
     var imagePasteboardType: PasteboardType {
@@ -282,11 +482,12 @@ final class ClipboardItem: Identifiable, Equatable {
         var tokens: [String] = []
         var seen = Set<String>()
 
-        for path in cleanedPaths {
-            if seen.insert(path).inserted {
-                tokens.append(path)
+        for rawPath in cleanedPaths {
+            if seen.insert(rawPath).inserted {
+                tokens.append(rawPath)
             }
-            let fileName = URL(fileURLWithPath: path).lastPathComponent
+            let normalizedPath = Self.normalizeFilePath(rawPath)
+            let fileName = URL(fileURLWithPath: normalizedPath).lastPathComponent
             if !fileName.isEmpty, seen.insert(fileName).inserted {
                 tokens.append(fileName)
             }
@@ -537,10 +738,7 @@ final class ClipboardItem: Identifiable, Equatable {
     private static func resolveFilePathToken(_ token: String) -> String? {
         let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
-        if trimmed.hasPrefix("file://"), let url = URL(string: trimmed) {
-            return url.path
-        }
-        return trimmed
+        return normalizeFilePath(trimmed)
     }
 
     private static let microsoftSourcePrefix = "com.microsoft.ole.source."
@@ -635,7 +833,8 @@ final class ClipboardItem: Identifiable, Equatable {
 
     /// 检查文件是否为 PDF
     var isPDF: Bool {
-        guard itemType == .file, let paths = filePaths, let firstPath = paths.first else { return false }
+        guard itemType == .file, let rawPath = filePaths?.first else { return false }
+        let firstPath = Self.normalizeFilePath(rawPath)
         let ext = (firstPath as NSString).pathExtension.lowercased()
         return Self.pdfExtensions.contains(ext)
     }
@@ -644,12 +843,7 @@ final class ClipboardItem: Identifiable, Equatable {
     var isFileURLImage: Bool {
         guard pasteboardType == .fileURL, let paths = filePaths, !paths.isEmpty else { return false }
         return paths.allSatisfy { path in
-            let resolvedPath: String
-            if path.hasPrefix("file://"), let url = URL(string: path) {
-                resolvedPath = url.path
-            } else {
-                resolvedPath = path
-            }
+            let resolvedPath = Self.normalizeFilePath(path)
             let ext = (resolvedPath as NSString).pathExtension.lowercased()
             if Self.imageExtensions.contains(ext) { return true }
             if !ext.isEmpty, let type = UTType(filenameExtension: ext), type.conforms(to: .image) {
@@ -661,28 +855,30 @@ final class ClipboardItem: Identifiable, Equatable {
 
     /// 获取第一个 PDF 文件路径
     var firstPDFPath: String? {
-        guard isPDF, let paths = filePaths else { return nil }
-        return paths.first
+        guard isPDF, let rawPath = filePaths?.first else { return nil }
+        return Self.normalizeFilePath(rawPath)
     }
 
     /// 检查文件是否为 Markdown
     var isMarkdownFile: Bool {
-        guard itemType == .file, let paths = filePaths, let firstPath = paths.first else { return false }
+        guard itemType == .file, let rawPath = filePaths?.first else { return false }
+        let firstPath = Self.normalizeFilePath(rawPath)
         let ext = (firstPath as NSString).pathExtension.lowercased()
         return Self.markdownExtensions.contains(ext)
     }
 
     /// 获取第一个 Markdown 文件路径
     var firstMarkdownPath: String? {
-        guard isMarkdownFile, let paths = filePaths else { return nil }
-        return paths.first
+        guard isMarkdownFile, let rawPath = filePaths?.first else { return nil }
+        return Self.normalizeFilePath(rawPath)
     }
 
     /// Checks if the item is a single Office document that can use QuickLook.
     var officePreviewPath: String? {
-        guard itemType == .file, let paths = filePaths, paths.count == 1, let firstPath = paths.first else {
+        guard itemType == .file, let paths = filePaths, paths.count == 1, let rawPath = paths.first else {
             return nil
         }
+        let firstPath = Self.normalizeFilePath(rawPath)
         let ext = (firstPath as NSString).pathExtension.lowercased()
         guard Self.officeExtensions.contains(ext) else { return nil }
         guard FileManager.default.fileExists(atPath: firstPath) else { return nil }
@@ -794,7 +990,8 @@ final class ClipboardItem: Identifiable, Equatable {
         guard itemType == .image else { return nil }
         
         // For file-based images
-        if pasteboardType == .fileURL, let paths = cachedFilePaths, let path = paths.first {
+        if pasteboardType == .fileURL, let paths = cachedFilePaths, let rawPath = paths.first {
+            let path = Self.normalizeFilePath(rawPath)
             cachedThumbnail = generateThumbnailFromFile(path: path)
             return cachedThumbnail
         }
@@ -810,7 +1007,7 @@ final class ClipboardItem: Identifiable, Equatable {
         // Safety check for large data
         guard let payload = resolvedData() else { return nil }
         if payload.count > Self.maxImageDataSize {
-            cachedThumbnail = generateSafeThumbnailFromData()
+            cachedThumbnail = generateSafeThumbnailFromData(payload)
             return cachedThumbnail
         }
         
@@ -912,7 +1109,7 @@ final class ClipboardItem: Identifiable, Equatable {
         return normalized
     }
     
-    private func generateSafeThumbnailFromData() -> NSImage? {
+    private func generateSafeThumbnailFromData(_ payload: Data) -> NSImage? {
         let options: [CFString: Any] = [
             kCGImageSourceShouldCache: false,
             kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
@@ -920,8 +1117,7 @@ final class ClipboardItem: Identifiable, Equatable {
             kCGImageSourceThumbnailMaxPixelSize: Self.maxThumbnailSize
         ]
 
-        guard let payload = resolvedData(),
-              let source = CGImageSourceCreateWithData(payload as CFData, nil),
+        guard let source = CGImageSourceCreateWithData(payload as CFData, nil),
               let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
             return nil
         }
@@ -964,7 +1160,8 @@ final class ClipboardItem: Identifiable, Equatable {
         guard itemType == .image else { return nil }
         
         var source: CGImageSource?
-        if pasteboardType == .fileURL, let paths = cachedFilePaths, let path = paths.first {
+        if pasteboardType == .fileURL, let paths = cachedFilePaths, let rawPath = paths.first {
+            let path = Self.normalizeFilePath(rawPath)
             guard FileManager.default.fileExists(atPath: path) else { return nil }
             let url = URL(fileURLWithPath: path)
             source = CGImageSourceCreateWithURL(url as CFURL, nil)
@@ -1010,7 +1207,9 @@ final class ClipboardItem: Identifiable, Equatable {
             return "\(formatter.string(from: NSNumber(value: contentLength)) ?? "\(contentLength)") 个字符"
         case .file:
             guard let paths = filePaths else { return "文件" }
-            return paths.count > 1 ? "\(paths.count) 个文件" : (URL(fileURLWithPath: paths.first ?? "").lastPathComponent)
+            if paths.count > 1 { return "\(paths.count) 个文件" }
+            let firstPath = Self.normalizeFilePath(paths.first ?? "")
+            return URL(fileURLWithPath: firstPath).lastPathComponent
         case .url:
             return String(data: data, encoding: .utf8) ?? "链接"
         case .color:
@@ -1033,9 +1232,13 @@ final class ClipboardItem: Identifiable, Equatable {
         }
         if itemType == .image, pasteboardType == .fileURL, let path = primaryFilePath {
             let fileURL = URL(fileURLWithPath: path)
-            if FileManager.default.fileExists(atPath: fileURL.path) {
-                return try? Data(contentsOf: fileURL)
+            guard FileManager.default.fileExists(atPath: fileURL.path) else { return loadFullData() }
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+               let fileSize = attrs[.size] as? NSNumber,
+               fileSize.intValue > Self.maxImageDataSize {
+                return nil
             }
+            return try? Data(contentsOf: fileURL, options: [.mappedIfSafe])
         }
         return loadFullData()
     }
@@ -1132,26 +1335,44 @@ extension ClipboardItem {
             }
         case .richText:
             provider.registerDataRepresentation(forTypeIdentifier: pasteboardType.rawValue, visibility: .all) { [weak self] completion in
-                guard let data = self?.resolvedData() else {
-                    completion(nil, nil)
-                    return nil
-                }
+                let progress = Progress(totalUnitCount: 1)
                 DispatchQueue.global(qos: .userInitiated).async {
+                    guard let self, !progress.isCancelled else {
+                        completion(nil, nil)
+                        return
+                    }
+
+                    let data = self.resolvedData()
+                    guard !progress.isCancelled else {
+                        completion(nil, nil)
+                        return
+                    }
+
                     completion(data, nil)
+                    progress.completedUnitCount = 1
                 }
-                return nil
+                return progress
             }
         case .image:
             let imageType = imagePasteboardType
             provider.registerDataRepresentation(forTypeIdentifier: imageType.rawValue, visibility: .all) { [weak self] completion in
-                guard let data = self?.resolvedData() else {
-                    completion(nil, nil)
-                    return nil
-                }
+                let progress = Progress(totalUnitCount: 1)
                 DispatchQueue.global(qos: .userInitiated).async {
+                    guard let self, !progress.isCancelled else {
+                        completion(nil, nil)
+                        return
+                    }
+
+                    let data = self.resolvedData()
+                    guard !progress.isCancelled else {
+                        completion(nil, nil)
+                        return
+                    }
+
                     completion(data, nil)
+                    progress.completedUnitCount = 1
                 }
-                return nil
+                return progress
             }
             if pasteboardType == .fileURL, let path = primaryFilePath {
                 provider.suggestedName = URL(fileURLWithPath: path).lastPathComponent
@@ -1160,7 +1381,8 @@ extension ClipboardItem {
             }
         case .file:
             if let paths = filePaths {
-                for path in paths {
+                for rawPath in paths {
+                    let path = Self.normalizeFilePath(rawPath)
                     let fileURL = URL(fileURLWithPath: path)
                     let typeId = UTType(filenameExtension: fileURL.pathExtension)?.identifier ?? UTType.data.identifier
                     provider.registerFileRepresentation(forTypeIdentifier: typeId, fileOptions: [], visibility: .all) { completion in
@@ -1176,7 +1398,8 @@ extension ClipboardItem {
                     }
                 }
                 if paths.count == 1 {
-                    let fileName = URL(fileURLWithPath: paths[0]).lastPathComponent
+                    let filePath = Self.normalizeFilePath(paths[0])
+                    let fileName = URL(fileURLWithPath: filePath).lastPathComponent
                     let baseName: String
                     if let dotIndex = fileName.lastIndex(of: "."), dotIndex != fileName.startIndex {
                         baseName = String(fileName[..<dotIndex])

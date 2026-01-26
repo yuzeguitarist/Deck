@@ -2935,6 +2935,16 @@ extension DeckSQLManager {
 
                 dataToStore = Data()
             }
+        } else if item.isUnsupported && item.data.count > Const.largeBlobThreshold {
+            // Unsupported payloads can be large; offload to blob storage to avoid DB bloat.
+            if let path = await BlobStorage.shared.storeAsync(
+                data: item.data,
+                uniqueId: item.uniqueId,
+                encrypt: isSecurityMode
+            ) {
+                blobPath = path
+                dataToStore = Data()
+            }
         } else if item.itemType == .image && item.data.count > 50 * 1024 && (previewData == nil || previewData!.isEmpty) {
             previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
             log.debug("Pre-generated thumbnail for medium image (\(item.data.count) bytes)")
@@ -3170,6 +3180,15 @@ extension DeckSQLManager {
                     log.debug("Pre-generated thumbnail for large image (\(item.data.count) bytes) during update")
                 }
 
+                dataToStore = Data()
+            }
+        } else if item.isUnsupported, item.hasFullData, item.data.count > Const.largeBlobThreshold {
+            if let path = await BlobStorage.shared.storeAsync(
+                data: item.data,
+                uniqueId: item.uniqueId,
+                encrypt: isSecurityMode
+            ) {
+                blobPathToStore = path
                 dataToStore = Data()
             }
         } else if item.itemType == .image, item.data.count > 50 * 1024, (previewData == nil || previewData!.isEmpty) {
