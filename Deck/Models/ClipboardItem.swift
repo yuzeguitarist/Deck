@@ -175,10 +175,14 @@ final class ClipboardItem: Identifiable, Equatable {
     
     @ObservationIgnored
     private var analysisSample: String {
-        if searchText.count > Const.maxSmartAnalysisLength {
-            return String(searchText.prefix(Const.maxSmartAnalysisLength))
-        }
-        return searchText
+        Self.sampleText(searchText, maxLength: Const.maxSmartAnalysisLength)
+    }
+
+    private static func sampleText(_ text: String, maxLength: Int) -> String {
+        guard text.count > maxLength else { return text }
+        let headLen = maxLength / 2
+        let tailLen = maxLength - headLen
+        return String(text.prefix(headLen)) + "\n…\n" + String(text.suffix(tailLen))
     }
     
     @ObservationIgnored
@@ -198,6 +202,9 @@ final class ClipboardItem: Identifiable, Equatable {
 
     @ObservationIgnored
     private var cachedFigmaPayload: FigmaClipboardPayload?
+
+    @ObservationIgnored
+    private var figmaPayloadLastAttempt: TimeInterval = 0
     
     var url: URL? {
         if pasteboardType == .string {
@@ -267,14 +274,26 @@ final class ClipboardItem: Identifiable, Equatable {
 
     private func resolveFigmaPayload() -> (payload: FigmaClipboardPayload?, shouldCache: Bool) {
         guard isUnsupported else { return (nil, true) }
+        if !hasFullData {
+            let now = CFAbsoluteTimeGetCurrent()
+            analysisLock.lock()
+            let lastAttempt = figmaPayloadLastAttempt
+            if now - lastAttempt < 0.5 {
+                analysisLock.unlock()
+                return (nil, false)
+            }
+            figmaPayloadLastAttempt = now
+            analysisLock.unlock()
+        }
         guard let payloadData = resolvedData(), !payloadData.isEmpty else {
             log.debug("Figma payload: empty data (id=\(id ?? -1), uniqueId=\(uniqueId))")
             return (nil, false)
         }
+        let isFullData = hasFullData
         if let payload = UnsupportedPasteboardPayload.decode(from: payloadData) {
             if payload.items.isEmpty {
                 log.debug("Figma payload: no items (id=\(id ?? -1))")
-                return (nil, true)
+                return (nil, isFullData)
             }
 
             if let extracted = Self.extractFigmaPayload(from: payload.items, id: id) {
@@ -282,7 +301,7 @@ final class ClipboardItem: Identifiable, Equatable {
             }
 
             log.debug("Figma payload: no figma marker in HTML (id=\(id ?? -1))")
-            return (nil, true)
+            return (nil, isFullData)
         }
 
         log.debug("Figma payload: decode failed, trying plist fallback (id=\(id ?? -1), size=\(payloadData.count))")
@@ -292,7 +311,7 @@ final class ClipboardItem: Identifiable, Equatable {
         }
 
         log.debug("Figma payload: plist fallback failed (id=\(id ?? -1), size=\(payloadData.count))")
-        return (nil, true)
+        return (nil, isFullData)
     }
 
     private static func extractFigmaPayload(

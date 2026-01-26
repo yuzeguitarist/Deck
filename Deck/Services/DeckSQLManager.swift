@@ -3547,7 +3547,9 @@ extension DeckSQLManager {
         let batchSize = 500
         var offset = 0
         // 安全模式下最多扫描 5000 条（解密开销大），普通模式扫描全量
-        let maxScan = isSecurityMode ? 5000 : Int.max
+        let maxScan = isSecurityMode
+            ? min(max(5000, limit * 200), 20000)
+            : Int.max
 
         while matchingIds.count < limit && offset < maxScan {
             // 支持任务取消
@@ -3624,18 +3626,64 @@ extension DeckSQLManager {
     ) async -> [Row] {
         guard !Task.isCancelled else { return [] }
 
-        // Get matching IDs from FTS
-        let matchingIds = await searchFTS(keyword: keyword, limit: limit * 2)
-        guard !matchingIds.isEmpty else { return [] }
+        let hasFilters = (typeFilter?.isEmpty == false) || (tagId != nil && tagId != -1)
+        let initialLimit = max(limit * 2, limit)
+        let maxLimit = min(max(limit * 20, 2000), 5000)
+
+        var searchLimit = initialLimit
+        var matchingIds: [Int64] = []
+        var rows: [Row] = []
+        while true {
+            // Get matching IDs from FTS
+            matchingIds = await searchFTS(keyword: keyword, limit: searchLimit)
+            guard !matchingIds.isEmpty else { return [] }
+
+            rows = await fetchRowsForIds(matchingIds, typeFilter: typeFilter, tagId: tagId)
+
+            if !hasFilters ||
+                rows.count >= limit ||
+                matchingIds.count < searchLimit ||
+                searchLimit >= maxLimit {
+                break
+            }
+            searchLimit = min(searchLimit * 2, maxLimit)
+        }
+        guard rows.count > 1 else { return rows }
+
+        var rowsById: [Int64: Row] = [:]
+        rowsById.reserveCapacity(rows.count)
+        for row in rows {
+            if let id = try? row.get(Col.id) {
+                rowsById[id] = row
+            }
+        }
+
+        var ordered: [Row] = []
+        ordered.reserveCapacity(min(limit, matchingIds.count))
+        for id in matchingIds {
+            guard let row = rowsById[id] else { continue }
+            ordered.append(row)
+            if ordered.count >= limit { break }
+        }
+        return ordered
+    }
+
+    private func fetchRowsForIds(
+        _ ids: [Int64],
+        typeFilter: [String]?,
+        tagId: Int?
+    ) async -> [Row] {
+        guard !ids.isEmpty else { return [] }
 
         // 分块查询避免 SQLite 变量上限
         let chunkSize = 900
         var rows: [Row] = []
-        rows.reserveCapacity(matchingIds.count)
+        rows.reserveCapacity(ids.count)
         var start = 0
-        while start < matchingIds.count {
-            let end = min(start + chunkSize, matchingIds.count)
-            let chunk = Array(matchingIds[start..<end])
+        while start < ids.count {
+            guard !Task.isCancelled else { break }
+            let end = min(start + chunkSize, ids.count)
+            let chunk = Array(ids[start..<end])
             let chunkRows = await withDBAsync { () throws -> [Row] in
                 guard let db = self.db, let table = self.table else { return [Row]() }
                 var query = table.filter(chunk.contains(Col.id))
@@ -3658,24 +3706,7 @@ extension DeckSQLManager {
             rows.append(contentsOf: chunkRows)
             start = end
         }
-        guard rows.count > 1 else { return rows }
-
-        var rowsById: [Int64: Row] = [:]
-        rowsById.reserveCapacity(rows.count)
-        for row in rows {
-            if let id = try? row.get(Col.id) {
-                rowsById[id] = row
-            }
-        }
-
-        var ordered: [Row] = []
-        ordered.reserveCapacity(min(limit, matchingIds.count))
-        for id in matchingIds {
-            guard let row = rowsById[id] else { continue }
-            ordered.append(row)
-            if ordered.count >= limit { break }
-        }
-        return ordered
+        return rows
     }
     
     func fetchAll(limit: Int = 10000, offset: Int = 0, loadFullData: Bool = false) async -> [ClipboardItem] {
