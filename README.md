@@ -34,6 +34,12 @@
 
 - Clipboard history for text, images, files, colors, and links.
 - Fast search with keyword, regex, and type filters.
+- Slash-triggered search rules for app/date/type filters (include/exclude + multi-values).
+- Per-item custom titles that are searchable and sync across devices.
+- Figma clipboard detection with a dedicated preview.
+- Smart Rules can filter items with custom titles.
+- Link previews include a one-tap QR code for URLs.
+- Missing files show warnings and are auto-cleaned after closing the panel.
 - Tags and smart categories.
 - Smart rules + JavaScript script plugins for automation.
 - Context-aware ordering per app.
@@ -46,9 +52,6 @@
 - Migration from other clipboard apps.
 - Auto updates (daily checks + manual check in Settings).
 - CLI bridge for local automation and external integrations.
-- Clipboard steganography.
-- Auto update.
-- CLI bridge.
 
 ## Integrations
 
@@ -137,6 +140,12 @@ For commercial licensing, contact: yuzeguitar@gmail.com.
 
 - 记录文本、图片、文件、颜色、链接的剪贴板历史。
 - 支持关键词、正则、类型筛选的快速搜索。
+- 斜杠 / 触发的搜索规则过滤（app/date/type，支持排除与多值）。
+- 每条记录支持自定义标题，可搜索并随同步保持一致。
+- 识别 Figma 剪贴板内容并提供专用预览。
+- 智能规则支持“有自定义标题”条件。
+- 链接预览提供“一键二维码”入口。
+- 文件缺失会提示并在面板关闭后自动清理。
 - 标签与智能分类。
 - 智能规则 + JavaScript 脚本插件自动化。
 - 上下文感知排序（按应用）。
@@ -149,9 +158,6 @@ For commercial licensing, contact: yuzeguitar@gmail.com.
 - 从其他剪贴板应用迁移历史。
 - 自动更新（每日检查 + 设置页手动检查）。
 - CLI Bridge，用于本地自动化与外部联动。
-- 剪贴板隐写。
-- 自动更新。
-- CLI Bridge。
 
 ## 联动
 
