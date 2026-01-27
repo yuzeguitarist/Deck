@@ -1052,6 +1052,8 @@ final class DeckSQLManager: NSObject {
     }
 
     private func loadSQLiteVecExtensionIfAvailable() {
+        // Static init succeeded; skip dynamic extension loading.
+        if vecIndexEnabled { return }
         guard !DeckUserDefaults.securityModeEnabled else { return }
 
         let candidates = vecExtensionCandidateURLs()
