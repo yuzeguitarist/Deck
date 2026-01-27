@@ -1432,15 +1432,6 @@ final class DeckSQLManager: NSObject {
             return
         }
 
-        syncOnDBQueue {
-            guard let db = db else { return }
-            do {
-                try db.run("PRAGMA wal_checkpoint(TRUNCATE)")
-            } catch {
-                log.debug("Failed to checkpoint WAL before backup: \(error.localizedDescription)")
-            }
-        }
-
         let dbURL = URL(fileURLWithPath: dbPath)
         let backupURL = URL(fileURLWithPath: backupPath)
         let tempURL = URL(fileURLWithPath: backupPath + ".tmp")
@@ -1465,10 +1456,24 @@ final class DeckSQLManager: NSObject {
             }
         }
 
-        if synchronous {
+        let backupBlock = { [weak self] in
+            guard let self, let db = self.db else { return }
+            do {
+                try db.run("PRAGMA wal_checkpoint(TRUNCATE)")
+            } catch {
+                log.debug("Failed to checkpoint WAL before backup: \(error.localizedDescription)")
+            }
             copyBlock()
+        }
+
+        if synchronous {
+            syncOnDBQueue {
+                backupBlock()
+            }
         } else {
-            DispatchQueue.global(qos: .utility).async(execute: copyBlock)
+            dbQueue.async {
+                backupBlock()
+            }
         }
     }
 
