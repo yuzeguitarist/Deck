@@ -139,6 +139,7 @@ final class ClipboardItem: Identifiable, Equatable {
     let contentLength: Int
     var tagId: Int
     var isTemporary: Bool
+    var isMissingFile: Bool = false
 
     @ObservationIgnored
     private var dataIsFull: Bool
@@ -439,6 +440,20 @@ final class ClipboardItem: Identifiable, Equatable {
               let urlString = String(data: data, encoding: .utf8) else { return nil }
         cachedFilePaths = urlString.components(separatedBy: "\n").filter { !$0.isEmpty }
         return cachedFilePaths
+    }
+
+    var normalizedFilePaths: [String] {
+        guard let paths = filePaths else { return [] }
+        return paths
+            .map { Self.normalizeFilePath($0) }
+            .filter { !$0.isEmpty }
+    }
+
+    func isFileMissingOnDisk() -> Bool {
+        guard pasteboardType == .fileURL else { return false }
+        let paths = normalizedFilePaths
+        guard !paths.isEmpty else { return false }
+        return !paths.contains { FileManager.default.fileExists(atPath: $0) }
     }
 
     private static func normalizeFilePath(_ raw: String) -> String {
