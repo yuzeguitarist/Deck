@@ -727,16 +727,6 @@ final class ClipboardItem: Identifiable, Equatable {
             }
         }
 
-        if let urlStrings = pasteboard.propertyList(forType: .fileURL) as? [String] {
-            let paths = urlStrings.compactMap { resolveFilePathToken($0) }
-            if !paths.isEmpty {
-                return paths
-            }
-        } else if let urlString = pasteboard.propertyList(forType: .fileURL) as? String,
-                  let path = resolveFilePathToken(urlString) {
-            return [path]
-        }
-
         if let urlString = item.string(forType: .fileURL),
            let path = resolveFilePathToken(urlString) {
             return [path]
