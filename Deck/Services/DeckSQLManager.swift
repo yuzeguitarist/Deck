@@ -252,7 +252,7 @@ private final class SearchCacheEntry: NSObject {
     }
 }
 
-final class DeckSQLManager: NSObject {
+final class DeckSQLManager: NSObject, @unchecked Sendable {
     static let shared = DeckSQLManager()
     private static var isInitialized = false
     private nonisolated static let initLock = NSLock()
@@ -316,6 +316,11 @@ final class DeckSQLManager: NSObject {
     
     /// 自动备份间隔（24 小时）
     private let backupInterval: TimeInterval = 24 * 60 * 60
+    
+    /// 初始化失败时间（用于重试退避）
+    private var lastInitFailureAt: Date?
+    /// 初始化重试退避时间
+    private let initRetryBackoff: TimeInterval = 60
 
     /// Startup integrity check interval (default: 24 hours).
     private let integrityCheckInterval: TimeInterval = 24 * 60 * 60
@@ -797,7 +802,12 @@ final class DeckSQLManager: NSObject {
     private func initializeDatabase() {
         Self.initLock.lock()
         defer { Self.initLock.unlock() }
-        
+
+        if let lastFailure = lastInitFailureAt,
+           Date().timeIntervalSince(lastFailure) < initRetryBackoff {
+            return
+        }
+
         guard !Self.isInitialized else { return }
         
         let basePath = getStoragePath()
@@ -811,6 +821,7 @@ final class DeckSQLManager: NSObject {
             do {
                 try FileManager.default.createDirectory(atPath: basePath, withIntermediateDirectories: true)
             } catch {
+                lastInitFailureAt = Date()
                 log.error("Failed to create database directory: \(error.localizedDescription)")
                 return
             }
@@ -859,6 +870,7 @@ final class DeckSQLManager: NSObject {
 
                 log.info("Database initialized at: \(dbPath)")
                 Self.isInitialized = true
+                lastInitFailureAt = nil
                 registerCustomFunctions()
                 createTable()
                 applyMigrations()
@@ -874,6 +886,7 @@ final class DeckSQLManager: NSObject {
                 }
             }
         } catch {
+            lastInitFailureAt = Date()
             log.error("Database connection error: \(error.localizedDescription)")
         }
     }
