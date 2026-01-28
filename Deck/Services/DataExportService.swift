@@ -83,6 +83,7 @@ final class DataExportService {
         let timestamp: Int64
         let appPath: String
         let appName: String
+        let customTitle: String?
         let sourceAnchor: SourceAnchor?
         let searchText: String
         let contentLength: Int
@@ -198,6 +199,7 @@ final class DataExportService {
                     timestamp: item.timestamp,
                     appPath: item.appPath,
                     appName: item.appName,
+                    customTitle: item.customTitle,
                     sourceAnchor: item.sourceAnchor,
                     searchText: item.searchText,
                     contentLength: item.contentLength,
@@ -444,6 +446,7 @@ final class DataExportService {
             timestamp: exportItem.timestamp,
             appPath: exportItem.appPath,
             appName: exportItem.appName,
+            customTitle: exportItem.customTitle,
             sourceAnchor: exportItem.sourceAnchor,
             searchText: exportItem.searchText,
             contentLength: exportItem.contentLength,

@@ -90,6 +90,7 @@
 //     - `data` (Col.data) - 剪贴板内容主体
 //     - `search_text` (Col.searchText) - 用于全文搜索的文本
 //     - `app_name` (Col.appName) - 来源应用名称
+//     - `custom_title` (Col.customTitle) - 用户自定义标题
 //     - `embedding` (ClipboardHistory_embedding.embedding) - 语义向量
 //
 //  2. **不可检索列（FTS5 / 向量索引失效）**
@@ -104,7 +105,7 @@
 //  3. **搜索缓存策略**
 //     - `searchTextCache: NSCache<NSNumber, SearchCacheEntry>`
 //       - Key: row.id
-//       - Value: 解密后的 searchText + appName（已 lowercased）
+//       - Value: 解密后的 searchText + appName + customTitle（已 lowercased）
 //       - Limit: 300 条（降低常驻内存）
 //     - 缓存失效：`reinitialize()` / `invalidateSearchCache()`
 //
@@ -220,6 +221,7 @@ enum Col {
     static let ts = Expression<Int64>("timestamp")
     static let appPath = Expression<String>("app_path")
     static let appName = Expression<String>("app_name")
+    static let customTitle = Expression<String?>("custom_title")
     static let sourceAnchor = Expression<String?>("source_anchor")
     static let searchText = Expression<String>("search_text")
     static let length = Expression<Int>("content_length")
@@ -241,14 +243,16 @@ enum EmbeddingCol {
 private final class SearchCacheEntry: NSObject {
     let searchText: String
     let appName: String
+    let customTitle: String
 
-    init(searchText: String, appName: String) {
+    init(searchText: String, appName: String, customTitle: String) {
         self.searchText = searchText
         self.appName = appName
+        self.customTitle = customTitle
     }
 }
 
-final class DeckSQLManager: NSObject {
+final class DeckSQLManager: NSObject, @unchecked Sendable {
     static let shared = DeckSQLManager()
     private static var isInitialized = false
     private nonisolated static let initLock = NSLock()
@@ -312,6 +316,11 @@ final class DeckSQLManager: NSObject {
     
     /// 自动备份间隔（24 小时）
     private let backupInterval: TimeInterval = 24 * 60 * 60
+    
+    /// 初始化失败时间（用于重试退避）
+    private var lastInitFailureAt: Date?
+    /// 初始化重试退避时间
+    private let initRetryBackoff: TimeInterval = 60
 
     /// Startup integrity check interval (default: 24 hours).
     private let integrityCheckInterval: TimeInterval = 24 * 60 * 60
@@ -384,7 +393,7 @@ final class DeckSQLManager: NSObject {
     
     /// 搜索缓存：避免重复解密和 lowercased 转换（安全模式下会在失焦时清空）
     /// - Key: row.id (NSNumber)
-    /// - Value: SearchCacheEntry (解密且小写化后的 searchText + appName)
+    /// - Value: SearchCacheEntry (解密且小写化后的 searchText + appName + customTitle)
     /// - Limit: 300 条（平衡性能与内存占用）
     /// - 失效时机：`reinitialize()` / `invalidateSearchCache()`
     private let searchTextCache: NSCache<NSNumber, SearchCacheEntry> = {
@@ -793,7 +802,12 @@ final class DeckSQLManager: NSObject {
     private func initializeDatabase() {
         Self.initLock.lock()
         defer { Self.initLock.unlock() }
-        
+
+        if let lastFailure = lastInitFailureAt,
+           Date().timeIntervalSince(lastFailure) < initRetryBackoff {
+            return
+        }
+
         guard !Self.isInitialized else { return }
         
         let basePath = getStoragePath()
@@ -807,6 +821,7 @@ final class DeckSQLManager: NSObject {
             do {
                 try FileManager.default.createDirectory(atPath: basePath, withIntermediateDirectories: true)
             } catch {
+                lastInitFailureAt = Date()
                 log.error("Failed to create database directory: \(error.localizedDescription)")
                 return
             }
@@ -855,6 +870,7 @@ final class DeckSQLManager: NSObject {
 
                 log.info("Database initialized at: \(dbPath)")
                 Self.isInitialized = true
+                lastInitFailureAt = nil
                 registerCustomFunctions()
                 createTable()
                 applyMigrations()
@@ -870,6 +886,7 @@ final class DeckSQLManager: NSObject {
                 }
             }
         } catch {
+            lastInitFailureAt = Date()
             log.error("Database connection error: \(error.localizedDescription)")
         }
     }
@@ -1048,6 +1065,8 @@ final class DeckSQLManager: NSObject {
     }
 
     private func loadSQLiteVecExtensionIfAvailable() {
+        // Static init succeeded; skip dynamic extension loading.
+        if vecIndexEnabled { return }
         guard !DeckUserDefaults.securityModeEnabled else { return }
 
         let candidates = vecExtensionCandidateURLs()
@@ -1426,15 +1445,6 @@ final class DeckSQLManager: NSObject {
             return
         }
 
-        syncOnDBQueue {
-            guard let db = db else { return }
-            do {
-                try db.run("PRAGMA wal_checkpoint(TRUNCATE)")
-            } catch {
-                log.debug("Failed to checkpoint WAL before backup: \(error.localizedDescription)")
-            }
-        }
-
         let dbURL = URL(fileURLWithPath: dbPath)
         let backupURL = URL(fileURLWithPath: backupPath)
         let tempURL = URL(fileURLWithPath: backupPath + ".tmp")
@@ -1459,10 +1469,24 @@ final class DeckSQLManager: NSObject {
             }
         }
 
-        if synchronous {
+        let backupBlock = { [weak self] in
+            guard let self, let db = self.db else { return }
+            do {
+                try db.run("PRAGMA wal_checkpoint(TRUNCATE)")
+            } catch {
+                log.debug("Failed to checkpoint WAL before backup: \(error.localizedDescription)")
+            }
             copyBlock()
+        }
+
+        if synchronous {
+            syncOnDBQueue {
+                backupBlock()
+            }
         } else {
-            DispatchQueue.global(qos: .utility).async(execute: copyBlock)
+            dbQueue.async {
+                backupBlock()
+            }
         }
     }
 
@@ -1559,7 +1583,12 @@ final class DeckSQLManager: NSObject {
         return await withDBAsync {
             guard let db = self.db, let table = self.table else { return [] }
             // 构建查询
-            var query = table.filter(Expression<Bool>(literal: "regexp('\(pattern.replacingOccurrences(of: "'", with: "''"))', search_text)"))
+            let escapedPattern = pattern.replacingOccurrences(of: "'", with: "''")
+            var query = table.filter(
+                Expression<Bool>(
+                    literal: "regexp('\(escapedPattern)', search_text) OR regexp('\(escapedPattern)', custom_title) OR regexp('\(escapedPattern)', app_name)"
+                )
+            )
 
             if let types = typeFilter, !types.isEmpty {
                 let typeCondition = types.map { Col.itemType == $0 }.reduce(
@@ -1603,7 +1632,7 @@ final class DeckSQLManager: NSObject {
                 guard let db = self.db, let table = self.table else { return [] }
                 // 构建基础查询
                 var query = table
-                    .select(Col.id, Col.searchText)
+                    .select(Col.id, Col.searchText, Col.appName, Col.customTitle)
                     .order(Col.ts.desc)
                     .limit(batchSize, offset: offset)
 
@@ -1633,10 +1662,18 @@ final class DeckSQLManager: NSObject {
                 do {
                     let id = try row.get(Col.id)
                     let rawSearchText = try row.get(Col.searchText)
-                    let searchText = decryptString(rawSearchText)
+                    let rawAppName = try row.get(Col.appName)
+                    let rawCustomTitle = (try? row.get(Col.customTitle)) ?? nil
 
-                    let range = NSRange(searchText.startIndex..., in: searchText)
-                    if regex.firstMatch(in: searchText, range: range) != nil {
+                    let searchText = decryptString(rawSearchText)
+                    let appName = decryptString(rawAppName)
+                    let customTitle = rawCustomTitle.map { decryptString($0) } ?? ""
+                    let haystack = [customTitle, searchText, appName]
+                        .filter { !$0.isEmpty }
+                        .joined(separator: "\n")
+
+                    let range = NSRange(haystack.startIndex..., in: haystack)
+                    if regex.firstMatch(in: haystack, range: range) != nil {
                         matchingIds.append(id)
                     }
                 } catch {
@@ -1716,6 +1753,7 @@ final class DeckSQLManager: NSObject {
                     t.column(Col.ts)
                     t.column(Col.appPath)
                     t.column(Col.appName)
+                    t.column(Col.customTitle)
                     t.column(Col.sourceAnchor)
                     t.column(Col.searchText)
                     t.column(Col.length)
@@ -1789,6 +1827,7 @@ final class DeckSQLManager: NSObject {
                 CREATE VIRTUAL TABLE IF NOT EXISTS ClipboardHistory_fts USING fts5(
                     search_text,
                     app_name,
+                    custom_title,
                     content='ClipboardHistory',
                     content_rowid='id'
                 )
@@ -1798,6 +1837,7 @@ final class DeckSQLManager: NSObject {
                 CREATE VIRTUAL TABLE IF NOT EXISTS ClipboardHistory_fts USING fts5(
                     search_text,
                     app_name,
+                    custom_title,
                     content='ClipboardHistory',
                     content_rowid='id',
                     tokenize='trigram'
@@ -1831,24 +1871,24 @@ final class DeckSQLManager: NSObject {
             do {
                 try db.run("""
                     CREATE TRIGGER IF NOT EXISTS ClipboardHistory_ai AFTER INSERT ON ClipboardHistory BEGIN
-                        INSERT INTO ClipboardHistory_fts(rowid, search_text, app_name)
-                        VALUES (new.id, new.search_text, new.app_name);
+                        INSERT INTO ClipboardHistory_fts(rowid, search_text, app_name, custom_title)
+                        VALUES (new.id, new.search_text, new.app_name, new.custom_title);
                     END
                 """)
 
                 try db.run("""
                     CREATE TRIGGER IF NOT EXISTS ClipboardHistory_ad AFTER DELETE ON ClipboardHistory BEGIN
-                        INSERT INTO ClipboardHistory_fts(ClipboardHistory_fts, rowid, search_text, app_name)
-                        VALUES ('delete', old.id, old.search_text, old.app_name);
+                        INSERT INTO ClipboardHistory_fts(ClipboardHistory_fts, rowid, search_text, app_name, custom_title)
+                        VALUES ('delete', old.id, old.search_text, old.app_name, old.custom_title);
                     END
                 """)
 
                 try db.run("""
                     CREATE TRIGGER IF NOT EXISTS ClipboardHistory_au AFTER UPDATE ON ClipboardHistory BEGIN
-                        INSERT INTO ClipboardHistory_fts(ClipboardHistory_fts, rowid, search_text, app_name)
-                        VALUES ('delete', old.id, old.search_text, old.app_name);
-                        INSERT INTO ClipboardHistory_fts(rowid, search_text, app_name)
-                        VALUES (new.id, new.search_text, new.app_name);
+                        INSERT INTO ClipboardHistory_fts(ClipboardHistory_fts, rowid, search_text, app_name, custom_title)
+                        VALUES ('delete', old.id, old.search_text, old.app_name, old.custom_title);
+                        INSERT INTO ClipboardHistory_fts(rowid, search_text, app_name, custom_title)
+                        VALUES (new.id, new.search_text, new.app_name, new.custom_title);
                     END
                 """)
             } catch {
@@ -1960,7 +2000,8 @@ final class DeckSQLManager: NSObject {
     /// - 3: 添加 is_temporary 列
     /// - 4: 添加 source_anchor 列（IDE 溯源元数据）
     /// - 5: 添加 is_encrypted 列（逐行加密状态）
-    private static let currentSchemaVersion: Int32 = 5
+    /// - 6: 添加 custom_title 列（自定义标题）
+    private static let currentSchemaVersion: Int32 = 6
     private static let fileSearchTextBackfillTargetVersion = 1
 
     private func getSchemaVersion() -> Int32 {
@@ -1997,6 +2038,13 @@ final class DeckSQLManager: NSObject {
         let needsTemporaryMigration = currentVersion < 3
         let needsSourceAnchorMigration = currentVersion < 4
         let needsEncryptionStateMigration = currentVersion < 5
+        let needsCustomTitleMigration = currentVersion < 6
+
+        let applyCustomTitleMigrationIfNeeded = { [weak self] in
+            guard let self, needsCustomTitleMigration else { return }
+            self.addCustomTitleColumnIfNeeded()
+            self.rebuildFTSForCustomTitleMigration()
+        }
 
         // Migration 0 -> 1: 添加 blob_path 列
         if needsLargeImageMigration {
@@ -2028,6 +2076,7 @@ final class DeckSQLManager: NSObject {
             if needsEncryptionStateMigration {
                 addEncryptionStateColumnIfNeeded()
             }
+            applyCustomTitleMigrationIfNeeded()
 
             // 执行大图迁移，完成后再进行语义缓存回填
             let postMigration: (() async -> Void)?
@@ -2057,11 +2106,12 @@ final class DeckSQLManager: NSObject {
             if needsEncryptionStateMigration {
                 addEncryptionStateColumnIfNeeded()
             }
+            applyCustomTitleMigrationIfNeeded()
             backfillSemanticEmbeddingsIfNeeded(targetVersion: Self.currentSchemaVersion)
             return
         }
 
-        if needsTemporaryMigration || needsSourceAnchorMigration || needsEncryptionStateMigration {
+        if needsTemporaryMigration || needsSourceAnchorMigration || needsEncryptionStateMigration || needsCustomTitleMigration {
             if needsTemporaryMigration {
                 addTemporaryColumnIfNeeded()
             }
@@ -2071,6 +2121,7 @@ final class DeckSQLManager: NSObject {
             if needsEncryptionStateMigration {
                 addEncryptionStateColumnIfNeeded()
             }
+            applyCustomTitleMigrationIfNeeded()
             setSchemaVersion(Self.currentSchemaVersion)
         }
 
@@ -2125,6 +2176,28 @@ final class DeckSQLManager: NSObject {
             try db.run("UPDATE ClipboardHistory SET is_encrypted = ?", encryptedValue)
             log.info("Added is_encrypted column for encryption state")
         }
+    }
+
+    private func addCustomTitleColumnIfNeeded() {
+        withDB {
+            guard let db = self.db else { return }
+            let stmt = try db.prepare("PRAGMA table_info(ClipboardHistory)")
+            var columns: [String] = []
+            while let row = try stmt.failableNext() {
+                if let name = row[1] as? String {
+                    columns.append(name)
+                }
+            }
+            guard !columns.contains("custom_title") else { return }
+            try db.run("ALTER TABLE ClipboardHistory ADD COLUMN custom_title TEXT")
+            log.info("Added custom_title column for user-defined titles")
+        }
+    }
+
+    private func rebuildFTSForCustomTitleMigration() {
+        let preferTrigram = syncOnDBQueue { ftsUsesTrigram }
+        createFTS5Table(forceRecreate: true, preferTrigram: preferTrigram)
+        rebuildFTSIndex()
     }
 
     private func backfillFileSearchTextIfNeeded() {
@@ -2393,7 +2466,7 @@ final class DeckSQLManager: NSObject {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
 //  安全模式下的加密/解密逻辑：
-//  - 加密列：data, search_text, app_name, embedding
+//  - 加密列：data, search_text, app_name, custom_title, embedding
 //  - 加密算法：由 SecurityService 提供（AES-256-GCM + Keychain 密钥管理）
 //  - 加密失败：返回 nil 并提示用户，避免安全模式下写入明文
 //
@@ -2421,7 +2494,7 @@ extension DeckSQLManager {
         return SecurityService.shared.decrypt(data) ?? data
     }
     
-    /// 加密字符串（用于 search_text、app_name 列）
+    /// 加密字符串（用于 search_text、app_name、custom_title 列）
     /// - Parameter string: 原始字符串
     /// - Returns: Base64 编码的加密数据（安全模式下），或原始字符串（非安全模式）；失败时返回 nil
     private func encryptString(_ string: String) -> String? {
@@ -2439,7 +2512,7 @@ extension DeckSQLManager {
         return encrypted.base64EncodedString()
     }
     
-    /// 解密字符串（用于 search_text、app_name 列）
+    /// 解密字符串（用于 search_text、app_name、custom_title 列）
     /// - Parameter string: Base64 编码的加密数据
     /// - Returns: 解密后的字符串（安全模式下），或原始字符串（非安全模式）
     private func decryptString(_ string: String, force: Bool = false) -> String {
@@ -2760,12 +2833,14 @@ extension DeckSQLManager {
     ///   - id: 行 ID
     ///   - rawSearchText: 原始搜索文本（可能已加密）
     ///   - appName: 应用名称
+    ///   - rawCustomTitle: 自定义标题（可能已加密）
     ///   - isSecurityMode: 是否处于安全模式
     /// - Returns: 解密且小写化后的缓存条目
     private func getCachedSearchEntry(
         id: Int64,
         rawSearchText: String,
         appName: String,
+        rawCustomTitle: String?,
         isSecurityMode: Bool
     ) -> SearchCacheEntry {
         let cacheKey = NSNumber(value: id)
@@ -2777,18 +2852,22 @@ extension DeckSQLManager {
 
         let resolvedSearchText: String
         let resolvedAppName: String
+        let resolvedCustomTitle: String
         if isSecurityMode {
             resolvedSearchText = decryptString(rawSearchText)
             resolvedAppName = decryptString(appName)
+            resolvedCustomTitle = rawCustomTitle.map { decryptString($0) } ?? ""
         } else {
             resolvedSearchText = rawSearchText
             resolvedAppName = appName
+            resolvedCustomTitle = rawCustomTitle ?? ""
         }
 
         // 缓存未命中，小写化后存入缓存
         let entry = SearchCacheEntry(
             searchText: resolvedSearchText.lowercased(),
-            appName: resolvedAppName.lowercased()
+            appName: resolvedAppName.lowercased(),
+            customTitle: resolvedCustomTitle.lowercased()
         )
 
         searchTextCache.setObject(entry, forKey: cacheKey)
@@ -2841,6 +2920,7 @@ extension DeckSQLManager {
         let timestamp: Int64
         let appPath: String
         let appName: String
+        let customTitle: String?
         let sourceAnchor: String?
         let searchText: String
         let contentLength: Int
@@ -2875,16 +2955,28 @@ extension DeckSQLManager {
 
                 dataToStore = Data()
             }
+        } else if item.isUnsupported && item.data.count > Const.largeBlobThreshold {
+            // Unsupported payloads can be large; offload to blob storage to avoid DB bloat.
+            if let path = await BlobStorage.shared.storeAsync(
+                data: item.data,
+                uniqueId: item.uniqueId,
+                encrypt: isSecurityMode
+            ) {
+                blobPath = path
+                dataToStore = Data()
+            }
         } else if item.itemType == .image && item.data.count > 50 * 1024 && (previewData == nil || previewData!.isEmpty) {
             previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
             log.debug("Pre-generated thumbnail for medium image (\(item.data.count) bytes)")
         }
 
         let encodedSourceAnchor = item.sourceAnchor?.toJSON()
+        let normalizedCustomTitle = ClipboardItem.normalizedCustomTitle(item.customTitle)
         let encryptedData: Data
         let encryptedPreviewData: Data?
         let encryptedSearchText: String
         let encryptedAppName: String
+        let encryptedCustomTitle: String?
         let encryptedSourceAnchor: String?
 
         if isSecurityMode {
@@ -2902,6 +2994,12 @@ extension DeckSQLManager {
             encryptedData = data
             encryptedSearchText = searchText
             encryptedAppName = appName
+            if let normalizedCustomTitle {
+                guard let encryptedTitle = encryptString(normalizedCustomTitle) else { return nil }
+                encryptedCustomTitle = encryptedTitle
+            } else {
+                encryptedCustomTitle = nil
+            }
             if let encodedSourceAnchor {
                 guard let encryptedAnchor = encryptString(encodedSourceAnchor) else { return nil }
                 encryptedSourceAnchor = encryptedAnchor
@@ -2913,6 +3011,7 @@ extension DeckSQLManager {
             encryptedPreviewData = previewData
             encryptedSearchText = item.searchText
             encryptedAppName = item.appName
+            encryptedCustomTitle = normalizedCustomTitle
             encryptedSourceAnchor = encodedSourceAnchor
         }
 
@@ -2925,6 +3024,7 @@ extension DeckSQLManager {
             timestamp: item.timestamp,
             appPath: item.appPath,
             appName: encryptedAppName,
+            customTitle: encryptedCustomTitle,
             sourceAnchor: encryptedSourceAnchor,
             searchText: encryptedSearchText,
             contentLength: item.contentLength,
@@ -2952,6 +3052,7 @@ extension DeckSQLManager {
                 Col.ts <- payload.timestamp,
                 Col.appPath <- payload.appPath,
                 Col.appName <- payload.appName,
+                Col.customTitle <- payload.customTitle,
                 Col.sourceAnchor <- payload.sourceAnchor,
                 Col.searchText <- payload.searchText,
                 Col.length <- payload.contentLength,
@@ -3008,6 +3109,7 @@ extension DeckSQLManager {
                         Col.ts <- payload.timestamp,
                         Col.appPath <- payload.appPath,
                         Col.appName <- payload.appName,
+                        Col.customTitle <- payload.customTitle,
                         Col.sourceAnchor <- payload.sourceAnchor,
                         Col.searchText <- payload.searchText,
                         Col.length <- payload.contentLength,
@@ -3100,6 +3202,15 @@ extension DeckSQLManager {
 
                 dataToStore = Data()
             }
+        } else if item.isUnsupported, item.hasFullData, item.data.count > Const.largeBlobThreshold {
+            if let path = await BlobStorage.shared.storeAsync(
+                data: item.data,
+                uniqueId: item.uniqueId,
+                encrypt: isSecurityMode
+            ) {
+                blobPathToStore = path
+                dataToStore = Data()
+            }
         } else if item.itemType == .image, item.data.count > 50 * 1024, (previewData == nil || previewData!.isEmpty) {
             previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
             log.debug("Pre-generated thumbnail for medium image (\(item.data.count) bytes) during update")
@@ -3119,8 +3230,10 @@ extension DeckSQLManager {
         let encryptedPreviewData: Data?
         let encryptedSearchText: String
         let encryptedAppName: String
+        let encryptedCustomTitle: String?
         let encryptedSourceAnchor: String?
         let encodedSourceAnchor = item.sourceAnchor?.toJSON()
+        let normalizedCustomTitle = ClipboardItem.normalizedCustomTitle(item.customTitle)
 
         if isSecurityMode {
             guard let data = encryptData(dataToStore),
@@ -3137,6 +3250,12 @@ extension DeckSQLManager {
             encryptedData = data
             encryptedSearchText = searchText
             encryptedAppName = appName
+            if let normalizedCustomTitle {
+                guard let encryptedTitle = encryptString(normalizedCustomTitle) else { return }
+                encryptedCustomTitle = encryptedTitle
+            } else {
+                encryptedCustomTitle = nil
+            }
             if let encodedSourceAnchor {
                 guard let encryptedAnchor = encryptString(encodedSourceAnchor) else { return }
                 encryptedSourceAnchor = encryptedAnchor
@@ -3148,6 +3267,7 @@ extension DeckSQLManager {
             encryptedPreviewData = previewData
             encryptedSearchText = item.searchText
             encryptedAppName = item.appName
+            encryptedCustomTitle = normalizedCustomTitle
             encryptedSourceAnchor = encodedSourceAnchor
         }
 
@@ -3163,6 +3283,7 @@ extension DeckSQLManager {
                 Col.ts <- item.timestamp,
                 Col.appPath <- item.appPath,
                 Col.appName <- encryptedAppName,
+                Col.customTitle <- encryptedCustomTitle,
                 Col.sourceAnchor <- encryptedSourceAnchor,
                 Col.searchText <- encryptedSearchText,
                 Col.length <- item.contentLength,
@@ -3214,6 +3335,38 @@ extension DeckSQLManager {
             return try db.run(update)
         }) {
             log.debug("Updated temporary flag for \(count) items")
+        }
+    }
+
+    func updateCustomTitle(id: Int64, customTitle: String?) async {
+        let normalized = ClipboardItem.normalizedCustomTitle(customTitle)
+        let isSecurityMode = DeckUserDefaults.securityModeEnabled
+        let encryptedTitle: String?
+
+        if isSecurityMode {
+            if let normalized {
+                guard let encrypted = encryptString(normalized) else {
+                    log.error("Failed to encrypt customTitle for item \(id)")
+                    return
+                }
+                encryptedTitle = encrypted
+            } else {
+                encryptedTitle = nil
+            }
+        } else {
+            encryptedTitle = normalized
+        }
+
+        if let count: Int = await withDBAsync({
+            guard let db = self.db, let table = self.table else { return 0 }
+            let query = table.filter(Col.id == id)
+            let update = query.update(Col.customTitle <- encryptedTitle)
+            return try db.run(update)
+        }) {
+            if count > 0 {
+                invalidateSearchCache(ids: [id])
+            }
+            log.debug("Updated customTitle for \(count) items")
         }
     }
 
@@ -3336,10 +3489,11 @@ extension DeckSQLManager {
                 SELECT id FROM ClipboardHistory
                 WHERE search_text LIKE ? ESCAPE '\\'
                    OR app_name LIKE ? ESCAPE '\\'
+                   OR custom_title LIKE ? ESCAPE '\\'
                 ORDER BY timestamp DESC
                 LIMIT ?
             """
-            let stmt = try db.prepare(sql).bind(pattern, pattern, limit)
+            let stmt = try db.prepare(sql).bind(pattern, pattern, pattern, limit)
             var ids: [Int64] = []
             while let row = try stmt.failableNext() {
                 if let id = row[0] as? Int64 {
@@ -3413,7 +3567,9 @@ extension DeckSQLManager {
         let batchSize = 500
         var offset = 0
         // 安全模式下最多扫描 5000 条（解密开销大），普通模式扫描全量
-        let maxScan = isSecurityMode ? 5000 : Int.max
+        let maxScan = isSecurityMode
+            ? min(max(5000, limit * 200), 20000)
+            : Int.max
 
         while matchingIds.count < limit && offset < maxScan {
             // 支持任务取消
@@ -3421,7 +3577,7 @@ extension DeckSQLManager {
 
             let rows: [Row] = await withDBAsync {
                 guard let db = self.db, let table = self.table else { return [] }
-                let query = table.select(Col.id, Col.searchText, Col.appName)
+                let query = table.select(Col.id, Col.searchText, Col.appName, Col.customTitle)
                     .order(Col.ts.desc)
                     .limit(batchSize, offset: offset)
                 return Array(try db.prepare(query))
@@ -3441,6 +3597,7 @@ extension DeckSQLManager {
                     let id = try row.get(Col.id)
                     let rawSearchText = try row.get(Col.searchText)
                     let appName = try row.get(Col.appName)
+                    let rawCustomTitle = (try? row.get(Col.customTitle)) ?? nil
 
                     // 使用缓存获取解密且小写化后的搜索文本
                     // 热路径优化：避免重复解密和 lowercased 转换
@@ -3448,12 +3605,14 @@ extension DeckSQLManager {
                         id: id,
                         rawSearchText: rawSearchText,
                         appName: appName,
+                        rawCustomTitle: rawCustomTitle,
                         isSecurityMode: isSecurityMode
                     )
 
                     // 匹配搜索文本或应用名称（都已预先小写化）
                     if cached.searchText.contains(lowercasedKeyword) ||
-                       cached.appName.contains(lowercasedKeyword) {
+                       cached.appName.contains(lowercasedKeyword) ||
+                       cached.customTitle.contains(lowercasedKeyword) {
                         matchingIds.append(id)
                     }
                 } catch {
@@ -3487,18 +3646,64 @@ extension DeckSQLManager {
     ) async -> [Row] {
         guard !Task.isCancelled else { return [] }
 
-        // Get matching IDs from FTS
-        let matchingIds = await searchFTS(keyword: keyword, limit: limit * 2)
-        guard !matchingIds.isEmpty else { return [] }
+        let hasFilters = (typeFilter?.isEmpty == false) || (tagId != nil && tagId != -1)
+        let initialLimit = max(limit * 2, limit)
+        let maxLimit = min(max(limit * 20, 2000), 5000)
+
+        var searchLimit = initialLimit
+        var matchingIds: [Int64] = []
+        var rows: [Row] = []
+        while true {
+            // Get matching IDs from FTS
+            matchingIds = await searchFTS(keyword: keyword, limit: searchLimit)
+            guard !matchingIds.isEmpty else { return [] }
+
+            rows = await fetchRowsForIds(matchingIds, typeFilter: typeFilter, tagId: tagId)
+
+            if !hasFilters ||
+                rows.count >= limit ||
+                matchingIds.count < searchLimit ||
+                searchLimit >= maxLimit {
+                break
+            }
+            searchLimit = min(searchLimit * 2, maxLimit)
+        }
+        guard rows.count > 1 else { return rows }
+
+        var rowsById: [Int64: Row] = [:]
+        rowsById.reserveCapacity(rows.count)
+        for row in rows {
+            if let id = try? row.get(Col.id) {
+                rowsById[id] = row
+            }
+        }
+
+        var ordered: [Row] = []
+        ordered.reserveCapacity(min(limit, matchingIds.count))
+        for id in matchingIds {
+            guard let row = rowsById[id] else { continue }
+            ordered.append(row)
+            if ordered.count >= limit { break }
+        }
+        return ordered
+    }
+
+    private func fetchRowsForIds(
+        _ ids: [Int64],
+        typeFilter: [String]?,
+        tagId: Int?
+    ) async -> [Row] {
+        guard !ids.isEmpty else { return [] }
 
         // 分块查询避免 SQLite 变量上限
         let chunkSize = 900
         var rows: [Row] = []
-        rows.reserveCapacity(matchingIds.count)
+        rows.reserveCapacity(ids.count)
         var start = 0
-        while start < matchingIds.count {
-            let end = min(start + chunkSize, matchingIds.count)
-            let chunk = Array(matchingIds[start..<end])
+        while start < ids.count {
+            guard !Task.isCancelled else { break }
+            let end = min(start + chunkSize, ids.count)
+            let chunk = Array(ids[start..<end])
             let chunkRows = await withDBAsync { () throws -> [Row] in
                 guard let db = self.db, let table = self.table else { return [Row]() }
                 var query = table.filter(chunk.contains(Col.id))
@@ -3521,24 +3726,7 @@ extension DeckSQLManager {
             rows.append(contentsOf: chunkRows)
             start = end
         }
-        guard rows.count > 1 else { return rows }
-
-        var rowsById: [Int64: Row] = [:]
-        rowsById.reserveCapacity(rows.count)
-        for row in rows {
-            if let id = try? row.get(Col.id) {
-                rowsById[id] = row
-            }
-        }
-
-        var ordered: [Row] = []
-        ordered.reserveCapacity(min(limit, matchingIds.count))
-        for id in matchingIds {
-            guard let row = rowsById[id] else { continue }
-            ordered.append(row)
-            if ordered.count >= limit { break }
-        }
-        return ordered
+        return rows
     }
     
     func fetchAll(limit: Int = 10000, offset: Int = 0, loadFullData: Bool = false) async -> [ClipboardItem] {
@@ -3808,6 +3996,7 @@ extension DeckSQLManager {
             let timestamp = try row.get(Col.ts)
             let id = try row.get(Col.id)
             let rawAppName = try row.get(Col.appName)
+            let rawCustomTitle = (try? row.get(Col.customTitle)) ?? nil
             let rawSourceAnchor = (try? row.get(Col.sourceAnchor)) ?? nil
             let appPath = try row.get(Col.appPath)
             let rawPreviewData = try row.get(Col.previewData)
@@ -3845,6 +4034,7 @@ extension DeckSQLManager {
             let previewData = rawPreviewData.map { decryptData($0, force: shouldDecrypt) }
             let searchText = decryptString(rawSearchText, force: shouldDecrypt)
             let appName = decryptString(rawAppName, force: shouldDecrypt)
+            let customTitle = rawCustomTitle.map { decryptString($0, force: shouldDecrypt) }
             let sourceAnchorString = rawSourceAnchor.map { decryptString($0, force: shouldDecrypt) }
             let sourceAnchor = SourceAnchor.fromJSON(sourceAnchorString)
 
@@ -3908,6 +4098,7 @@ extension DeckSQLManager {
                 timestamp: timestamp,
                 appPath: appPath,
                 appName: appName,
+                customTitle: customTitle,
                 sourceAnchor: sourceAnchor,
                 searchText: searchText,
                 contentLength: length,
@@ -3956,7 +4147,7 @@ extension DeckSQLManager {
             let batchResult: (rows: [Row], count: Int)? = await withDBAsync {
                 guard let db = self.db, let table = self.table else { return ([], 0) }
                 let query = table
-                    .select(Col.id, Col.data, Col.previewData, Col.searchText, Col.appName, Col.sourceAnchor)
+                    .select(Col.id, Col.data, Col.previewData, Col.searchText, Col.appName, Col.customTitle, Col.sourceAnchor)
                     .filter(Col.id > lastId)
                     .order(Col.id.asc)
                     .limit(batchSize)
@@ -3985,12 +4176,14 @@ extension DeckSQLManager {
                             let rawPreviewData = try row.get(Col.previewData)
                             let rawSearchText = try row.get(Col.searchText)
                             let rawAppName = try row.get(Col.appName)
+                            let rawCustomTitle = try row.get(Col.customTitle)
                             let rawSourceAnchor = try row.get(Col.sourceAnchor)
 
                             let newData: Data
                             let newPreviewData: Data?
                             let newSearchText: String
                             let newAppName: String
+                            let newCustomTitle: String?
                             let newSourceAnchor: String?
 
                             if encrypt {
@@ -4018,6 +4211,15 @@ extension DeckSQLManager {
                                     throw NSError(domain: "DeckSQL", code: -13, userInfo: nil)
                                 }
                                 newAppName = encryptedAppName
+                                if let rawCustomTitle {
+                                    guard let encryptedTitle = self.encryptStringIfNeeded(rawCustomTitle) else {
+                                        self.notifyEncryptionFailureIfNeeded()
+                                        throw NSError(domain: "DeckSQL", code: -15, userInfo: nil)
+                                    }
+                                    newCustomTitle = encryptedTitle
+                                } else {
+                                    newCustomTitle = nil
+                                }
                                 if let rawSourceAnchor {
                                     guard let encryptedAnchor = self.encryptStringIfNeeded(rawSourceAnchor) else {
                                         self.notifyEncryptionFailureIfNeeded()
@@ -4032,6 +4234,7 @@ extension DeckSQLManager {
                                 newPreviewData = rawPreviewData.map { SecurityService.shared.decryptSilently($0) ?? $0 }
                                 newSearchText = self.decryptStringSilently(rawSearchText)
                                 newAppName = self.decryptStringSilently(rawAppName)
+                                newCustomTitle = rawCustomTitle.map { self.decryptStringSilently($0) }
                                 newSourceAnchor = rawSourceAnchor.map { self.decryptStringSilently($0) }
                             }
 
@@ -4041,6 +4244,7 @@ extension DeckSQLManager {
                                 Col.previewData <- newPreviewData,
                                 Col.searchText <- newSearchText,
                                 Col.appName <- newAppName,
+                                Col.customTitle <- newCustomTitle,
                                 Col.sourceAnchor <- newSourceAnchor,
                                 Col.isEncrypted <- encrypt
                             )
