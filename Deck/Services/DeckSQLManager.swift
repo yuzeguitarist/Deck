@@ -4122,6 +4122,16 @@ extension DeckSQLManager {
             return nil
         }
     }
+
+    func mapRowsToClipboardItems(_ rows: [Row], loadFullData: Bool = false) async -> [ClipboardItem] {
+        guard !rows.isEmpty else { return [] }
+        if let items = await withDBAsync({
+            rows.compactMap { self.rowToClipboardItem($0, loadFullData: loadFullData) }
+        }) {
+            return items
+        }
+        return []
+    }
     
     // MARK: - Encryption Migration
 
