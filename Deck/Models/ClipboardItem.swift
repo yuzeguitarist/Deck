@@ -268,8 +268,15 @@ final class ClipboardItem: Identifiable, Equatable {
     var colorValue: NSColor? {
         if cachedColorValue != nil { return cachedColorValue }
         guard itemType == .color else { return nil }
-        let text = String(data: data, encoding: .utf8) ?? ""
-        cachedColorValue = text.hexColor
+        // Prefer normalized plain text (RTF/RTFD data may not be UTF-8 text).
+        let searchCandidate = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let color = searchCandidate.hexColor {
+            cachedColorValue = color
+            return color
+        }
+        let rawText = (String(data: data, encoding: .utf8) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        cachedColorValue = rawText.hexColor
         return cachedColorValue
     }
 
