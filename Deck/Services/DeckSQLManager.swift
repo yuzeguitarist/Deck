@@ -231,6 +231,316 @@ enum Col {
     static let isEncrypted = Expression<Bool>("is_encrypted")
 }
 
+// MARK: - Maintenance helpers (storage cleanup / rollback snapshot)
+
+extension DeckSQLManager {
+
+    struct PageInfo: Sendable {
+        let pageCount: Int64
+        let freelistCount: Int64
+        let pageSize: Int64
+
+        var freelistBytes: Int64 { freelistCount * pageSize }
+    }
+
+    struct BlobRecord: Sendable {
+        let id: Int64
+        let blobPath: String
+    }
+
+    /// Fetch ids matching a filter with minimal IO (select only `id`).
+    func fetchIds(filter: Expression<Bool>, limit: Int? = nil) async -> [Int64] {
+        await withDBAsyncBackground {
+            guard let db = self.db, let table = self.table else { return [] }
+            do {
+                var query = table.select(Col.id).filter(filter)
+                if let limit { query = query.limit(limit) }
+                return try db.prepare(query).map { row in row[Col.id] }
+            } catch {
+                return []
+            }
+        } ?? []
+    }
+
+    /// Fetch `(id, blobPath)` pairs for all rows with a blob path.
+    func fetchBlobRecords() async -> [BlobRecord] {
+        await withDBAsyncBackground {
+            guard let db = self.db, let table = self.table else { return [] }
+            do {
+                let query = table.select(Col.id, Col.blobPath)
+                    .filter(Col.blobPath != nil)
+                    .order(Col.id.asc)
+
+                var out: [BlobRecord] = []
+                out.reserveCapacity(512)
+                for row in try db.prepare(query) {
+                    if let blobPath = row[Col.blobPath] {
+                        out.append(BlobRecord(id: row[Col.id], blobPath: blobPath))
+                    }
+                }
+                return out
+            } catch {
+                return []
+            }
+        } ?? []
+    }
+
+    /// Fetch blob paths for a given id list.
+    func fetchBlobPaths(ids: [Int64]) async -> [String] {
+        guard !ids.isEmpty else { return [] }
+        let chunks = ids.chunked(into: 500)
+        var out: [String] = []
+        out.reserveCapacity(min(ids.count, 1024))
+
+        for chunk in chunks {
+            let paths: [String] = await withDBAsyncBackground {
+                guard let db = self.db, let table = self.table else { return [] }
+                do {
+                    let query = table.select(Col.blobPath)
+                        .filter(chunk.contains(Col.id) && Col.blobPath != nil)
+                    var local: [String] = []
+                    for row in try db.prepare(query) {
+                        if let p = row[Col.blobPath] { local.append(p) }
+                    }
+                    return local
+                } catch {
+                    return []
+                }
+            } ?? []
+            out.append(contentsOf: paths)
+            await Task.yield()
+        }
+
+        return out
+    }
+
+    /// Fetch uniqueIds for a given id list.
+    func fetchUniqueIds(ids: [Int64]) async -> [String] {
+        guard !ids.isEmpty else { return [] }
+        let chunks = ids.chunked(into: 500)
+        var out: [String] = []
+        out.reserveCapacity(min(ids.count, 1024))
+
+        for chunk in chunks {
+            let uids: [String] = await withDBAsyncBackground {
+                guard let db = self.db, let table = self.table else { return [] }
+                do {
+                    let query = table.select(Col.uniqueId)
+                        .filter(chunk.contains(Col.id))
+                    return try db.prepare(query).map { row in row[Col.uniqueId] }
+                } catch {
+                    return []
+                }
+            } ?? []
+            out.append(contentsOf: uids)
+            await Task.yield()
+        }
+
+        return out
+    }
+
+    /// Delete rows in safe batches (avoids overly large `IN (...)` queries).
+    /// - Returns: total deleted rows as reported by SQLite.
+    func deleteBatch(ids: [Int64]) async -> Int {
+        guard !ids.isEmpty else { return 0 }
+
+        var deleted = 0
+        let chunks = ids.chunked(into: 500)
+        for chunk in chunks {
+            let chunkDeleted: Int = await withDBAsyncBackground {
+                guard let db = self.db, let table = self.table else { return 0 }
+                do {
+                    let query = table.filter(chunk.contains(Col.id))
+                    let changes = try db.run(query.delete())
+                    self.invalidateSearchCache()
+                    return changes
+                } catch {
+                    return 0
+                }
+            } ?? 0
+            deleted += chunkDeleted
+            await Task.yield()
+        }
+
+        return deleted
+    }
+
+    /// Export a rollback snapshot database containing the specified ids.
+    ///
+    /// This creates a small SQLite file with two tables:
+    /// - ClipboardHistory
+    /// - ClipboardHistory_embedding
+    ///
+    /// The schema is created via `CREATE TABLE AS SELECT ... WHERE 0` so it stays lightweight.
+    func exportSnapshotDatabase(ids: [Int64], to snapshotDBPath: String) async throws {
+        guard !ids.isEmpty else { return }
+
+        let ok = await withDBAsyncBackground {
+            guard let db = self.db else { return false }
+            do {
+                let escaped = snapshotDBPath.replacingOccurrences(of: "'", with: "''")
+
+                // Create / replace snapshot db.
+                try db.execute("ATTACH DATABASE '\(escaped)' AS snap")
+                defer { try? db.execute("DETACH DATABASE snap") }
+
+                try db.execute("DROP TABLE IF EXISTS snap.ClipboardHistory")
+                try db.execute("DROP TABLE IF EXISTS snap.ClipboardHistory_embedding")
+
+                try db.execute("CREATE TABLE snap.ClipboardHistory AS SELECT * FROM ClipboardHistory WHERE 0")
+                try db.execute("CREATE TABLE snap.ClipboardHistory_embedding AS SELECT * FROM ClipboardHistory_embedding WHERE 0")
+
+                let chunks = ids.chunked(into: 500)
+                for chunk in chunks {
+                    let idList = chunk.map(String.init).joined(separator: ",")
+                    try db.execute("INSERT INTO snap.ClipboardHistory SELECT * FROM ClipboardHistory WHERE id IN (\(idList))")
+                    try db.execute("INSERT INTO snap.ClipboardHistory_embedding SELECT * FROM ClipboardHistory_embedding WHERE id IN (\(idList))")
+                }
+
+                return true
+            } catch {
+                return false
+            }
+        } ?? false
+
+        if !ok {
+            throw NSError(domain: "DeckSQLManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Failed to export snapshot database"])
+        }
+    }
+
+    /// Restore rows from a snapshot database created by `exportSnapshotDatabase`.
+    /// - Returns: number of rows in the snapshot table (not necessarily all inserted if conflicts exist).
+    func restoreSnapshotDatabase(from snapshotDBPath: String) async throws -> Int {
+        let result: (ok: Bool, count: Int) = await withDBAsyncBackground {
+            guard let db = self.db else { return (false, 0) }
+            do {
+                let escaped = snapshotDBPath.replacingOccurrences(of: "'", with: "''")
+                try db.execute("ATTACH DATABASE '\(escaped)' AS snap")
+                defer { try? db.execute("DETACH DATABASE snap") }
+
+                let total = (try db.scalar("SELECT COUNT(*) FROM snap.ClipboardHistory") as? Int64) ?? 0
+
+                let cols = "id, unique_id, type, item_type, data, preview_data, timestamp, app_path, app_name, custom_title, source_anchor, search_text, content_length, tag_id, blob_path, is_temporary, is_encrypted"
+                try db.execute("INSERT OR IGNORE INTO ClipboardHistory (\(cols)) SELECT \(cols) FROM snap.ClipboardHistory")
+
+                // Embeddings are best-effort.
+                try? db.execute("INSERT OR IGNORE INTO ClipboardHistory_embedding (id, text_hash, embedding) SELECT id, text_hash, embedding FROM snap.ClipboardHistory_embedding")
+
+                self.invalidateSearchCache()
+                return (true, Int(total))
+            } catch {
+                return (false, 0)
+            }
+        } ?? (false, 0)
+
+        guard result.ok else {
+            throw NSError(domain: "DeckSQLManager", code: -2, userInfo: [NSLocalizedDescriptionKey: "Failed to restore snapshot database"])
+        }
+        return result.count
+    }
+
+    /// Gather current DB page statistics.
+    func fetchPageInfo() async -> PageInfo {
+        await withDBAsyncBackground {
+            guard let db = self.db else { return PageInfo(pageCount: 0, freelistCount: 0, pageSize: 4096) }
+            do {
+                let pageCount = (try db.scalar("PRAGMA page_count") as? Int64) ?? 0
+                let freelistCount = (try db.scalar("PRAGMA freelist_count") as? Int64) ?? 0
+                let pageSize = (try db.scalar("PRAGMA page_size") as? Int64) ?? 4096
+                return PageInfo(pageCount: pageCount, freelistCount: freelistCount, pageSize: pageSize)
+            } catch {
+                return PageInfo(pageCount: 0, freelistCount: 0, pageSize: 4096)
+            }
+        } ?? PageInfo(pageCount: 0, freelistCount: 0, pageSize: 4096)
+    }
+
+    /// Perform a WAL checkpoint (TRUNCATE).
+    func walCheckpointTruncate() async -> Bool {
+        await withDBAsyncBackground {
+            guard let db = self.db else { return false }
+            do {
+                try db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                return true
+            } catch {
+                return false
+            }
+        } ?? false
+    }
+
+    /// Run SQLite `PRAGMA optimize`.
+    func pragmaOptimize() async -> Bool {
+        await withDBAsyncBackground {
+            guard let db = self.db else { return false }
+            do {
+                try db.execute("PRAGMA optimize")
+                return true
+            } catch {
+                return false
+            }
+        } ?? false
+    }
+
+    /// Run SQLite `PRAGMA quick_check` and return the first result row (usually "ok").
+    func pragmaQuickCheck() async -> String? {
+        await withDBAsyncBackground {
+            guard let db = self.db else { return nil }
+            do {
+                return try db.scalar("PRAGMA quick_check") as? String
+            } catch {
+                return nil
+            }
+        } ?? nil
+    }
+
+    /// Run a VACUUM right now on the background queue.
+    func vacuumNow(reason: String) async -> Bool {
+        await withDBAsyncBackground {
+            guard let db = self.db else { return false }
+            do {
+                log.info("Running VACUUM (maintenance): \(reason)")
+                try db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                try db.execute("VACUUM")
+                return true
+            } catch {
+                return false
+            }
+        } ?? false
+    }
+
+    /// Fetch all blob paths currently referenced by the database.
+    func fetchAllBlobPaths() async -> [String] {
+        await withDBAsyncBackground {
+            guard let db = self.db, let table = self.table else { return [] }
+            do {
+                let query = table.select(Col.blobPath).filter(Col.blobPath != nil)
+                var out: [String] = []
+                out.reserveCapacity(1024)
+                for row in try db.prepare(query) {
+                    if let p = row[Col.blobPath] { out.append(p) }
+                }
+                return out
+            } catch {
+                return []
+            }
+        } ?? []
+    }
+}
+
+private extension Array {
+    func chunked(into size: Int) -> [[Element]] {
+        guard size > 0, !self.isEmpty else { return [] }
+        var result: [[Element]] = []
+        result.reserveCapacity((count + size - 1) / size)
+        var i = 0
+        while i < count {
+            let end = Swift.min(i + size, count)
+            result.append(Array(self[i..<end]))
+            i = end
+        }
+        return result
+    }
+}
+
 enum EmbeddingCol {
     static let id = Expression<Int64>("id")
     static let textHash = Expression<String>("text_hash")
