@@ -346,23 +346,24 @@ extension DeckSQLManager {
     func deleteBatch(ids: [Int64]) async -> Int {
         guard !ids.isEmpty else { return 0 }
 
-        var deleted = 0
         let chunks = ids.chunked(into: 500)
-        for chunk in chunks {
-            let chunkDeleted: Int = await withDBAsyncBackground {
-                guard let db = self.db, let table = self.table else { return 0 }
-                do {
-                    let query = table.filter(chunk.contains(Col.id))
-                    let changes = try db.run(query.delete())
-                    self.invalidateSearchCache()
-                    return changes
-                } catch {
-                    return 0
+        let deleted: Int = await withDBAsyncBackground {
+            guard let db = self.db, let table = self.table else { return 0 }
+            do {
+                var total = 0
+                try db.transaction {
+                    for chunk in chunks {
+                        let query = table.filter(chunk.contains(Col.id))
+                        total += try db.run(query.delete())
+                    }
                 }
-            } ?? 0
-            deleted += chunkDeleted
-            await Task.yield()
-        }
+                // Invalidate once (hot path: avoid repeated cache clears/log spam).
+                self.invalidateSearchCache()
+                return total
+            } catch {
+                return 0
+            }
+        } ?? 0
 
         return deleted
     }
@@ -609,6 +610,42 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     
     /// ClipboardHistory 主表引用
     private var table: Table?
+
+    /// 当前打开的数据库文件路径缓存
+    /// - 目的：避免在热路径（每次查询/写入）里反复解析 security-scoped bookmark / 读取 UserDefaults
+    /// - 注意：路径变化时会在 `openDatabase`/`reinitialize` 过程中刷新
+    private var currentDBPath: String?
+    private let dbPathLock = NSLock()
+
+    /// 数据库文件有效性检查节流（避免每次 DB 操作都触发 fileExists/readable 的系统调用）
+    private var lastDBFileCheckAt: TimeInterval = 0
+    private var lastDBFileCheckResult: Bool = true
+    private let dbFileCheckThrottle: TimeInterval = 0.5
+
+    /// 是否可用 UPSERT(unique_id) + RETURNING（取决于 SQLite 版本与 unique index 是否就绪）
+    /// - 第一次失败后会自动降级为 delete+insert，避免每次都走异常路径
+    private var supportsUniqueIdUpsert: Bool = true
+
+    /// 列表模式下 Data 列投影阈值（与 `rowToClipboardItem(loadFullData: false)` 保持一致）
+    private static let listInlineBytesForNonImage = 32 * 1024
+    private static let listInlineBytesForFile = 256 * 1024
+    private static let listInlineBytesForImageWithoutPreview = 256 * 1024
+
+    /// 列表模式下的 `data` 投影表达式：
+    /// - 对于大 payload：返回空 BLOB（X''），避免把大 blob materialize 到 Swift Data
+    /// - 对于 image：优先只取 preview_data
+    private lazy var listModeProjectedDataExpr: Expression<Data> = {
+        Expression<Data>(literal: """
+            CASE
+                WHEN blob_path IS NOT NULL THEN X''
+                WHEN item_type = 'image' AND preview_data IS NOT NULL AND length(preview_data) > 0 THEN X''
+                WHEN item_type = 'file' AND content_length > \(Self.listInlineBytesForFile) THEN X''
+                WHEN item_type != 'file' AND item_type != 'image' AND content_length > \(Self.listInlineBytesForNonImage) THEN X''
+                WHEN item_type = 'image' AND (preview_data IS NULL OR length(preview_data) = 0) AND content_length > \(Self.listInlineBytesForImageWithoutPreview) THEN X''
+                ELSE data
+            END AS data
+            """)
+    }()
     
     /// 自定义存储路径的 security-scoped URL（需要在 deinit 时释放）
     private var securityScopedURL: URL?
@@ -905,10 +942,40 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     /// 检查数据库文件是否存在且可访问
     /// 在数据库操作前调用，防止因文件被删除而导致 try! 崩溃
     private func isDatabaseFileValid() -> Bool {
-        let basePath = getStoragePath()
-        let paths = databasePaths(for: basePath)
-        let dbPath = paths.dbPath
-        return FileManager.default.fileExists(atPath: dbPath) && FileManager.default.isReadableFile(atPath: dbPath)
+        let now = Date().timeIntervalSince1970
+
+        // Throttle the expensive filesystem checks on hot paths (search/pagination).
+        dbPathLock.lock()
+        let cachedPath = currentDBPath
+        let lastAt = lastDBFileCheckAt
+        let lastResult = lastDBFileCheckResult
+        dbPathLock.unlock()
+
+        if now - lastAt < dbFileCheckThrottle {
+            return lastResult
+        }
+
+        let dbPath: String
+        if let cachedPath {
+            dbPath = cachedPath
+        } else {
+            // Fallback: resolve once, then cache.
+            let basePath = getStoragePath()
+            dbPath = databasePaths(for: basePath).dbPath
+            dbPathLock.lock()
+            currentDBPath = dbPath
+            dbPathLock.unlock()
+        }
+
+        let fm = FileManager.default
+        let ok = fm.fileExists(atPath: dbPath) && fm.isReadableFile(atPath: dbPath)
+
+        dbPathLock.lock()
+        lastDBFileCheckAt = now
+        lastDBFileCheckResult = ok
+        dbPathLock.unlock()
+
+        return ok
     }
 
     /// 处理数据库错误并在必要时通知用户
@@ -1084,6 +1151,11 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         syncOnDBQueue {
             db = nil
             table = nil
+            dbPathLock.lock()
+            currentDBPath = nil
+            lastDBFileCheckAt = 0
+            lastDBFileCheckResult = true
+            dbPathLock.unlock()
             vecReadyDimensions.removeAll()
             vecMissingDimensionLogged.removeAll()
             vecIndexEnabled = false
@@ -1322,6 +1394,12 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         vecMissingDimensionLogged.removeAll()
         db = try Connection(dbPath)
         db?.busyTimeout = 5.0
+        // Cache the opened db path so validity checks don't resolve security-scoped bookmarks on every query.
+        dbPathLock.lock()
+        currentDBPath = dbPath
+        lastDBFileCheckAt = 0
+        lastDBFileCheckResult = true
+        dbPathLock.unlock()
         if let db = db {
             // Use a modest mmap size to reduce read overhead without inflating heap usage.
             do {
@@ -1329,6 +1407,17 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             } catch {
                 log.debug("Failed to set mmap_size: \(error.localizedDescription)")
             }
+            // High-impact pragmas for a clipboard-history workload:
+            // - WAL: readers don't block writers; fewer "database is locked" stalls under frequent inserts.
+            // - synchronous NORMAL: good durability/perf tradeoff for WAL on desktop.
+            // - temp_store MEMORY: reduce temp file I/O during sorts.
+            // - cache_size: keep hot pages in memory; negative means KB.
+            // - wal_autocheckpoint: cap WAL growth to keep checkpoint cost bounded.
+            do { _ = try db.scalar("PRAGMA journal_mode = WAL") } catch { log.debug("Failed to set journal_mode WAL: \(error.localizedDescription)") }
+            do { _ = try db.scalar("PRAGMA synchronous = NORMAL") } catch { log.debug("Failed to set synchronous NORMAL: \(error.localizedDescription)") }
+            do { _ = try db.scalar("PRAGMA temp_store = MEMORY") } catch { log.debug("Failed to set temp_store MEMORY: \(error.localizedDescription)") }
+            do { _ = try db.scalar("PRAGMA cache_size = -20000") } catch { log.debug("Failed to set cache_size: \(error.localizedDescription)") } // ~20MB
+            do { _ = try db.scalar("PRAGMA wal_autocheckpoint = 1000") } catch { log.debug("Failed to set wal_autocheckpoint: \(error.localizedDescription)") }
         }
         initializeSQLiteVecOnConnection()
         loadSQLiteVecExtensionIfAvailable()
@@ -1896,26 +1985,21 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             guard let db = self.db, let table = self.table else { return [] }
             // 构建查询
             let escapedPattern = pattern.replacingOccurrences(of: "'", with: "''")
-            var query = table.filter(
+            var query = self.listModeBaseQuery(table: table).filter(
                 Expression<Bool>(
                     literal: "regexp('\(escapedPattern)', search_text) OR regexp('\(escapedPattern)', custom_title) OR regexp('\(escapedPattern)', app_name)"
                 )
             )
 
             if let types = typeFilter, !types.isEmpty {
-                let typeCondition = types.map { Col.itemType == $0 }.reduce(
-                    Expression<Bool>(value: false)
-                ) { result, condition in
-                    result || condition
-                }
-                query = query.filter(typeCondition)
+                query = query.filter(types.contains(Col.itemType))
             }
 
             if let tagId = tagId, tagId != -1 {
                 query = query.filter(Col.tagId == tagId)
             }
 
-            query = query.order(Col.ts.desc).limit(limit)
+            query = query.order(Col.ts.desc, Col.id.desc).limit(limit)
 
             return Array(try db.prepare(query))
         } ?? []
@@ -1933,10 +2017,12 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
         var matchingIds: [Int64] = []
         let batchSize = 500
-        var offset = 0
+        // 关键优化：用 keyset pagination 替代 OFFSET 扫描
+        var cursor: RowCursor? = nil
+        var scanned = 0
         let maxScan = 5000  // 安全模式下最多扫描 5000 条
 
-        while matchingIds.count < limit && offset < maxScan {
+        while matchingIds.count < limit && scanned < maxScan {
             // 支持任务取消
             guard !Task.isCancelled else { break }
 
@@ -1944,17 +2030,17 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 guard let db = self.db, let table = self.table else { return [] }
                 // 构建基础查询
                 var query = table
-                    .select(Col.id, Col.searchText, Col.appName, Col.customTitle)
-                    .order(Col.ts.desc)
-                    .limit(batchSize, offset: offset)
+                    .select(Col.id, Col.ts, Col.searchText, Col.appName, Col.customTitle)
+                    .order(Col.ts.desc, Col.id.desc)
+                    .limit(batchSize)
+
+                if let cursor {
+                    let cursorFilter = (Col.ts < cursor.timestamp) || (Col.ts == cursor.timestamp && Col.id < cursor.id)
+                    query = query.filter(cursorFilter)
+                }
 
                 if let types = typeFilter, !types.isEmpty {
-                    let typeCondition = types.map { Col.itemType == $0 }.reduce(
-                        Expression<Bool>(value: false)
-                    ) { result, condition in
-                        result || condition
-                    }
-                    query = query.filter(typeCondition)
+                    query = query.filter(types.contains(Col.itemType))
                 }
 
                 if let tagId = tagId, tagId != -1 {
@@ -1966,6 +2052,8 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
             // 没有更多数据
             if rows.isEmpty { break }
+
+            cursor = self.cursor(from: rows.last)
 
             for row in rows {
                 guard matchingIds.count < limit else { break }
@@ -1993,16 +2081,14 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 }
             }
 
-            // 本批次数据量不足，说明已到末尾
+            scanned += rows.count
             if rows.count < batchSize { break }
-
-            offset += batchSize
 
             // 批次间让出 CPU
             await Task.yield()
         }
 
-        if offset >= maxScan && matchingIds.count < limit {
+        if scanned >= maxScan && matchingIds.count < limit {
             log.info("Security mode regex search reached scan limit (\(maxScan) items), results may be incomplete")
         }
 
@@ -2018,15 +2104,10 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             let chunk = Array(matchingIds[start..<end])
             let chunkRows: [Row] = await withDBAsync {
                 guard let db = self.db, let table = self.table else { return [] }
-                var query = table.filter(chunk.contains(Col.id))
+                var query = self.listModeBaseQuery(table: table).filter(chunk.contains(Col.id))
 
                 if let types = typeFilter, !types.isEmpty {
-                    let typeCondition = types.map { Col.itemType == $0 }.reduce(
-                        Expression<Bool>(value: false)
-                    ) { result, condition in
-                        result || condition
-                    }
-                    query = query.filter(typeCondition)
+                    query = query.filter(types.contains(Col.itemType))
                 }
 
                 if let tagId = tagId, tagId != -1 {
@@ -2076,6 +2157,17 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 })
 
                 try db.run(tab.createIndex(Col.ts, ifNotExists: true))
+                // Composite index for stable (timestamp,id) ordering.
+                // - Keyset pagination depends on this to avoid OFFSET scans.
+                // - Also reduces sort work when many rows share the same timestamp.
+                do {
+                    try db.run("""
+                        CREATE INDEX IF NOT EXISTS idx_clipboardhistory_ts_id
+                        ON ClipboardHistory(timestamp DESC, id DESC)
+                        """)
+                } catch {
+                    log.debug("Failed to create idx_clipboardhistory_ts_id: \(error.localizedDescription)")
+                }
                 // Create a partial unique index for non-empty unique_id to avoid sync duplicates.
                 do {
                     try db.run("""
@@ -3351,43 +3443,122 @@ extension DeckSQLManager {
     func insert(item: ClipboardItem) async -> Int64 {
         guard let payload = await prepareInsertPayload(for: item) else { return -1 }
 
-        let result: (rowId: Int64, deleted: Int)? = await withDBAsync {
-            guard let db = self.db, let table = self.table else { return (-1, 0) }
-            let deleteQuery = table.filter(Col.uniqueId == payload.uniqueId)
-            let deleted = try db.run(deleteQuery.delete())
-            let insert = table.insert(
-                Col.uniqueId <- payload.uniqueId,
-                Col.type <- payload.pasteboardType,
-                Col.itemType <- payload.itemType,
-                Col.data <- payload.data,
-                Col.previewData <- payload.previewData,
-                Col.ts <- payload.timestamp,
-                Col.appPath <- payload.appPath,
-                Col.appName <- payload.appName,
-                Col.customTitle <- payload.customTitle,
-                Col.sourceAnchor <- payload.sourceAnchor,
-                Col.searchText <- payload.searchText,
-                Col.length <- payload.contentLength,
-                Col.tagId <- payload.tagId,
-                Col.blobPath <- payload.blobPath,
-                Col.isTemporary <- payload.isTemporary,
-                Col.isEncrypted <- payload.isEncrypted
-            )
-            let rowId = try db.run(insert)
-            return (rowId, deleted)
+        let result: (rowId: Int64, usedUpsert: Bool)? = await withDBAsync {
+            guard let db = self.db, let table = self.table else { return (-1, false) }
+
+            // Prefer UPSERT to avoid delete+insert write amplification on hot-path inserts.
+            if self.supportsUniqueIdUpsert {
+                do {
+                    let sql = """
+                    INSERT INTO ClipboardHistory (
+                        unique_id,
+                        type,
+                        item_type,
+                        data,
+                        preview_data,
+                        timestamp,
+                        app_path,
+                        app_name,
+                        custom_title,
+                        source_anchor,
+                        search_text,
+                        content_length,
+                        tag_id,
+                        blob_path,
+                        is_temporary,
+                        is_encrypted
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(unique_id) WHERE unique_id <> '' DO UPDATE SET
+                        type = excluded.type,
+                        item_type = excluded.item_type,
+                        data = excluded.data,
+                        preview_data = excluded.preview_data,
+                        timestamp = excluded.timestamp,
+                        app_path = excluded.app_path,
+                        app_name = excluded.app_name,
+                        custom_title = excluded.custom_title,
+                        source_anchor = excluded.source_anchor,
+                        search_text = excluded.search_text,
+                        content_length = excluded.content_length,
+                        tag_id = excluded.tag_id,
+                        blob_path = excluded.blob_path,
+                        is_temporary = excluded.is_temporary,
+                        is_encrypted = excluded.is_encrypted
+                    RETURNING id
+                    """
+
+                    let dataBlob = SQLite.Blob(bytes: [UInt8](payload.data))
+                    let previewBlob = payload.previewData.map { SQLite.Blob(bytes: [UInt8]($0)) }
+                    let stmt = try db.prepare(sql).bind(
+                        payload.uniqueId,
+                        payload.pasteboardType,
+                        payload.itemType,
+                        dataBlob,
+                        previewBlob,
+                        payload.timestamp,
+                        payload.appPath,
+                        payload.appName,
+                        payload.customTitle,
+                        payload.sourceAnchor,
+                        payload.searchText,
+                        payload.contentLength,
+                        payload.tagId,
+                        payload.blobPath,
+                        payload.isTemporary,
+                        payload.isEncrypted
+                    )
+
+                    if let row = try stmt.failableNext(), let rowId = row[0] as? Int64 {
+                        return (rowId, true)
+                    }
+                } catch {
+                    // Likely reasons:
+                    // - SQLite < 3.24 (no UPSERT) / < 3.35 (no RETURNING)
+                    // - Unique constraint not present / not matched
+                    self.supportsUniqueIdUpsert = false
+                    log.debug("UPSERT(unique_id) unavailable, fallback to delete+insert: \(error.localizedDescription)")
+                }
+            }
+
+            // Fallback path: delete duplicates then insert.
+            do {
+                let deleteQuery = table.filter(Col.uniqueId == payload.uniqueId)
+                _ = try db.run(deleteQuery.delete())
+
+                let insert = table.insert(
+                    Col.uniqueId <- payload.uniqueId,
+                    Col.type <- payload.pasteboardType,
+                    Col.itemType <- payload.itemType,
+                    Col.data <- payload.data,
+                    Col.previewData <- payload.previewData,
+                    Col.ts <- payload.timestamp,
+                    Col.appPath <- payload.appPath,
+                    Col.appName <- payload.appName,
+                    Col.customTitle <- payload.customTitle,
+                    Col.sourceAnchor <- payload.sourceAnchor,
+                    Col.searchText <- payload.searchText,
+                    Col.length <- payload.contentLength,
+                    Col.tagId <- payload.tagId,
+                    Col.blobPath <- payload.blobPath,
+                    Col.isTemporary <- payload.isTemporary,
+                    Col.isEncrypted <- payload.isEncrypted
+                )
+
+                let rowId = try db.run(insert)
+                return (rowId, false)
+            } catch {
+                return (-1, false)
+            }
         }
 
-        if let result {
-            if result.deleted > 0 {
-                invalidateSearchCache()
-            }
-            if result.rowId > 0 {
-                log.debug("Inserted item with id: \(result.rowId)")
-                scheduleSemanticEmbeddingUpdate(id: result.rowId, searchText: payload.searchTextPlain)
-                return result.rowId
-            }
-        }
-        return -1
+        guard let result, result.rowId > 0 else { return -1 }
+
+        // Invalidate only this id in the search cache (cheaper than nuking everything).
+        invalidateSearchCache(ids: [result.rowId])
+
+        log.debug("Inserted item with id: \(result.rowId)")
+        scheduleSemanticEmbeddingUpdate(id: result.rowId, searchText: payload.searchTextPlain)
+        return result.rowId
     }
 
     func insertBatch(_ items: [ClipboardItem]) async -> [Int64] {
@@ -3744,6 +3915,73 @@ extension DeckSQLManager {
         } ?? []
     }
 
+    // MARK: - List-mode Queries (避免加载大 blob)
+
+    /// 列表模式下的轻量查询：
+    /// - 投影 `data` 列（大内容返回空 BLOB），避免把大 blob materialize 到 Swift Data
+    /// - 维持与 UI 一致的排序：timestamp DESC, id DESC
+    private func listModeBaseQuery(table: Table) -> Table {
+        table.select(
+            Col.id,
+            Col.uniqueId,
+            Col.type,
+            Col.itemType,
+            listModeProjectedDataExpr,
+            Col.previewData,
+            Col.ts,
+            Col.appPath,
+            Col.appName,
+            Col.customTitle,
+            Col.sourceAnchor,
+            Col.searchText,
+            Col.length,
+            Col.tagId,
+            Col.blobPath,
+            Col.isTemporary,
+            Col.isEncrypted
+        )
+    }
+
+    struct RowCursor: Sendable, Equatable {
+        let timestamp: Int64
+        let id: Int64
+    }
+
+    func cursor(from row: Row?) -> RowCursor? {
+        guard let row else { return nil }
+        guard let ts = try? row.get(Col.ts), let id = try? row.get(Col.id) else { return nil }
+        return RowCursor(timestamp: ts, id: id)
+    }
+
+    func cursor(from item: ClipboardItem?) -> RowCursor? {
+        guard let item, let id = item.id else { return nil }
+        return RowCursor(timestamp: item.timestamp, id: id)
+    }
+
+    /// Cursor-based pagination for the main list (keyset pagination).
+    /// - This avoids OFFSET scans which get slower as the list grows.
+    func fetchListPage(
+        filter: SQLite.Expression<Bool>? = nil,
+        limit: Int,
+        cursor: RowCursor? = nil
+    ) async -> [Row] {
+        guard !Task.isCancelled else { return [] }
+
+        return await withDBAsync {
+            guard let db = self.db, let table = self.table else { return [] }
+            var query = self.listModeBaseQuery(table: table)
+
+            if let f = filter { query = query.filter(f) }
+            if let cursor {
+                let cursorFilter = (Col.ts < cursor.timestamp) || (Col.ts == cursor.timestamp && Col.id < cursor.id)
+                query = query.filter(cursorFilter)
+            }
+
+            query = query.order(Col.ts.desc, Col.id.desc).limit(limit)
+            return Array(try db.prepare(query))
+        } ?? []
+    }
+
     private func buildFTSQuery(from keyword: String, useTrigram: Bool) -> String {
         let terms = keyword
             .components(separatedBy: .whitespacesAndNewlines)
@@ -3877,26 +4115,38 @@ extension DeckSQLManager {
 
         // 分批扫描参数
         let batchSize = 500
-        var offset = 0
+        // ✅ 关键优化：用 (timestamp,id) cursor 做 keyset pagination，
+        // 避免 OFFSET 在大表上越来越慢（SQLite 需要扫描+丢弃 offset 行）
+        var cursor: RowCursor? = nil
+        var scanned = 0
         // 安全模式下最多扫描 5000 条（解密开销大），普通模式扫描全量
         let maxScan = isSecurityMode
             ? min(max(5000, limit * 200), 20000)
             : Int.max
 
-        while matchingIds.count < limit && offset < maxScan {
+        while matchingIds.count < limit && scanned < maxScan {
             // 支持任务取消
             guard !Task.isCancelled else { break }
 
             let rows: [Row] = await withDBAsync {
                 guard let db = self.db, let table = self.table else { return [] }
-                let query = table.select(Col.id, Col.searchText, Col.appName, Col.customTitle)
-                    .order(Col.ts.desc)
-                    .limit(batchSize, offset: offset)
+                var query = table
+                    .select(Col.id, Col.ts, Col.searchText, Col.appName, Col.customTitle)
+                    .order(Col.ts.desc, Col.id.desc)
+                    .limit(batchSize)
+
+                if let cursor {
+                    let cursorFilter = (Col.ts < cursor.timestamp) || (Col.ts == cursor.timestamp && Col.id < cursor.id)
+                    query = query.filter(cursorFilter)
+                }
                 return Array(try db.prepare(query))
             } ?? []
 
             // 没有更多数据
             if rows.isEmpty { break }
+
+            // 记录下一批 cursor（用最后一条记录）
+            cursor = self.cursor(from: rows.last)
 
             for row in rows {
                 // 早停：已找到足够的匹配项
@@ -3932,17 +4182,15 @@ extension DeckSQLManager {
                 }
             }
 
-            // 本批次数据量不足，说明已到末尾
+            scanned += rows.count
             if rows.count < batchSize { break }
-
-            offset += batchSize
 
             // 批次间让出 CPU，避免长时间阻塞
             await Task.yield()
         }
 
         // 安全模式下如果达到扫描上限且未找到足够结果，记录日志提示
-        if isSecurityMode && offset >= maxScan && matchingIds.count < limit {
+        if isSecurityMode && scanned >= maxScan && matchingIds.count < limit {
             log.info("Security mode search reached scan limit (\(maxScan) items), results may be incomplete")
         }
 
@@ -4018,15 +4266,10 @@ extension DeckSQLManager {
             let chunk = Array(ids[start..<end])
             let chunkRows = await withDBAsync { () throws -> [Row] in
                 guard let db = self.db, let table = self.table else { return [Row]() }
-                var query = table.filter(chunk.contains(Col.id))
+                var query = self.listModeBaseQuery(table: table).filter(chunk.contains(Col.id))
 
                 if let types = typeFilter, !types.isEmpty {
-                    let typeCondition = types.map { Col.itemType == $0 }.reduce(
-                        Expression<Bool>(value: false)
-                    ) { result, condition in
-                        result || condition
-                    }
-                    query = query.filter(typeCondition)
+                    query = query.filter(types.contains(Col.itemType))
                 }
 
                 if let tagId = tagId, tagId != -1 {
@@ -4144,7 +4387,7 @@ extension DeckSQLManager {
             let chunk = Array(ids[start..<end])
             let rows: [Row] = await withDBAsync {
                 guard let db = self.db, let table = self.table else { return [Row]() }
-                let query = table.filter(chunk.contains(Col.id))
+                let query = self.listModeBaseQuery(table: table).filter(chunk.contains(Col.id))
                 return Array(try db.prepare(query))
             } ?? []
             results.append(contentsOf: rows)
@@ -4159,12 +4402,7 @@ extension DeckSQLManager {
             guard let db = self.db, let table = self.table else { return 0 }
             var query = table
             if let types = typeFilter, !types.isEmpty {
-                let typeCondition = types.map { Col.itemType == $0 }.reduce(
-                    Expression<Bool>(value: false)
-                ) { result, condition in
-                    result || condition
-                }
-                query = query.filter(typeCondition)
+                query = query.filter(types.contains(Col.itemType))
             }
             return try db.scalar(query.count)
         } ?? 0
@@ -4304,7 +4542,13 @@ extension DeckSQLManager {
     func rowToClipboardItem(_ row: Row, isEncrypted: Bool? = nil, loadFullData: Bool = true) -> ClipboardItem? {
         do {
             let type = try row.get(Col.type)
-            let rawData = try row.get(Col.data)
+            let rawData: Data
+            do {
+                rawData = try row.get(Col.data)
+            } catch {
+                // 列表模式 select 的是 listModeProjectedDataExpr（CASE ... AS data）
+                rawData = (try? row.get(listModeProjectedDataExpr)) ?? Data()
+            }
             let timestamp = try row.get(Col.ts)
             let id = try row.get(Col.id)
             let rawAppName = try row.get(Col.appName)
@@ -4370,6 +4614,9 @@ extension DeckSQLManager {
             let maxInlineBytesForImageWithoutPreview: Int = 256 * 1024
 
             let itemType = ClipItemType(rawValue: storedItemType)
+            // 当列表查询使用了 data 列投影（大内容返回 X''）时，这里 rawData 会是空，但 content_length 仍然是原始长度。
+            // 如果不特殊处理，会被误判为 dataIsFull=true，导致后续无法懒加载真实数据。
+            let projectedEmptyData = (!loadFullData && blobPath == nil && rawData.isEmpty && length > 0)
 
             if let blobPath {
                 // Full payload is stored in an external blob. Only load it if explicitly requested.
@@ -4386,6 +4633,15 @@ extension DeckSQLManager {
                 // Caller explicitly asked for full data.
                 inlineData = decryptData(rawData, force: shouldDecrypt)
                 dataIsFull = true
+            } else if projectedEmptyData {
+                // List-mode query projected `data` to an empty blob to avoid loading large payloads.
+                // Keep preview for images; otherwise keep empty and rely on lazy-load when needed.
+                if itemType == .image, let preview = previewData, !preview.isEmpty {
+                    inlineData = preview
+                } else {
+                    inlineData = Data()
+                }
+                dataIsFull = false
             } else if itemType == .image, let preview = previewData, !preview.isEmpty {
                 // Image list mode: keep only thumbnail inline.
                 inlineData = preview
