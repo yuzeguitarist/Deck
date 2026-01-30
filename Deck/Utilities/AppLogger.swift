@@ -71,6 +71,11 @@ final class AppLogger: @unchecked Sendable {
         osLogger = os.Logger(subsystem: "com.deck.clipboard", category: "AppLogger")
         setupLogFile()
     }
+
+    /// Cheap check to avoid expensive work for logs that will be dropped.
+    func isEnabled(_ level: LogLevel) -> Bool {
+        level >= minimumLogLevel
+    }
     
     // MARK: - Public Logging Methods
     

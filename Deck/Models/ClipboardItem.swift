@@ -130,6 +130,8 @@ final class ClipboardItem: Identifiable, Equatable {
             guard searchText != oldValue else { return }
             base64ImageChecked = false
             cachedBase64Image = nil
+            urlChecked = false
+            cachedURL = nil
             analysisLock.lock()
             cachedSmartAnalysis = nil
             cachedIsMarkdown = nil
@@ -166,6 +168,9 @@ final class ClipboardItem: Identifiable, Equatable {
     
     @ObservationIgnored
     private var cachedFilePaths: [String]?
+
+    @ObservationIgnored
+    private var cachedNormalizedFilePaths: [String]?
     
     @ObservationIgnored
     private var cachedColorValue: NSColor?
@@ -175,6 +180,12 @@ final class ClipboardItem: Identifiable, Equatable {
 
     @ObservationIgnored
     private var base64ImageChecked: Bool = false
+
+    @ObservationIgnored
+    private var urlChecked: Bool = false
+
+    @ObservationIgnored
+    private var cachedURL: URL?
     
     @ObservationIgnored
     private var analysisSample: String {
@@ -182,7 +193,12 @@ final class ClipboardItem: Identifiable, Equatable {
     }
 
     private static func sampleText(_ text: String, maxLength: Int) -> String {
-        guard text.count > maxLength else { return text }
+        guard maxLength > 0 else { return "" }
+
+        guard let cut = text.index(text.startIndex, offsetBy: maxLength, limitedBy: text.endIndex),
+              cut != text.endIndex else {
+            return text
+        }
         let headLen = maxLength / 2
         let tailLen = maxLength - headLen
         return String(text.prefix(headLen)) + "\n…\n" + String(text.suffix(tailLen))
@@ -210,13 +226,19 @@ final class ClipboardItem: Identifiable, Equatable {
     private var figmaPayloadLastAttempt: TimeInterval = 0
     
     var url: URL? {
-        if pasteboardType == .string {
-            return searchText.asCompleteURL()
+        if urlChecked { return cachedURL }
+
+        urlChecked = true
+
+        let result: URL?
+        if pasteboardType == .string || itemType == .url {
+            result = searchText.asCompleteURL()
+        } else {
+            result = nil
         }
-        if itemType == .url {
-            return searchText.asCompleteURL()
-        }
-        return nil
+
+        cachedURL = result
+        return result
     }
 
     var displayTitle: String? {
@@ -451,10 +473,15 @@ final class ClipboardItem: Identifiable, Equatable {
     }
 
     var normalizedFilePaths: [String] {
+        if let cachedNormalizedFilePaths {
+            return cachedNormalizedFilePaths
+        }
         guard let paths = filePaths else { return [] }
-        return paths
+        let normalized = paths
             .map { Self.normalizeFilePath($0) }
             .filter { !$0.isEmpty }
+        cachedNormalizedFilePaths = normalized
+        return normalized
     }
 
     func isFileMissingOnDisk() -> Bool {
@@ -529,7 +556,7 @@ final class ClipboardItem: Identifiable, Equatable {
                 tokens.append(rawPath)
             }
             let normalizedPath = Self.normalizeFilePath(rawPath)
-            let fileName = URL(fileURLWithPath: normalizedPath).lastPathComponent
+            let fileName = (normalizedPath as NSString).lastPathComponent
             if !fileName.isEmpty, seen.insert(fileName).inserted {
                 tokens.append(fileName)
             }
@@ -945,7 +972,13 @@ final class ClipboardItem: Identifiable, Equatable {
             if trimmed.isHexColor { return .color }
             // URL detection should win over code detection (e.g. URLs inside markdown/rtf).
             if trimmed.asCompleteURL() != nil { return .url }
-            let sample = rawText.count > Const.maxSmartAnalysisLength ? String(rawText.prefix(Const.maxSmartAnalysisLength)) : rawText
+            let sample: String
+            if contentLength > Const.maxSmartAnalysisLength,
+               let end = rawText.index(rawText.startIndex, offsetBy: Const.maxSmartAnalysisLength, limitedBy: rawText.endIndex) {
+                sample = String(rawText[..<end])
+            } else {
+                sample = rawText
+            }
             if let language = SmartTextService.shared.detectCodeLanguage(in: sample), language != .markdown { return .code }
             if rawText.isCodeSnippet { return .code }
             return .richText
@@ -1009,8 +1042,10 @@ final class ClipboardItem: Identifiable, Equatable {
                 } else {
                     log.debug("PDF thumbnail generation failed: \(error?.localizedDescription ?? "unknown")")
                     // Fallback: 使用系统文件图标
-                    let icon = IconCache.shared.icon(forFile: pdfPath)
-                    icon.size = NSSize(width: size.width, height: size.height)
+                    let icon = IconCache.shared.icon(
+                        forFile: pdfPath,
+                        size: NSSize(width: size.width, height: size.height)
+                    )
                     self?.cachedPDFThumbnail = icon
                     completion(icon)
                 }
@@ -1105,9 +1140,10 @@ final class ClipboardItem: Identifiable, Equatable {
         }
         
         // Fallback 2: Use system file icon (always works in sandbox)
-        let icon = IconCache.shared.icon(forFile: path)
-        icon.size = NSSize(width: Self.maxThumbnailSize, height: Self.maxThumbnailSize)
-        return icon
+        return IconCache.shared.icon(
+            forFile: path,
+            size: NSSize(width: Self.maxThumbnailSize, height: Self.maxThumbnailSize)
+        )
     }
 
     private func extractBase64ImagePayload(from text: String, maxChars: Int) -> String? {
