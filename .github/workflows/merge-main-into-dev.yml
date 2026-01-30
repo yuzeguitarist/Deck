@@ -29,7 +29,6 @@ jobs:
           set -euo pipefail
           git fetch origin main --prune
 
-          # 如果远端 dev 不存在，就创建 dev=main 并推上去
           if ! git show-ref --verify --quiet refs/remotes/origin/dev; then
             git checkout -B dev origin/main
             git push origin dev
@@ -40,7 +39,6 @@ jobs:
           git fetch origin dev --prune
           git checkout -B dev origin/dev
 
-          # 这里用 --no-ff 会产生 merge commit；如果你想要线性历史可改成 --ff-only
           if git merge --no-ff --no-edit origin/main; then
             git push origin dev
             echo "merged=true" >> "$GITHUB_OUTPUT"
