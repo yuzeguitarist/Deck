@@ -886,7 +886,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     private func withDBAsync<T>(_ work: @escaping () throws -> T) async -> T? {
         // 在执行数据库操作前检查文件有效性，防止 try! 崩溃
         if !isDatabaseFileValid() {
-            log.warn("Database file is invalid or missing, attempting to reinitialize...")
+            await log.warn("Database file is invalid or missing, attempting to reinitialize...")
             handleDBError(NSError(domain: "DeckSQL", code: -1, userInfo: [
                 NSLocalizedDescriptionKey: "Database file is invalid or missing"
             ]))
@@ -917,7 +917,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     @discardableResult
     private func withDBAsyncBackground<T>(_ work: @escaping () throws -> T) async -> T? {
         if !isDatabaseFileValid() {
-            log.warn("Database file is invalid or missing, attempting to reinitialize...")
+            await log.warn("Database file is invalid or missing, attempting to reinitialize...")
             handleDBError(NSError(domain: "DeckSQL", code: -1, userInfo: [
                 NSLocalizedDescriptionKey: "Database file is invalid or missing"
             ]))
@@ -1749,9 +1749,9 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 .sorted(by: { $0.key < $1.key })
                 .map { "\($0.key):\($0.value)" }
                 .joined(separator: ", ")
-            log.info("Vec index backfill completed: \(processed) items processed (dims: [\(dimensionSummary)])")
+            await log.info("Vec index backfill completed: \(processed) items processed (dims: [\(dimensionSummary)])")
         } else {
-            log.debug("Vec index backfill completed: 0 items processed")
+            await log.debug("Vec index backfill completed: 0 items processed")
         }
     }
 
@@ -2089,7 +2089,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }
 
         if scanned >= maxScan && matchingIds.count < limit {
-            log.info("Security mode regex search reached scan limit (\(maxScan) items), results may be incomplete")
+            await log.info("Security mode regex search reached scan limit (\(maxScan) items), results may be incomplete")
         }
 
         guard !matchingIds.isEmpty else { return [] }
@@ -2672,7 +2672,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }
 
         if updated > 0 {
-            log.info("File search text backfill completed: \(updated) items updated")
+            await log.info("File search text backfill completed: \(updated) items updated")
         }
     }
 
@@ -2685,7 +2685,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             guard let self else { return }
             let completed = await self.performLargeImageMigration()
             guard completed else {
-                log.warn("Large image migration incomplete; schema version not updated")
+                await log.warn("Large image migration incomplete; schema version not updated")
                 return
             }
             if let postMigration {
@@ -2693,7 +2693,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             }
             // 迁移完成后更新数据库版本
             self.setSchemaVersion(finalVersion)
-            log.info("Database schema updated to version \(finalVersion)")
+            await log.info("Database schema updated to version \(finalVersion)")
         }
     }
 
@@ -2708,7 +2708,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         while true {
             // 支持任务取消
             guard !Task.isCancelled else {
-                log.info("Large image migration cancelled after \(totalMigrated) items")
+                await log.info("Large image migration cancelled after \(totalMigrated) items")
                 return false
             }
 
@@ -2733,7 +2733,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             for row in rows {
                 // 支持任务取消
                 guard !Task.isCancelled else {
-                    log.info("Large image migration cancelled after \(totalMigrated) items")
+                    await log.info("Large image migration cancelled after \(totalMigrated) items")
                     return false
                 }
 
@@ -2766,7 +2766,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             await Task.yield()
         }
 
-        log.info("Large image migration completed: \(totalMigrated) items migrated")
+        await log.info("Large image migration completed: \(totalMigrated) items migrated")
         await vacuumDatabase(reason: "blob migration")
         return true
     }
@@ -2776,7 +2776,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             guard let self else { return }
             await self.performSemanticEmbeddingBackfill()
             self.setSchemaVersion(targetVersion)
-            log.info("Database schema updated to version \(targetVersion)")
+            await log.info("Database schema updated to version \(targetVersion)")
         }
     }
 
@@ -2828,7 +2828,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }
 
         if processed > 0 {
-            log.info("Semantic embedding backfill completed: \(processed) items processed")
+            await log.info("Semantic embedding backfill completed: \(processed) items processed")
         }
     }
 
@@ -2840,7 +2840,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         } == true
 
         if didCheckpoint {
-            log.info("WAL checkpoint completed (\(reason))")
+            await log.info("WAL checkpoint completed (\(reason))")
         }
 
         let didVacuum = await withDBAsyncBackground {
@@ -2850,7 +2850,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         } == true
 
         if didVacuum {
-            log.info("Database vacuum completed (\(reason))")
+            await log.info("Database vacuum completed (\(reason))")
         }
     }
 
@@ -3205,7 +3205,7 @@ extension DeckSQLManager {
 
         let tableName = vecTableName(for: normalized.count)
         let payload = vectorToJSONString(normalized)
-        log.debug("Vec search: dim=\(normalized.count), table=\(tableName), limit=\(limit)")
+        await log.debug("Vec search: dim=\(normalized.count), table=\(tableName), limit=\(limit)")
         let results: [(id: Int64, distance: Double)] = await withDBAsync({ () throws -> [(id: Int64, distance: Double)] in
             guard let db = self.db else { return [] }
             let sql = """
@@ -3225,7 +3225,7 @@ extension DeckSQLManager {
             }
             return rows
         }) ?? []
-        log.debug("Vec search results: count=\(results.count)")
+        await log.debug("Vec search results: count=\(results.count)")
         return results
     }
 
@@ -3354,7 +3354,7 @@ extension DeckSQLManager {
 
                 if previewData == nil || previewData!.isEmpty {
                     previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
-                    log.debug("Pre-generated thumbnail for large image (\(item.data.count) bytes)")
+                    await log.debug("Pre-generated thumbnail for large image (\(item.data.count) bytes)")
                 }
 
                 dataToStore = Data()
@@ -3371,7 +3371,7 @@ extension DeckSQLManager {
             }
         } else if item.itemType == .image && item.data.count > 50 * 1024 && (previewData == nil || previewData!.isEmpty) {
             previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
-            log.debug("Pre-generated thumbnail for medium image (\(item.data.count) bytes)")
+            await log.debug("Pre-generated thumbnail for medium image (\(item.data.count) bytes)")
         }
 
         let encodedSourceAnchor = item.sourceAnchor?.toJSON()
@@ -3556,7 +3556,7 @@ extension DeckSQLManager {
         // Invalidate only this id in the search cache (cheaper than nuking everything).
         invalidateSearchCache(ids: [result.rowId])
 
-        log.debug("Inserted item with id: \(result.rowId)")
+        await log.debug("Inserted item with id: \(result.rowId)")
         scheduleSemanticEmbeddingUpdate(id: result.rowId, searchText: payload.searchTextPlain)
         return result.rowId
     }
@@ -3614,7 +3614,7 @@ extension DeckSQLManager {
         }
 
         for (index, rowId) in result.rowIds.enumerated() where rowId > 0 {
-            log.debug("Inserted item with id: \(rowId)")
+            await log.debug("Inserted item with id: \(rowId)")
             scheduleSemanticEmbeddingUpdate(id: rowId, searchText: payloads[index].searchTextPlain)
         }
 
@@ -3627,7 +3627,7 @@ extension DeckSQLManager {
             let query = table.filter(filter)
             return try db.run(query.delete())
         }) {
-            log.debug("Deleted \(count) items")
+            await log.debug("Deleted \(count) items")
             // 无法确定具体删除了哪些 ID，清空所有缓存
             invalidateSearchCache()
         }
@@ -3656,7 +3656,7 @@ extension DeckSQLManager {
             let query = table.filter(Col.id == id)
             return try db.run(query.delete())
         }) {
-            log.debug("Deleted item with id \(id): \(count) rows")
+            await log.debug("Deleted item with id \(id): \(count) rows")
             invalidateSearchCache(ids: [id])  // 只失效被删除的项
         }
     }
@@ -3680,7 +3680,7 @@ extension DeckSQLManager {
 
                 if previewData == nil || previewData!.isEmpty {
                     previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
-                    log.debug("Pre-generated thumbnail for large image (\(item.data.count) bytes) during update")
+                    await log.debug("Pre-generated thumbnail for large image (\(item.data.count) bytes) during update")
                 }
 
                 dataToStore = Data()
@@ -3696,7 +3696,7 @@ extension DeckSQLManager {
             }
         } else if item.itemType == .image, item.data.count > 50 * 1024, (previewData == nil || previewData!.isEmpty) {
             previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
-            log.debug("Pre-generated thumbnail for medium image (\(item.data.count) bytes) during update")
+            await log.debug("Pre-generated thumbnail for medium image (\(item.data.count) bytes) during update")
         }
 
         if blobPathToStore != nil {
@@ -3783,7 +3783,7 @@ extension DeckSQLManager {
         })
 
         if let result {
-            log.debug("Updated \(result.count) items")
+            await log.debug("Updated \(result.count) items")
             invalidateSearchCache(ids: [id])  // 失效被更新的项（searchText 可能已变化）
             scheduleSemanticEmbeddingUpdate(id: id, searchText: item.searchText)
 
@@ -3803,7 +3803,7 @@ extension DeckSQLManager {
             let update = query.update(Col.tagId <- tagId)
             return try db.run(update)
         }) {
-            log.debug("Updated tag for \(count) items")
+            await log.debug("Updated tag for \(count) items")
         }
     }
 
@@ -3817,7 +3817,7 @@ extension DeckSQLManager {
             let update = query.update(Col.isTemporary <- isTemporary)
             return try db.run(update)
         }) {
-            log.debug("Updated temporary flag for \(count) items")
+            await log.debug("Updated temporary flag for \(count) items")
         }
     }
 
@@ -3829,7 +3829,7 @@ extension DeckSQLManager {
         if isSecurityMode {
             if let normalized {
                 guard let encrypted = encryptString(normalized) else {
-                    log.error("Failed to encrypt customTitle for item \(id)")
+                    await log.error("Failed to encrypt customTitle for item \(id)")
                     return
                 }
                 encryptedTitle = encrypted
@@ -3849,7 +3849,7 @@ extension DeckSQLManager {
             if count > 0 {
                 invalidateSearchCache(ids: [id])
             }
-            log.debug("Updated customTitle for \(count) items")
+            await log.debug("Updated customTitle for \(count) items")
         }
     }
 
@@ -3862,15 +3862,15 @@ extension DeckSQLManager {
             : syncOnDBQueue({ db != nil && table != nil })
 
         guard isReady else {
-            log.error("OCR DB: Database not initialized")
+            await log.error("OCR DB: Database not initialized")
             return
         }
 
-        log.info("OCR DB: Updating searchText for item \(id), text length: \(searchText.count)")
+        await log.info("OCR DB: Updating searchText for item \(id), text length: \(searchText.count)")
 
         // 根据安全模式决定是否加密
         guard let textToStore = encryptString(searchText) else {
-            log.error("OCR DB: Failed to encrypt searchText for item \(id)")
+            await log.error("OCR DB: Failed to encrypt searchText for item \(id)")
             return
         }
 
@@ -3889,11 +3889,11 @@ extension DeckSQLManager {
             })
 
         if let count {
-            log.info("OCR DB: Successfully updated searchText for \(count) items (FTS auto-synced via trigger)")
+            await log.info("OCR DB: Successfully updated searchText for \(count) items (FTS auto-synced via trigger)")
             invalidateSearchCache(ids: [id])
             scheduleSemanticEmbeddingUpdate(id: id, searchText: searchText)
         } else {
-            log.error("OCR DB: Failed to update searchText for item \(id)")
+            await log.error("OCR DB: Failed to update searchText for item \(id)")
         }
     }
 
@@ -4191,7 +4191,7 @@ extension DeckSQLManager {
 
         // 安全模式下如果达到扫描上限且未找到足够结果，记录日志提示
         if isSecurityMode && scanned >= maxScan && matchingIds.count < limit {
-            log.info("Security mode search reached scan limit (\(maxScan) items), results may be incomplete")
+            await log.info("Security mode search reached scan limit (\(maxScan) items), results may be incomplete")
         }
 
         return matchingIds
@@ -4708,11 +4708,11 @@ extension DeckSQLManager {
     /// - Returns: true if migration succeeded, false if failed
     func migrateEncryption(encrypt: Bool) async -> Bool {
         guard syncOnDBQueue({ db != nil && table != nil }) else {
-            log.error("Database not initialized for encryption migration")
+            await log.error("Database not initialized for encryption migration")
             return false
         }
 
-        log.info("Starting encryption migration: encrypt=\(encrypt)")
+        await log.info("Starting encryption migration: encrypt=\(encrypt)")
 
         // 使用分批处理避免一次性加载全表到内存
         let batchSize = 100
@@ -4853,11 +4853,11 @@ extension DeckSQLManager {
         }
 
         if hasError {
-            log.error("Encryption migration failed after processing \(totalProcessed) items")
+            await log.error("Encryption migration failed after processing \(totalProcessed) items")
             return false
         }
 
-        log.info("Encryption migration completed: \(totalProcessed) items processed")
+        await log.info("Encryption migration completed: \(totalProcessed) items processed")
 
         // 迁移 blob 文件的加密状态
         await BlobStorage.shared.migrateEncryption(encrypt: encrypt)

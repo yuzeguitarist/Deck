@@ -11,6 +11,16 @@ import AppKit
 import SwiftUI
 import CryptoKit
 
+// MARK: - Sendable Helpers
+
+struct UncheckedSendable<Value>: @unchecked Sendable {
+    let value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+}
+
 // MARK: - Data Extensions
 
 extension Data {
@@ -28,9 +38,9 @@ extension String {
         guard !candidate.isEmpty else { return nil }
 
         // Strip common wrappers like <...>, (...), [...], {...}, quotes.
-        if candidate.count >= 2 {
-            let first = candidate.first!
-            let last = candidate.last!
+        if candidate.count >= 2,
+           let first = candidate.first,
+           let last = candidate.last {
             let pairs: [(Character, Character)] = [("<", ">"), ("(", ")"), ("[", "]"), ("{", "}"), ("\"", "\""), ("'", "'")]
             if pairs.contains(where: { $0.0 == first && $0.1 == last }) {
                 candidate.removeFirst()
