@@ -557,15 +557,11 @@ private final class SearchCacheEntry: NSObject {
     let searchText: String
     let appName: String
     let customTitle: String
-    let isTruncated: Bool
-    let fullSearchTextLength: Int
 
-    init(searchText: String, appName: String, customTitle: String, isTruncated: Bool, fullSearchTextLength: Int) {
+    init(searchText: String, appName: String, customTitle: String) {
         self.searchText = searchText
         self.appName = appName
         self.customTitle = customTitle
-        self.isTruncated = isTruncated
-        self.fullSearchTextLength = fullSearchTextLength
     }
 }
 
@@ -678,9 +674,6 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     /// Startup integrity check interval (default: 24 hours).
     private let integrityCheckInterval: TimeInterval = 24 * 60 * 60
     private let integrityCheckLastRunKey = "com.deck.sqlite.integrityCheck.lastRun"
-    /// Periodic optimize/analyze interval (default: 7 days).
-    private let optimizeInterval: TimeInterval = 7 * 24 * 60 * 60
-    private let optimizeLastRunKey = "com.deck.sqlite.optimize.lastRun"
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // MARK: - Vector Index (向量索引 - sqlite-vec)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -747,11 +740,6 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     // MARK: - Search Cache (搜索缓存 - 安全模式优化)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
-    /// 安全模式搜索缓存的文本前缀长度上限（超长内容将截断保存）
-    private let searchCacheTextPrefixLimit = 4096
-    /// 超长文本命中时才升级缓存全文的上限（避免极端内存占用）
-    private let searchCacheTextUpgradeLimit = 64 * 1024
-
     /// 搜索缓存：避免重复解密和 lowercased 转换（安全模式下会在失焦时清空）
     /// - Key: row.id (NSNumber)
     /// - Value: SearchCacheEntry (解密且小写化后的 searchText + appName + customTitle)
@@ -1003,13 +991,6 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         log.error("DB operation failed (\(errorCount)/\(errorThreshold)): \(errorMessage) (domain=\(details.domain), code=\(details.code))")
         if details.debug != details.message {
             log.debug("DB error detail: \(details.debug)")
-        }
-
-        if details.debug.lowercased().contains("sqlite-vec") || errorMessage.lowercased().contains("sqlite-vec") {
-            syncOnDBQueue {
-                vecIndexEnabled = false
-            }
-            log.warn("Detected sqlite-vec error; vector index disabled for safety")
         }
 
         // 检测严重错误类型
@@ -1288,7 +1269,6 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                     DeckSQLManager.shared.backupDatabaseIfNeeded(dbPath: dbPath, backupPath: backupPath)
                 }
             }
-            runOptimizeIfNeeded()
         } catch {
             lastInitFailureAt = Date()
             log.error("Database connection error: \(error.localizedDescription)")
@@ -1791,35 +1771,6 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         return ok
     }
 
-    private func runOptimizeIfNeeded(force: Bool = false) {
-        if !force {
-            if let lastRun = UserDefaults.standard.object(forKey: optimizeLastRunKey) as? Date {
-                if Date().timeIntervalSince(lastRun) < optimizeInterval {
-                    return
-                }
-            }
-        }
-
-        Task(priority: .utility) { [weak self] in
-            guard let self else { return }
-            let didRun = await self.withDBAsyncBackground {
-                guard let db = self.db else { return false }
-                do {
-                    try db.run("PRAGMA optimize")
-                    try db.run("ANALYZE")
-                    return true
-                } catch {
-                    log.debug("Failed to run optimize/analyze: \(error.localizedDescription)")
-                    return false
-                }
-            } ?? false
-
-            if didRun {
-                UserDefaults.standard.set(Date(), forKey: self.optimizeLastRunKey)
-            }
-        }
-    }
-
     private func performIntegrityCheck() -> Bool {
         let result: String? = syncOnDBQueue {
             guard let db = db else { return nil }
@@ -1864,27 +1815,11 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     private func removeRecoveryBackupFiles(at backupPath: String) {
         let fileManager = FileManager.default
         let tempPath = backupPath + ".tmp"
-        let backupWalPath = backupPath + "-wal"
-        let backupShmPath = backupPath + "-shm"
-        let backupWalTempPath = backupWalPath + ".tmp"
-        let backupShmTempPath = backupShmPath + ".tmp"
         if fileManager.fileExists(atPath: backupPath) {
             try? fileManager.removeItem(atPath: backupPath)
         }
         if fileManager.fileExists(atPath: tempPath) {
             try? fileManager.removeItem(atPath: tempPath)
-        }
-        if fileManager.fileExists(atPath: backupWalPath) {
-            try? fileManager.removeItem(atPath: backupWalPath)
-        }
-        if fileManager.fileExists(atPath: backupShmPath) {
-            try? fileManager.removeItem(atPath: backupShmPath)
-        }
-        if fileManager.fileExists(atPath: backupWalTempPath) {
-            try? fileManager.removeItem(atPath: backupWalTempPath)
-        }
-        if fileManager.fileExists(atPath: backupShmTempPath) {
-            try? fileManager.removeItem(atPath: backupShmTempPath)
         }
     }
     
@@ -1914,29 +1849,8 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         let dbURL = URL(fileURLWithPath: dbPath)
         let backupURL = URL(fileURLWithPath: backupPath)
         let tempURL = URL(fileURLWithPath: backupPath + ".tmp")
-        let walURL = URL(fileURLWithPath: dbPath + "-wal")
-        let shmURL = URL(fileURLWithPath: dbPath + "-shm")
-        let backupWalURL = URL(fileURLWithPath: backupPath + "-wal")
-        let backupShmURL = URL(fileURLWithPath: backupPath + "-shm")
 
         let copyBlock = {
-            let copySidecar: (URL, URL) throws -> Void = { sourceURL, destURL in
-                if FileManager.default.fileExists(atPath: sourceURL.path) {
-                    let tempSidecarURL = URL(fileURLWithPath: destURL.path + ".tmp")
-                    if FileManager.default.fileExists(atPath: tempSidecarURL.path) {
-                        try FileManager.default.removeItem(at: tempSidecarURL)
-                    }
-                    try FileManager.default.copyItem(at: sourceURL, to: tempSidecarURL)
-                    if FileManager.default.fileExists(atPath: destURL.path) {
-                        _ = try FileManager.default.replaceItemAt(destURL, withItemAt: tempSidecarURL)
-                    } else {
-                        try FileManager.default.moveItem(at: tempSidecarURL, to: destURL)
-                    }
-                } else if FileManager.default.fileExists(atPath: destURL.path) {
-                    try FileManager.default.removeItem(at: destURL)
-                }
-            }
-
             do {
                 if FileManager.default.fileExists(atPath: tempURL.path) {
                     try FileManager.default.removeItem(at: tempURL)
@@ -1947,8 +1861,6 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 } else {
                     try FileManager.default.moveItem(at: tempURL, to: backupURL)
                 }
-                try copySidecar(walURL, backupWalURL)
-                try copySidecar(shmURL, backupShmURL)
                 log.info("Database backup updated")
             } catch {
                 log.warn("Failed to backup database: \(error.localizedDescription)")
@@ -1986,10 +1898,6 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         let dbURL = URL(fileURLWithPath: dbPath)
         let backupURL = URL(fileURLWithPath: backupPath)
         let tempURL = URL(fileURLWithPath: dbPath + ".restore")
-        let walURL = URL(fileURLWithPath: dbPath + "-wal")
-        let shmURL = URL(fileURLWithPath: dbPath + "-shm")
-        let backupWalURL = URL(fileURLWithPath: backupPath + "-wal")
-        let backupShmURL = URL(fileURLWithPath: backupPath + "-shm")
 
         do {
             if fileManager.fileExists(atPath: tempURL.path) {
@@ -2001,29 +1909,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             } else {
                 try fileManager.moveItem(at: tempURL, to: dbURL)
             }
-            let restoreSidecar: (URL, URL) throws -> Void = { sourceURL, destURL in
-                if fileManager.fileExists(atPath: sourceURL.path) {
-                    let tempSidecarURL = URL(fileURLWithPath: destURL.path + ".restore")
-                    if fileManager.fileExists(atPath: tempSidecarURL.path) {
-                        try fileManager.removeItem(at: tempSidecarURL)
-                    }
-                    try fileManager.copyItem(at: sourceURL, to: tempSidecarURL)
-                    if fileManager.fileExists(atPath: destURL.path) {
-                        _ = try fileManager.replaceItemAt(destURL, withItemAt: tempSidecarURL)
-                    } else {
-                        try fileManager.moveItem(at: tempSidecarURL, to: destURL)
-                    }
-                } else if fileManager.fileExists(atPath: destURL.path) {
-                    try fileManager.removeItem(at: destURL)
-                }
-            }
-
-            if fileManager.fileExists(atPath: backupWalURL.path) || fileManager.fileExists(atPath: backupShmURL.path) {
-                try restoreSidecar(backupWalURL, walURL)
-                try restoreSidecar(backupShmURL, shmURL)
-            } else {
-                cleanupSQLiteSidecarFiles(for: dbPath)
-            }
+            cleanupSQLiteSidecarFiles(for: dbPath)
             log.info("Database restored from backup")
             return true
         } catch {
@@ -3381,21 +3267,11 @@ extension DeckSQLManager {
             resolvedCustomTitle = rawCustomTitle ?? ""
         }
 
-        let lowercasedSearchText = resolvedSearchText.lowercased()
-        let lowercasedAppName = resolvedAppName.lowercased()
-        let lowercasedCustomTitle = resolvedCustomTitle.lowercased()
-        let shouldTruncate = lowercasedSearchText.count > searchCacheTextPrefixLimit
-        let cachedSearchText = shouldTruncate
-            ? String(lowercasedSearchText.prefix(searchCacheTextPrefixLimit))
-            : lowercasedSearchText
-
-        // 缓存未命中，小写化后存入缓存（超长 searchText 仅缓存前缀）
+        // 缓存未命中，小写化后存入缓存
         let entry = SearchCacheEntry(
-            searchText: cachedSearchText,
-            appName: lowercasedAppName,
-            customTitle: lowercasedCustomTitle,
-            isTruncated: shouldTruncate,
-            fullSearchTextLength: lowercasedSearchText.count
+            searchText: resolvedSearchText.lowercased(),
+            appName: resolvedAppName.lowercased(),
+            customTitle: resolvedCustomTitle.lowercased()
         )
 
         searchTextCache.setObject(entry, forKey: cacheKey)
@@ -4106,29 +3982,6 @@ extension DeckSQLManager {
         } ?? []
     }
 
-    /// 列表模式：直接返回 ClipboardItem，避免上层忘记使用 list-mode 查询。
-    func fetchListPageItems(
-        filter: SQLite.Expression<Bool>? = nil,
-        limit: Int,
-        cursor: RowCursor? = nil
-    ) async -> (items: [ClipboardItem], cursor: RowCursor?, rowCount: Int) {
-        let rows = await fetchListPage(filter: filter, limit: limit, cursor: cursor)
-        let items = await mapRowsToClipboardItems(rows, loadFullData: false)
-        return (items, self.cursor(from: rows.last), rows.count)
-    }
-
-    /// 详情模式：只返回完整数据（loadFullData = true）
-    func fetchFullItem(id: Int64) async -> ClipboardItem? {
-        guard let row = await fetch(id: id) else { return nil }
-        return rowToClipboardItem(row, loadFullData: true)
-    }
-
-    /// 详情模式：通过 uniqueId 获取完整数据
-    func fetchFullItem(uniqueId: String) async -> ClipboardItem? {
-        guard let row = await fetchRow(uniqueId: uniqueId) else { return nil }
-        return rowToClipboardItem(row, loadFullData: true)
-    }
-
     private func buildFTSQuery(from keyword: String, useTrigram: Bool) -> String {
         let terms = keyword
             .components(separatedBy: .whitespacesAndNewlines)
@@ -4318,26 +4171,8 @@ extension DeckSQLManager {
                         isSecurityMode: isSecurityMode
                     )
 
-                    var searchTextMatch = cached.searchText.contains(lowercasedKeyword)
-                    if !searchTextMatch && cached.isTruncated {
-                        let fullSearchText = (isSecurityMode ? decryptString(rawSearchText) : rawSearchText).lowercased()
-                        if fullSearchText.contains(lowercasedKeyword) {
-                            searchTextMatch = true
-                            if fullSearchText.count <= searchCacheTextUpgradeLimit {
-                                let upgradedEntry = SearchCacheEntry(
-                                    searchText: fullSearchText,
-                                    appName: cached.appName,
-                                    customTitle: cached.customTitle,
-                                    isTruncated: false,
-                                    fullSearchTextLength: fullSearchText.count
-                                )
-                                searchTextCache.setObject(upgradedEntry, forKey: NSNumber(value: id))
-                            }
-                        }
-                    }
-
                     // 匹配搜索文本或应用名称（都已预先小写化）
-                    if searchTextMatch ||
+                    if cached.searchText.contains(lowercasedKeyword) ||
                        cached.appName.contains(lowercasedKeyword) ||
                        cached.customTitle.contains(lowercasedKeyword) {
                         matchingIds.append(id)
