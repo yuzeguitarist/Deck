@@ -1,3 +1,5 @@
+// Copyright © 2024–2026 Yuze Pan. 保留一切权利。
+
 //
 //  ScriptPluginService.swift
 //  Deck

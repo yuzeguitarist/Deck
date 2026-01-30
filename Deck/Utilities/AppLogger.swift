@@ -1,3 +1,5 @@
+// Copyright © 2024–2026 Yuze Pan. 保留一切权利。
+
 //
 //  AppLogger.swift
 //  Deck
@@ -69,38 +71,44 @@ final class AppLogger: @unchecked Sendable {
         osLogger = os.Logger(subsystem: "com.deck.clipboard", category: "AppLogger")
         setupLogFile()
     }
+
+    /// Cheap check to avoid expensive work for logs that will be dropped.
+    func isEnabled(_ level: LogLevel) -> Bool {
+        level >= minimumLogLevel
+    }
     
     // MARK: - Public Logging Methods
     
-    func debug(_ message: String, file: String = #file, function: String = #function, line: Int = #line) {
+    func debug(_ message: @autoclosure () -> String, file: String = #file, function: String = #function, line: Int = #line) {
         log(message, level: .debug, file: file, function: function, line: line)
     }
     
-    func info(_ message: String, file: String = #file, function: String = #function, line: Int = #line) {
+    func info(_ message: @autoclosure () -> String, file: String = #file, function: String = #function, line: Int = #line) {
         log(message, level: .info, file: file, function: function, line: line)
     }
     
-    func warn(_ message: String, file: String = #file, function: String = #function, line: Int = #line) {
+    func warn(_ message: @autoclosure () -> String, file: String = #file, function: String = #function, line: Int = #line) {
         log(message, level: .warning, file: file, function: function, line: line)
     }
     
-    func error(_ message: String, file: String = #file, function: String = #function, line: Int = #line) {
+    func error(_ message: @autoclosure () -> String, file: String = #file, function: String = #function, line: Int = #line) {
         log(message, level: .error, file: file, function: function, line: line)
     }
     
     // MARK: - Private Implementation
     
-    private func log(_ message: String, level: LogLevel, file: String, function: String, line: Int) {
+    private func log(_ message: () -> String, level: LogLevel, file: String, function: String, line: Int) {
         guard level >= minimumLogLevel else { return }
+        let resolvedMessage = message()
         
         let fileName = URL(fileURLWithPath: file).lastPathComponent
         let timestamp = DateFormatter.logFormatter.string(from: Date())
         
         #if DEBUG
-        let consoleMessage = "[\(level.rawValue)] [\(fileName):\(line)] \(message)"
+        let consoleMessage = "[\(level.rawValue)] [\(fileName):\(line)] \(resolvedMessage)"
         print("\(timestamp) \(consoleMessage)")
         #else
-        let logMessage = "[\(fileName):\(line)] \(function) - \(message)"
+        let logMessage = "[\(fileName):\(line)] \(function) - \(resolvedMessage)"
         writeToFile(logMessage, level: level)
         if level == .error {
             osLogger.error("\(logMessage)")

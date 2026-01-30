@@ -1,3 +1,5 @@
+// Copyright © 2024–2026 Yuze Pan. 保留一切权利。
+
 //
 //  Extensions.swift
 //  Deck
@@ -264,17 +266,12 @@ extension NSColor {
 extension Int64 {
     func formattedDate() -> String {
         let date = Date(timeIntervalSince1970: TimeInterval(self))
-        let formatter = DateFormatter()
-        formatter.dateStyle = .short
-        formatter.timeStyle = .short
-        return formatter.string(from: date)
+        return DeckFormatters.shortDateTime().string(from: date)
     }
     
     func relativeDate() -> String {
         let date = Date(timeIntervalSince1970: TimeInterval(self))
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: date, relativeTo: Date())
+        return DeckFormatters.relativeDate().localizedString(for: date, relativeTo: Date())
     }
 }
 
