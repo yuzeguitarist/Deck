@@ -969,10 +969,15 @@ final class ClipboardItem: Identifiable, Equatable {
 
             guard !trimmedText.isEmpty else { return nil }
             
-            let previewAttr = attributedString.length > 250
-                ? attributedString.attributedSubstring(from: NSMakeRange(0, 250))
-                : attributedString
-            previewData = previewAttr.toData(with: resolvedType)
+            if resolvedType == .rtf || resolvedType == .rtfd || resolvedType == .flatRTFD {
+                // Avoid re-serializing rich text during parsing; keep original content as source of truth.
+                previewData = nil
+            } else {
+                let previewAttr = attributedString.length > 250
+                    ? attributedString.attributedSubstring(from: NSMakeRange(0, 250))
+                    : attributedString
+                previewData = previewAttr.toData(with: resolvedType)
+            }
         }
         
         // 对于文本类型，使用字符长度；对于图片/文件，使用数据字节大小

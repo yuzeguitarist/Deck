@@ -408,19 +408,32 @@ extension Notification.Name {
 extension NSAttributedString {
     convenience init?(with data: Data?, type: NSPasteboard.PasteboardType) {
         guard let data = data else { return nil }
-        
-        switch type {
-        case .rtf:
-            try? self.init(data: data, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil)
-        case .rtfd, .flatRTFD:
-            try? self.init(data: data, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil)
-        case .string:
-            if let str = String(data: data, encoding: .utf8) {
+
+        do {
+            switch type {
+            case .rtf:
+                let value = try NSAttributedString(
+                    data: data,
+                    options: [.documentType: NSAttributedString.DocumentType.rtf],
+                    documentAttributes: nil
+                )
+                self.init(attributedString: value)
+            case .rtfd, .flatRTFD:
+                let value = try NSAttributedString(
+                    data: data,
+                    options: [.documentType: NSAttributedString.DocumentType.rtfd],
+                    documentAttributes: nil
+                )
+                self.init(attributedString: value)
+            case .string:
+                guard let str = String(data: data, encoding: .utf8) else {
+                    return nil
+                }
                 self.init(string: str)
-            } else {
+            default:
                 return nil
             }
-        default:
+        } catch {
             return nil
         }
     }
