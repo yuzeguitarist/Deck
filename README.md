@@ -28,12 +28,6 @@
   <img src="https://img.shields.io/badge/license-GPL--3.0-green?style=flat-square" alt="License">
 </p>
 
-<p align="center">
-  <strong>更新计划 / Update Schedule</strong><br>
-  因作者将参加 2026 Apple Swift Student Challenge，本项目将于 2026 年 2 月暂停常规更新，预计 2026 年 3 月恢复。<br>
-  The author will be participating in the 2026 Apple Swift Student Challenge; regular updates will pause in February 2026 and are planned to resume in March 2026.
-</p>
-
 ---
 
 ## Features
