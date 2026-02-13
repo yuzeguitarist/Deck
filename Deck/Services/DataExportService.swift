@@ -157,7 +157,7 @@ final class DataExportService {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
 
-        let dateString = ISO8601DateFormatter().string(from: Date())
+        let dateString = Date().ISO8601Format()
         let header = #"{"version":1,"exportDate":""# + dateString + #""# + #","items":["#
         guard let headerData = header.data(using: .utf8) else {
             throw ExportError.invalidFormat
@@ -174,6 +174,7 @@ final class DataExportService {
         try handle.seekToEnd()
 
         let batchSize = 500
+        let commaData = Data([UInt8(ascii: ",")])
         var isFirst = true
         var exportedCount = 0
         var cursorTimestamp: Int64?
@@ -211,7 +212,7 @@ final class DataExportService {
                 )
                 let data = try encoder.encode(exportItem)
                 if !isFirst {
-                    try handle.write(contentsOf: Data([UInt8(ascii: ",")]))
+                    try handle.write(contentsOf: commaData)
                 }
                 try handle.write(contentsOf: data)
                 isFirst = false
