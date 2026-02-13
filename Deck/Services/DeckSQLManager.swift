@@ -3352,7 +3352,7 @@ extension DeckSQLManager {
             ) {
                 blobPath = path
 
-                if previewData == nil || previewData!.isEmpty {
+                if previewData?.isEmpty ?? true {
                     previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
                     await log.debug("Pre-generated thumbnail for large image (\(item.data.count) bytes)")
                 }
@@ -3369,7 +3369,7 @@ extension DeckSQLManager {
                 blobPath = path
                 dataToStore = Data()
             }
-        } else if item.itemType == .image && item.data.count > 50 * 1024 && (previewData == nil || previewData!.isEmpty) {
+        } else if item.itemType == .image && item.data.count > 50 * 1024 && (previewData?.isEmpty ?? true) {
             previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
             await log.debug("Pre-generated thumbnail for medium image (\(item.data.count) bytes)")
         }
@@ -3678,7 +3678,7 @@ extension DeckSQLManager {
             ) {
                 blobPathToStore = path
 
-                if previewData == nil || previewData!.isEmpty {
+                if previewData?.isEmpty ?? true {
                     previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
                     await log.debug("Pre-generated thumbnail for large image (\(item.data.count) bytes) during update")
                 }
@@ -3694,7 +3694,7 @@ extension DeckSQLManager {
                 blobPathToStore = path
                 dataToStore = Data()
             }
-        } else if item.itemType == .image, item.data.count > 50 * 1024, (previewData == nil || previewData!.isEmpty) {
+        } else if item.itemType == .image, item.data.count > 50 * 1024, (previewData?.isEmpty ?? true) {
             previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
             await log.debug("Pre-generated thumbnail for medium image (\(item.data.count) bytes) during update")
         }

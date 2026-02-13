@@ -226,9 +226,13 @@ final class ClipboardItem: Identifiable, Equatable {
     private var figmaPayloadLastAttempt: TimeInterval = 0
     
     var url: URL? {
-        if urlChecked { return cachedURL }
-
-        urlChecked = true
+        analysisLock.lock()
+        if urlChecked {
+            let cached = cachedURL
+            analysisLock.unlock()
+            return cached
+        }
+        analysisLock.unlock()
 
         let result: URL?
         if pasteboardType == .string || itemType == .url {
@@ -237,7 +241,10 @@ final class ClipboardItem: Identifiable, Equatable {
             result = nil
         }
 
+        analysisLock.lock()
         cachedURL = result
+        urlChecked = true
+        analysisLock.unlock()
         return result
     }
 
@@ -289,18 +296,31 @@ final class ClipboardItem: Identifiable, Equatable {
     }
     
     var colorValue: NSColor? {
-        if cachedColorValue != nil { return cachedColorValue }
-        guard itemType == .color else { return nil }
-        // Prefer normalized plain text (RTF/RTFD data may not be UTF-8 text).
-        let searchCandidate = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let color = searchCandidate.hexColor {
-            cachedColorValue = color
-            return color
+        analysisLock.lock()
+        if let cached = cachedColorValue {
+            analysisLock.unlock()
+            return cached
         }
-        let rawText = (String(data: data, encoding: .utf8) ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        cachedColorValue = rawText.hexColor
-        return cachedColorValue
+        analysisLock.unlock()
+
+        guard itemType == .color else { return nil }
+
+        // Prefer normalized plain text when available (RTF/RTFD may not be UTF-8).
+        let candidate = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let result: NSColor?
+        if let color = candidate.hexColor {
+            result = color
+        } else {
+            let raw = (String(data: data, encoding: .utf8) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            result = raw.hexColor
+        }
+
+        analysisLock.lock()
+        cachedColorValue = result
+        analysisLock.unlock()
+        return result
     }
 
     private func resolveFigmaPayload() -> (payload: FigmaClipboardPayload?, shouldCache: Bool) {
@@ -628,22 +648,50 @@ final class ClipboardItem: Identifiable, Equatable {
     }
     
     var filePaths: [String]? {
-        if cachedFilePaths != nil { return cachedFilePaths }
-        guard pasteboardType == .fileURL,
-              let urlString = String(data: data, encoding: .utf8) else { return nil }
-        cachedFilePaths = urlString.components(separatedBy: "\n").filter { !$0.isEmpty }
-        return cachedFilePaths
+        analysisLock.lock()
+        if let cached = cachedFilePaths {
+            analysisLock.unlock()
+            return cached
+        }
+        analysisLock.unlock()
+
+        guard pasteboardType == .fileURL else { return nil }
+        guard let urlString = String(data: data, encoding: .utf8) else { return nil }
+
+        let paths: [String] = urlString.components(separatedBy: "\n")
+            .compactMap { (entry: String) -> String? in
+                let trimmed = entry.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return nil }
+
+                // Handle both file URL strings (file://...) and plain paths.
+                if let url = URL(string: trimmed), url.isFileURL {
+                    return url.path
+                }
+
+                return trimmed
+            }
+            .filter { (path: String) in !path.isEmpty }
+
+        analysisLock.lock()
+        cachedFilePaths = paths
+        analysisLock.unlock()
+        return paths
     }
 
     var normalizedFilePaths: [String] {
-        if let cachedNormalizedFilePaths {
-            return cachedNormalizedFilePaths
+        analysisLock.lock()
+        if let cached = cachedNormalizedFilePaths {
+            analysisLock.unlock()
+            return cached
         }
+        analysisLock.unlock()
+
         guard let paths = filePaths else { return [] }
-        let normalized = paths
-            .map { Self.normalizeFilePath($0) }
-            .filter { !$0.isEmpty }
+        let normalized = paths.map { Self.normalizeFilePath($0) }.filter { !$0.isEmpty }
+
+        analysisLock.lock()
         cachedNormalizedFilePaths = normalized
+        analysisLock.unlock()
         return normalized
     }
 
@@ -1140,12 +1188,6 @@ final class ClipboardItem: Identifiable, Equatable {
 
         switch pasteboardType {
         case .fileURL:
-            // Ensure cachedFilePaths is initialized
-            if cachedFilePaths == nil {
-                if let urlString = String(data: data, encoding: .utf8) {
-                    cachedFilePaths = urlString.components(separatedBy: "\n").filter { !$0.isEmpty }
-                }
-            }
             if isFileURLImage {
                 log.debug("All files are images, returning .image")
                 return .image
@@ -1245,38 +1287,68 @@ final class ClipboardItem: Identifiable, Equatable {
     }
     
     func thumbnail() -> NSImage? {
-        if let cached = cachedThumbnail { return cached }
-        guard itemType == .image else { return nil }
-        
-        // For file-based images
-        if pasteboardType == .fileURL, let paths = cachedFilePaths, let rawPath = paths.first {
-            let path = Self.normalizeFilePath(rawPath)
-            cachedThumbnail = generateThumbnailFromFile(path: path)
-            return cachedThumbnail
+        analysisLock.lock()
+        if let cached = cachedThumbnail {
+            analysisLock.unlock()
+            return cached
         }
-        
+        analysisLock.unlock()
+
+        guard itemType == .image else { return nil }
+
+        // For file-based images
+        if pasteboardType == .fileURL, let path = normalizedFilePaths.first {
+            let thumb = generateThumbnailFromFile(path: path)
+            analysisLock.lock()
+            cachedThumbnail = thumb
+            if let thumb { cachedImageSize = thumb.size }
+            analysisLock.unlock()
+            return thumb
+        }
+
         // For pasteboard images (png, tiff)
         guard pasteboardType.isImage() else { return nil }
-        
+
         if let previewData, let image = NSImage(data: previewData) {
+            analysisLock.lock()
             cachedThumbnail = image
-            return cachedThumbnail
+            cachedImageSize = image.size
+            analysisLock.unlock()
+            return image
         }
-        
-        // Safety check for large data
+
         guard let payload = resolvedData() else { return nil }
+
+        let image: NSImage?
         if payload.count > Self.maxImageDataSize {
-            cachedThumbnail = generateSafeThumbnailFromData(payload)
-            return cachedThumbnail
+            image = generateSafeThumbnailFromData(payload)
+        } else {
+            image = NSImage(data: payload)
         }
-        
-        cachedThumbnail = NSImage(data: payload)
-        return cachedThumbnail
+
+        analysisLock.lock()
+        cachedThumbnail = image
+        if let image { cachedImageSize = image.size }
+        analysisLock.unlock()
+        return image
     }
 
     func base64Image(maxBytes: Int = Const.maxBase64ImageBytes) -> NSImage? {
-        if base64ImageChecked { return cachedBase64Image }
-        base64ImageChecked = true
+        analysisLock.lock()
+        if base64ImageChecked {
+            let cached = cachedBase64Image
+            analysisLock.unlock()
+            return cached
+        }
+        analysisLock.unlock()
+
+        var result: NSImage? = nil
+        defer {
+            analysisLock.lock()
+            cachedBase64Image = result
+            base64ImageChecked = true
+            analysisLock.unlock()
+        }
 
         guard itemType == .text || itemType == .code || itemType == .richText else { return nil }
         let maxBase64Chars = (maxBytes * 4) / 3 + (maxBytes / 4) + 1024
@@ -1293,7 +1365,7 @@ final class ClipboardItem: Identifiable, Equatable {
             return nil
         }
 
-        cachedBase64Image = image
+        result = image
         return image
     }
     
@@ -1438,33 +1510,36 @@ final class ClipboardItem: Identifiable, Equatable {
     }
     
     func imageSize() -> CGSize? {
-        if let cached = cachedImageSize { return cached }
+        analysisLock.lock()
+        if let cached = cachedImageSize {
+            analysisLock.unlock()
+            return cached
+        }
+        analysisLock.unlock()
+
         guard itemType == .image else { return nil }
-        
+
         var source: CGImageSource?
-        if pasteboardType == .fileURL, let paths = cachedFilePaths, let rawPath = paths.first {
-            let path = Self.normalizeFilePath(rawPath)
+
+        if pasteboardType == .fileURL, let path = normalizedFilePaths.first {
             guard FileManager.default.fileExists(atPath: path) else { return nil }
             let url = URL(fileURLWithPath: path)
             source = CGImageSourceCreateWithURL(url as CFURL, nil)
         } else if pasteboardType.isImage(), let payload = resolvedData() {
             source = CGImageSourceCreateWithData(payload as CFData, nil)
         }
-        
-        guard let source = source,
-              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
-            return nil
-        }
-        
-        guard let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
+
+        guard let source,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
               let height = properties[kCGImagePropertyPixelHeight] as? CGFloat else {
             return nil
         }
-        
-        let dpi = properties[kCGImagePropertyDPIWidth] as? CGFloat ?? 72.0
-        let scale = dpi / 72.0
-        let size = CGSize(width: width / scale, height: height / scale)
+
+        let size = CGSize(width: width, height: height)
+        analysisLock.lock()
         cachedImageSize = size
+        analysisLock.unlock()
         return size
     }
     
