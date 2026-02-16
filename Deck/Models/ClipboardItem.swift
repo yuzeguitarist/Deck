@@ -687,7 +687,7 @@ final class ClipboardItem: Identifiable, Equatable {
         analysisLock.unlock()
 
         guard let paths = filePaths else { return [] }
-        let normalized = paths.map { Self.normalizeFilePath($0) }.filter { !$0.isEmpty }
+        let normalized = paths.map { Self.normalizeFilePath($0) }
 
         analysisLock.lock()
         cachedNormalizedFilePaths = normalized
@@ -1527,9 +1527,10 @@ final class ClipboardItem: Identifiable, Equatable {
         var source: CGImageSource?
 
         if pasteboardType == .fileURL, let path = normalizedFilePaths.first {
-            guard FileManager.default.fileExists(atPath: path) else { return nil }
-            let url = URL(fileURLWithPath: path)
-            source = CGImageSourceCreateWithURL(url as CFURL, nil)
+            if FileManager.default.fileExists(atPath: path),
+               let url = URL(string: "file://\(path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path)") {
+                source = CGImageSourceCreateWithURL(url as CFURL, nil)
+            }
         } else if pasteboardType.isImage(), let payload = resolvedData() {
             source = CGImageSourceCreateWithData(payload as CFData, nil)
         }
