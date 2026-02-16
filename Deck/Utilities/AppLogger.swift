@@ -31,6 +31,24 @@ enum LogLevel: String, CaseIterable, Comparable, Sendable {
     }
 }
 
+private struct AppLoggerThrottleEntry: Sendable {
+    var lastEmittedAt: TimeInterval
+    var suppressedCount: Int
+}
+
+private struct AppLoggerThrottleState: Sendable {
+    var enabled: Bool
+    var debugInterval: TimeInterval
+    var infoInterval: TimeInterval
+    var maxEntries: Int
+    var entries: [Int: AppLoggerThrottleEntry]
+}
+
+private enum AppLoggerThrottleOutcome: Sendable {
+    case emit(suppressed: Int)
+    case drop
+}
+
 /// App-wide logger.
 ///
 /// Design goals:
@@ -50,32 +68,7 @@ final class AppLogger: Sendable {
 
     // MARK: - Throttling
 
-    /// Identify a log call-site without allocating Strings (no message evaluation needed).
-    private struct ThrottleKey: Hashable, Sendable {
-        let fileKey: Int
-        let line: UInt32
-        let level: UInt8
-    }
-
-    private struct ThrottleEntry: Sendable {
-        var lastEmittedAt: TimeInterval
-        var suppressedCount: Int
-    }
-
-    private struct ThrottleState: Sendable {
-        var enabled: Bool
-        var debugInterval: TimeInterval
-        var infoInterval: TimeInterval
-        var maxEntries: Int
-        var entries: [ThrottleKey: ThrottleEntry]
-    }
-
-    private enum ThrottleOutcome: Sendable {
-        case emit(suppressed: Int)
-        case drop
-    }
-
-    private let throttleState: OSAllocatedUnfairLock<ThrottleState>
+    private let throttleState: OSAllocatedUnfairLock<AppLoggerThrottleState>
 
     // MARK: - Buffered file output (Release)
 
@@ -113,7 +106,7 @@ final class AppLogger: Sendable {
             logFileURL: nil
         ))
 
-        self.throttleState = OSAllocatedUnfairLock(initialState: ThrottleState(
+        self.throttleState = OSAllocatedUnfairLock(initialState: AppLoggerThrottleState(
             enabled: true,
             // Debug builds can be extremely chatty (search typing, polling, etc.).
             // Throttle per call-site to keep logs useful while preventing log spam.
@@ -265,9 +258,15 @@ final class AppLogger: Sendable {
 
     // MARK: - Throttling internals
 
-    private func throttleDecision(level: LogLevel, file: StaticString, line: UInt, now: TimeInterval) -> ThrottleOutcome {
-        throttleState.withLock { state in
-            guard state.enabled else { return .emit(suppressed: 0) }
+    private func throttleDecision(level: LogLevel, file: StaticString, line: UInt, now: TimeInterval) -> AppLoggerThrottleOutcome {
+        let key = Self.makeThrottleEntryKey(
+            fileKey: Self.staticStringKey(file),
+            line: UInt32(line),
+            level: UInt8(level.priority)
+        )
+
+        return throttleState.withLock { state in
+            guard state.enabled else { return AppLoggerThrottleOutcome.emit(suppressed: 0) }
 
             let interval: TimeInterval
             switch level {
@@ -276,49 +275,48 @@ final class AppLogger: Sendable {
             case .info:
                 interval = state.infoInterval
             default:
-                return .emit(suppressed: 0)
+                return AppLoggerThrottleOutcome.emit(suppressed: 0)
             }
 
-            guard interval > 0 else { return .emit(suppressed: 0) }
+            guard interval > 0 else { return AppLoggerThrottleOutcome.emit(suppressed: 0) }
 
             // Prevent unbounded growth if many unique call-sites are hit (e.g. feature flags / plugins).
             if state.entries.count > state.maxEntries {
                 state.entries.removeAll(keepingCapacity: true)
             }
 
-            let key = ThrottleKey(
-                fileKey: Self.staticStringKey(file),
-                line: UInt32(line),
-                level: UInt8(level.priority)
-            )
-
             if var entry = state.entries[key] {
                 if now - entry.lastEmittedAt < interval {
                     entry.suppressedCount += 1
                     state.entries[key] = entry
-                    return .drop
+                    return AppLoggerThrottleOutcome.drop
                 } else {
                     let suppressed = entry.suppressedCount
                     entry.lastEmittedAt = now
                     entry.suppressedCount = 0
                     state.entries[key] = entry
-                    return .emit(suppressed: suppressed)
+                    return AppLoggerThrottleOutcome.emit(suppressed: suppressed)
                 }
             } else {
-                state.entries[key] = ThrottleEntry(lastEmittedAt: now, suppressedCount: 0)
-                return .emit(suppressed: 0)
+                state.entries[key] = AppLoggerThrottleEntry(lastEmittedAt: now, suppressedCount: 0)
+                return AppLoggerThrottleOutcome.emit(suppressed: 0)
             }
         }
+    }
+
+    private static func makeThrottleEntryKey(fileKey: Int, line: UInt32, level: UInt8) -> Int {
+        var hasher = Hasher()
+        hasher.combine(fileKey)
+        hasher.combine(line)
+        hasher.combine(level)
+        return hasher.finalize()
     }
 
     private static func staticStringKey(_ value: StaticString) -> Int {
         if value.hasPointerRepresentation {
             return Int(bitPattern: UnsafeRawPointer(value.utf8Start))
         }
-        if let scalar = value.unicodeScalarValue {
-            return Int(scalar.value)
-        }
-        return 0
+        return String(describing: value).hashValue
     }
 
     // MARK: - Static Helpers / Configuration
@@ -420,15 +418,15 @@ final class AppLogger: Sendable {
     }
 
     private func enqueueBufferedWrite(_ data: Data, to url: URL) {
-        var batchesToFlush: [(URL, Data)] = []
-        var shouldScheduleFlush = false
+        let lockResult = fileBufferState.withLock { buffer -> ([(URL, Data)], Bool) in
+            var localBatches: [(URL, Data)] = []
+            var localShouldScheduleFlush = false
 
-        fileBufferState.withLock { buffer in
             // If the log file rotated, flush pending data to the old file first.
             if let pendingURL = buffer.pendingURL,
                pendingURL != url,
                !buffer.pendingData.isEmpty {
-                batchesToFlush.append((pendingURL, buffer.pendingData))
+                localBatches.append((pendingURL, buffer.pendingData))
                 buffer.pendingData = Data()
                 buffer.flushScheduled = false
             }
@@ -438,14 +436,19 @@ final class AppLogger: Sendable {
 
             if buffer.pendingData.count >= maxBufferedBytes {
                 // Flush immediately when the buffer is large to reduce peak memory.
-                batchesToFlush.append((url, buffer.pendingData))
+                localBatches.append((url, buffer.pendingData))
                 buffer.pendingData = Data()
                 buffer.flushScheduled = false
             } else if !buffer.flushScheduled {
                 buffer.flushScheduled = true
-                shouldScheduleFlush = true
+                localShouldScheduleFlush = true
             }
+
+            return (localBatches, localShouldScheduleFlush)
         }
+
+        let batchesToFlush = lockResult.0
+        let shouldScheduleFlush = lockResult.1
 
         if !batchesToFlush.isEmpty {
             let osLogger = self.osLogger
@@ -468,12 +471,12 @@ final class AppLogger: Sendable {
     }
 
     private func flushBufferedLogs() {
-        var batch: (URL, Data)?
-        fileBufferState.withLock { buffer in
+        let batch = fileBufferState.withLock { buffer -> (URL, Data)? in
             buffer.flushScheduled = false
-            guard let url = buffer.pendingURL, !buffer.pendingData.isEmpty else { return }
-            batch = (url, buffer.pendingData)
+            guard let url = buffer.pendingURL, !buffer.pendingData.isEmpty else { return nil }
+            let result = (url, buffer.pendingData)
             buffer.pendingData = Data()
+            return result
         }
         guard let batch else { return }
 
