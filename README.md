@@ -17,6 +17,7 @@
   <a href="#install">Install</a> •
   <a href="#quick-start">Quick Start</a> •
   <a href="#screenshots">Screenshots</a> •
+  <a href="#support-deck">Support</a> •
   <a href="#contributing">Contributing</a> •
   <a href="#license">License</a> •
   <a href="#中文说明">中文</a>
@@ -102,6 +103,30 @@ More shortcuts (and Vim mode) are available in Settings.
 </p>
 <p align="center">
   <img src="photos/DeckSettings.jpg" alt="Deck settings" width="720">
+</p>
+
+## Support Deck
+
+<p align="center">
+  <strong>If Deck helps your workflow, you can support development here:</strong>
+</p>
+
+<p align="center">
+  <a href="https://ko-fi.com/yuzeguitar">
+    <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Ko--fi-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white" alt="Buy Me a Coffee on Ko-fi">
+  </a>
+</p>
+
+<p align="center">
+  Ko-fi is for international supporters.
+</p>
+
+<p align="center">
+  For supporters in mainland China, you can also use WeChat Pay / Alipay (QR code below).
+</p>
+
+<p align="center">
+  <img src="photos/buy_me_a_coffee.jpg" alt="WeChat Pay and Alipay QR code" width="320">
 </p>
 
 ## Contributing
@@ -208,6 +233,30 @@ For commercial licensing, contact: yuzeguitar@gmail.com.
 </p>
 <p align="center">
   <img src="photos/DeckSettings.jpg" alt="Deck 设置" width="720">
+</p>
+
+## 支持作者
+
+<p align="center">
+  <strong>如果 Deck 对你有帮助，欢迎通过下面方式支持持续开发：</strong>
+</p>
+
+<p align="center">
+  <img src="photos/buy_me_a_coffee.jpg" alt="微信/支付宝赞助收款码" width="320">
+</p>
+
+<p align="center">
+  可使用微信 / 支付宝扫码赞助。
+</p>
+
+<p align="center">
+  <a href="https://ko-fi.com/yuzeguitar">
+    <img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-Ko--fi-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white" alt="Ko-fi 赞助">
+  </a>
+</p>
+
+<p align="center">
+  海外用户可使用 Ko-fi 赞助。
 </p>
 
 ## 参与贡献
