@@ -37,6 +37,7 @@ enum LogLevel: String, CaseIterable, Comparable, Sendable {
 /// - Minimal overhead when a log is filtered out.
 /// - Swift 6 friendly (no `nonisolated(unsafe)` globals, no `@unchecked Sendable`).
 /// - Minimal invasive: keep existing call sites working.
+/// - Reduce log spam and disk IO in hot paths.
 final class AppLogger: Sendable {
     static let shared = AppLogger()
 
@@ -46,6 +47,49 @@ final class AppLogger: Sendable {
         var currentLogDay: String?
         var logFileURL: URL?
     }
+
+    // MARK: - Throttling
+
+    /// Identify a log call-site without allocating Strings (no message evaluation needed).
+    private struct ThrottleKey: Hashable, Sendable {
+        let fileKey: Int
+        let line: UInt32
+        let level: UInt8
+    }
+
+    private struct ThrottleEntry: Sendable {
+        var lastEmittedAt: TimeInterval
+        var suppressedCount: Int
+    }
+
+    private struct ThrottleState: Sendable {
+        var enabled: Bool
+        var debugInterval: TimeInterval
+        var infoInterval: TimeInterval
+        var maxEntries: Int
+        var entries: [ThrottleKey: ThrottleEntry]
+    }
+
+    private enum ThrottleOutcome: Sendable {
+        case emit(suppressed: Int)
+        case drop
+    }
+
+    private let throttleState: OSAllocatedUnfairLock<ThrottleState>
+
+    // MARK: - Buffered file output (Release)
+
+    private struct FileBufferState: Sendable {
+        var pendingURL: URL?
+        var pendingData: Data
+        var flushScheduled: Bool
+    }
+
+    private let fileBufferState: OSAllocatedUnfairLock<FileBufferState>
+    private let fileFlushInterval: TimeInterval = 0.5
+    private let maxBufferedBytes: Int = 64 * 1024
+
+    // MARK: - Core
 
     private let osLogger: Logger
     private let logQueue = DispatchQueue(label: "com.deck.logger", qos: .utility)
@@ -67,6 +111,22 @@ final class AppLogger: Sendable {
             logsDirectory: Self.resolveLogsDirectory(),
             currentLogDay: nil,
             logFileURL: nil
+        ))
+
+        self.throttleState = OSAllocatedUnfairLock(initialState: ThrottleState(
+            enabled: true,
+            // Debug builds can be extremely chatty (search typing, polling, etc.).
+            // Throttle per call-site to keep logs useful while preventing log spam.
+            debugInterval: 0.5,
+            infoInterval: 1.0,
+            maxEntries: 4096,
+            entries: [:]
+        ))
+
+        self.fileBufferState = OSAllocatedUnfairLock(initialState: FileBufferState(
+            pendingURL: nil,
+            pendingData: Data(),
+            flushScheduled: false
         ))
 
         #if !DEBUG
@@ -170,15 +230,31 @@ final class AppLogger: Sendable {
         let min = state.withLock { $0.minimumLogLevel }
         guard level >= min else { return }
 
-        let resolvedMessage = message()
+        // Throttle debug/info before evaluating the message closure to keep hot paths cheap.
+        var suppressedCount = 0
+        if level == .debug || level == .info {
+            let now = CFAbsoluteTimeGetCurrent()
+            switch throttleDecision(level: level, file: file, line: line, now: now) {
+            case .drop:
+                return
+            case .emit(let suppressed):
+                suppressedCount = suppressed
+            }
+        }
+
+        var resolvedMessage = message()
+        if suppressedCount > 0 {
+            resolvedMessage += " (+\(suppressedCount) suppressed)"
+        }
+
         let fileName = Self.shortFileName(file)
-        let functionName = String(describing: function)
 
         #if DEBUG
         let timestamp = Self.timestampString(Date())
         let consoleMessage = "[\(level.rawValue)] [\(fileName):\(line)] \(resolvedMessage)"
         print("\(timestamp) \(consoleMessage)")
         #else
+        let functionName = String(describing: function)
         let logMessage = "[\(fileName):\(line)] \(functionName) - \(resolvedMessage)"
         writeToFile(logMessage, level: level)
         if level == .error {
@@ -187,7 +263,65 @@ final class AppLogger: Sendable {
         #endif
     }
 
-    // MARK: - Static Helpers
+    // MARK: - Throttling internals
+
+    private func throttleDecision(level: LogLevel, file: StaticString, line: UInt, now: TimeInterval) -> ThrottleOutcome {
+        throttleState.withLock { state in
+            guard state.enabled else { return .emit(suppressed: 0) }
+
+            let interval: TimeInterval
+            switch level {
+            case .debug:
+                interval = state.debugInterval
+            case .info:
+                interval = state.infoInterval
+            default:
+                return .emit(suppressed: 0)
+            }
+
+            guard interval > 0 else { return .emit(suppressed: 0) }
+
+            // Prevent unbounded growth if many unique call-sites are hit (e.g. feature flags / plugins).
+            if state.entries.count > state.maxEntries {
+                state.entries.removeAll(keepingCapacity: true)
+            }
+
+            let key = ThrottleKey(
+                fileKey: Self.staticStringKey(file),
+                line: UInt32(line),
+                level: UInt8(level.priority)
+            )
+
+            if var entry = state.entries[key] {
+                if now - entry.lastEmittedAt < interval {
+                    entry.suppressedCount += 1
+                    state.entries[key] = entry
+                    return .drop
+                } else {
+                    let suppressed = entry.suppressedCount
+                    entry.lastEmittedAt = now
+                    entry.suppressedCount = 0
+                    state.entries[key] = entry
+                    return .emit(suppressed: suppressed)
+                }
+            } else {
+                state.entries[key] = ThrottleEntry(lastEmittedAt: now, suppressedCount: 0)
+                return .emit(suppressed: 0)
+            }
+        }
+    }
+
+    private static func staticStringKey(_ value: StaticString) -> Int {
+        if value.hasPointerRepresentation {
+            return Int(bitPattern: UnsafeRawPointer(value.utf8Start))
+        }
+        if let scalar = value.unicodeScalarValue {
+            return Int(scalar.value)
+        }
+        return 0
+    }
+
+    // MARK: - Static Helpers / Configuration
 
     static func setMinimumLogLevel(_ level: LogLevel) {
         shared.state.withLock { $0.minimumLogLevel = level }
@@ -195,6 +329,17 @@ final class AppLogger: Sendable {
 
     static func getMinimumLogLevel() -> LogLevel {
         shared.state.withLock { $0.minimumLogLevel }
+    }
+
+    static func setThrottlingEnabled(_ enabled: Bool) {
+        shared.throttleState.withLock { $0.enabled = enabled }
+    }
+
+    static func configureThrottling(debugInterval: TimeInterval, infoInterval: TimeInterval) {
+        shared.throttleState.withLock { state in
+            state.debugInterval = max(0, debugInterval)
+            state.infoInterval = max(0, infoInterval)
+        }
     }
 
     static func getLogFileURL() -> URL? {
@@ -270,17 +415,73 @@ final class AppLogger: Sendable {
         let logEntry = "[\(timestamp)] [\(level.rawValue)] \(message)\n"
         guard let data = logEntry.data(using: .utf8) else { return }
 
-        let osLogger = self.osLogger
+        enqueueBufferedWrite(data, to: logURL)
+        #endif
+    }
 
-        // Avoid capturing `self` in the `@Sendable` Dispatch closure.
-        logQueue.async {
-            do {
-                try Self.append(data, to: logURL)
-            } catch {
-                osLogger.error("Failed to write to log file: \(error.localizedDescription, privacy: .public)")
+    private func enqueueBufferedWrite(_ data: Data, to url: URL) {
+        var batchesToFlush: [(URL, Data)] = []
+        var shouldScheduleFlush = false
+
+        fileBufferState.withLock { buffer in
+            // If the log file rotated, flush pending data to the old file first.
+            if let pendingURL = buffer.pendingURL,
+               pendingURL != url,
+               !buffer.pendingData.isEmpty {
+                batchesToFlush.append((pendingURL, buffer.pendingData))
+                buffer.pendingData = Data()
+                buffer.flushScheduled = false
+            }
+
+            buffer.pendingURL = url
+            buffer.pendingData.append(data)
+
+            if buffer.pendingData.count >= maxBufferedBytes {
+                // Flush immediately when the buffer is large to reduce peak memory.
+                batchesToFlush.append((url, buffer.pendingData))
+                buffer.pendingData = Data()
+                buffer.flushScheduled = false
+            } else if !buffer.flushScheduled {
+                buffer.flushScheduled = true
+                shouldScheduleFlush = true
             }
         }
-        #endif
+
+        if !batchesToFlush.isEmpty {
+            let osLogger = self.osLogger
+            logQueue.async {
+                for (u, d) in batchesToFlush {
+                    do {
+                        try Self.append(d, to: u)
+                    } catch {
+                        osLogger.error("Failed to write to log file: \(error.localizedDescription, privacy: .public)")
+                    }
+                }
+            }
+        }
+
+        if shouldScheduleFlush {
+            logQueue.asyncAfter(deadline: .now() + fileFlushInterval) { [weak self] in
+                self?.flushBufferedLogs()
+            }
+        }
+    }
+
+    private func flushBufferedLogs() {
+        var batch: (URL, Data)?
+        fileBufferState.withLock { buffer in
+            buffer.flushScheduled = false
+            guard let url = buffer.pendingURL, !buffer.pendingData.isEmpty else { return }
+            batch = (url, buffer.pendingData)
+            buffer.pendingData = Data()
+        }
+        guard let batch else { return }
+
+        do {
+            try Self.append(batch.1, to: batch.0)
+        } catch {
+            osLogger.error("Failed to write to log file: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     private static func append(_ data: Data, to url: URL) throws {
