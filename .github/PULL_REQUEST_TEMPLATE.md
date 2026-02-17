@@ -1,73 +1,52 @@
-## Important | 重要提示
+## 重要规则
 
-> **All PRs must target the `dev` branch, NOT `main`.**
-> **所有 PR 必须提交到 `dev` 分支，而不是 `main`。**
+> 所有 PR 必须合并到 `dev`，不要提到 `main`。  
+> 信息过少或未按模板填写的 PR 可能会被退回补充。
 
-## Pre-submission Checklist | 提交前检查
+## 这次改了什么（必填）
 
-- [ ] I have run `./scripts/code-quality.sh` and scored >= 80 | 我已运行代码质量脚本且评分 >= 80
-- [ ] This PR targets the `dev` branch | 此 PR 目标为 `dev` 分支
+- 
 
-## Description | 描述
+## 关联 Issue（必填）
 
-<!-- Describe your changes in detail | 详细描述你的更改 -->
+Fixes #
 
-## Related Issue | 相关 Issue
+## 改动类型（必选）
 
-<!-- Link to the issue this PR addresses | 关联此 PR 解决的 Issue -->
-Fixes #(issue number)
+- [ ] Bug 修复
+- [ ] 新功能
+- [ ] 重构 / 性能优化
+- [ ] UI / 样式调整
+- [ ] 文档 / 测试更新
+- [ ] Breaking Change（请在下方说明）
 
-## Code Quality Score | 代码质量评分
+## 验证方式（必填）
 
-<!-- Paste your score from ./scripts/code-quality.sh | 粘贴代码质量脚本的评分 -->
-```
+- [ ] 我已本地自测
+- [ ] 我已运行 `./scripts/code-quality.sh` 且分数 >= 80
+- [ ] 相关测试已通过（如适用）
+
+代码质量分数：
+```text
 Score: __/100
 ```
 
-## Type of Change | 更改类型
+测试环境：
+- macOS：
+- Xcode：
+- 设备：
 
-<!-- Mark the relevant option with an "x" | 用 "x" 标记相关选项 -->
+## 截图 / 录屏（UI 改动必填）
 
-- [ ] Bug fix | Bug 修复
-- [ ] New feature | 新功能
-- [ ] Breaking change | 破坏性更改
-- [ ] Documentation update | 文档更新
-- [ ] Style/UI change | 样式/UI 更改
-- [ ] Refactoring | 重构
-- [ ] Performance improvement | 性能优化
-- [ ] Test update | 测试更新
+<!-- UI 有变化时请贴前后对比 -->
 
-## Screenshots / Videos | 截图 / 视频
+## 自检（必勾）
 
-<!-- If applicable, add screenshots or videos | 如适用，添加截图或视频 -->
+- [ ] 目标分支是 `dev`
+- [ ] 我已自查主要风险点
+- [ ] 我已补充必要文档/注释（如适用）
 
-| Before | After |
-|--------|-------|
-| screenshot | screenshot |
+## 风险与回滚（选填）
 
-## How Has This Been Tested? | 如何测试的？
-
-<!-- Describe the tests you ran | 描述你运行的测试 -->
-
-- [ ] Unit tests | 单元测试
-- [ ] UI tests | UI 测试
-- [ ] Manual testing | 手动测试
-
-**Test Configuration | 测试配置:**
-- macOS version | macOS 版本:
-- Xcode version | Xcode 版本:
-- Device | 设备: [e.g., MacBook Pro M1]
-
-## Checklist | 检查清单
-
-- [ ] My code follows the project's coding standards | 我的代码遵循项目的代码规范
-- [ ] I have performed a self-review of my code | 我已自我审查代码
-- [ ] I have commented my code, particularly in hard-to-understand areas | 我已在难以理解的地方添加注释
-- [ ] I have made corresponding changes to the documentation | 我已相应更新文档
-- [ ] My changes generate no new warnings | 我的更改没有产生新的警告
-- [ ] I have added tests that prove my fix is effective or that my feature works | 我已添加测试证明修复有效或功能正常
-- [ ] New and existing unit tests pass locally with my changes | 新的和现有的单元测试在本地通过
-
-## Additional Notes | 补充说明
-
-<!-- Add any additional notes for reviewers | 为审核者添加任何补充说明 -->
+- 风险点：
+- 回滚方式：
