@@ -346,5 +346,5 @@ Questions or licensing inquiries → yuzeguitar@gmail.com
 ---
 
 <p align="center">
-  Made by <a href="https://github.com/yuzeguitarist">Yuze Pan (潘禹泽)</a>
+  Copyright © 2024-2026 Yuze Pan. 保留一切权利。
 </p>

@@ -1,126 +1,119 @@
 # Security Policy | 安全政策
 
-[中文版](#中文版)
+[跳转到中文](#中文版)
 
 ## Supported Versions
 
-| Version | Supported          |
-| ------- | ------------------ |
-| > 1.0   | Yes |
-| < 1.0   | No                |
+| Version | Supported |
+| ------- | --------- |
+| all support | Yes |
 
 ## Reporting a Vulnerability
 
-We take security seriously. If you discover a security vulnerability within Deck, please follow these steps:
+We take security seriously. If you find a security issue in Deck, please report it privately using the process below.
 
-### Do NOT
+### Please do NOT
 
-- Open a public GitHub issue
-- Disclose the vulnerability publicly before it's fixed
-- Exploit the vulnerability
+- Open a public GitHub issue for security reports.
+- Disclose the issue publicly before a fix is released.
+- Attempt to exploit the issue.
 
-### Do
+### Please DO
 
-1. **Email us directly** at yuzeguitar@gmail.com with:
-   - Description of the vulnerability
+1. Email `yuzeguitar@gmail.com` with:
+   - A clear description of the issue
    - Steps to reproduce
    - Potential impact
-   - Any suggested fixes (optional)
+   - Suggested fix (optional)
+2. Use a clear subject line, for example: `Security Vulnerability in Deck`
+3. Allow up to 48 hours for our first response.
 
-2. **Use a descriptive subject line** like "Security Vulnerability in Deck"
+### What to expect
 
-3. **Allow time for response** - We aim to respond within 48 hours
+1. **Acknowledgment**: We confirm receipt within 48 hours.
+2. **Assessment**: We evaluate impact and severity.
+3. **Fix**: We develop and test a patch.
+4. **Release**: We ship a fixed version.
+5. **Disclosure**: After release, we may publicly acknowledge the report and credit you (if you want).
 
+### In Scope
 
-### What to Expect
-
-1. **Acknowledgment**: We'll confirm receipt within 48 hours
-2. **Assessment**: We'll assess the vulnerability and determine severity
-3. **Fix Development**: We'll develop and test a fix
-4. **Release**: We'll release a patched version
-5. **Disclosure**: After the fix is released, we'll publicly acknowledge the vulnerability and credit you (if desired)
-
-### Scope
-
-The following are in scope:
 - Deck macOS application
-- Any data handling or storage mechanisms
-- Authentication/authorization (for Pro features)
+- Data handling and storage mechanisms
+- Authentication and authorization for Pro features
 
 ### Out of Scope
 
 - Social engineering attacks
 - Physical attacks
-- Denial of service attacks
-- Issues in dependencies (report to the dependency maintainer)
+- Denial-of-service attacks
+- Vulnerabilities in third-party dependencies (please report to the dependency maintainer)
 
 ## Security Best Practices for Users
 
-1. **Download from official sources only** - GitHub Releases or our website
-2. **Verify checksums** - Check SHA256 checksums before installing
-3. **Keep Deck updated** - Install security updates promptly
-4. **Review permissions** - Only grant necessary permissions
+1. Download Deck only from official sources (GitHub Releases or our official website).
+2. Verify SHA256 checksums before installation.
+3. Keep Deck updated to the latest version.
+4. Grant only the permissions Deck actually needs.
 
 ---
 
 # 中文版
 
-## 支持的版本
+## 支持版本
 
 | 版本 | 支持状态 |
 | ---- | -------- |
-| > 1.0 | Yes |
-| < 1.0 | No |
+| all support | 支持 |
 
 ## 报告漏洞
 
-我们非常重视安全问题。如果你在 Deck 中发现安全漏洞，请按以下步骤操作：
+我们非常重视安全问题。如果你在 Deck 中发现了安全漏洞，请按以下流程私下提交。
 
 ### 请勿
 
-- 公开提交 GitHub Issue
-- 在漏洞修复前公开披露
-- 利用该漏洞
+- 通过公开 GitHub Issue 提交安全漏洞
+- 在修复发布前公开披露漏洞
+- 主动利用漏洞进行测试或攻击
 
-### 请
+### 请这样做
 
-1. **直接发送邮件** 至 yuzeguitar@gmail.com，包含：
-   - 漏洞描述
+1. 发送邮件到 `yuzeguitar@gmail.com`，并尽量包含：
+   - 漏洞的清晰描述
    - 复现步骤
    - 潜在影响
-   - 建议的修复方案（可选）
-
-2. **使用描述性的邮件主题**，如 "Deck 安全漏洞"
-
-3. **等待回复** - 我们会在 48 小时内回复
+   - 可选的修复建议
+2. 邮件主题建议使用：`Deck 安全漏洞`
+3. 我们会在 48 小时内进行首次回复，请耐心等待。
 
 ### 处理流程
 
-1. **确认收到**：48 小时内确认
-2. **评估**：评估漏洞并确定严重程度
-3. **修复开发**：开发并测试修复方案
-4. **发布**：发布修复版本
-5. **披露**：修复发布后，我们会公开致谢（如你愿意）
+1. **确认收件**：48 小时内确认收到报告
+2. **风险评估**：评估影响范围和严重程度
+3. **修复验证**：开发并测试修复方案
+4. **发布修复**：发布包含修复的版本
+5. **后续披露**：修复发布后可公开致谢（如你同意）
 
-### 范围内
+### 受理范围
 
-- Deck macOS 应用程序
-- 任何数据处理或存储机制
+- Deck macOS 应用
+- 数据处理与存储机制
+- Pro 功能相关的认证与授权
 
-### 范围外
+### 不受理范围
 
 - 社会工程攻击
-- 物理攻击
-- 拒绝服务攻击
-- 依赖项中的问题（请向依赖项维护者报告）
+- 物理接触类攻击
+- 拒绝服务攻击（DoS）
+- 第三方依赖自身漏洞（请向对应维护方报告）
 
-## 用户安全最佳实践
+## 用户安全建议
 
-1. **仅从官方渠道下载** - GitHub Releases 或我们的官网
-2. **验证校验和** - 安装前检查 SHA256 校验和
-3. **保持更新** - 及时安装安全更新
-4. **审查权限** - 仅授予必要的权限
+1. 仅从官方渠道下载（GitHub Releases 或官网）。
+2. 安装前校验 SHA256。
+3. 及时更新到最新版本。
+4. 仅授予必要权限。
 
 ---
 
-感谢你帮助保护 Deck 和用户的安全！
+感谢你帮助我们一起保护 Deck 和用户的安全。
