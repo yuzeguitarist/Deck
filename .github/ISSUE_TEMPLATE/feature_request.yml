@@ -1,29 +1,39 @@
-name: Feature Request | 功能建议
-description: 提需求时请说清问题、方案和价值
+name: Feature Request | 功能建议 | Funktionsvorschlag
+description: Suggest a feature in 中文 / English / Deutsch
 title: "[Feature]: "
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        请按模板填写。信息太少的需求会被标记 `needs-info` 并关闭。
-        提交前请先搜索是否已有相同需求。
+        请选择一种语言填写：中文 / English / Deutsch。
+        Please fill in one language only.
+        Bitte nur eine Sprache ausfuellen.
+
+  - type: dropdown
+    id: language
+    attributes:
+      label: 语言 / Language / Sprache
+      options:
+        - 中文
+        - English
+        - Deutsch
+    validations:
+      required: true
 
   - type: checkboxes
     id: precheck
     attributes:
-      label: 提交前确认
+      label: 提交前确认 / Pre-check / Vor dem Senden
       options:
-        - label: 我已搜索现有 Issue/Feature，确认不是重复需求
-          required: true
-        - label: 这个需求符合 Deck 的核心场景（剪贴板管理）
+        - label: 我已搜索现有需求（非重复） / I searched existing feature requests / Ich habe bestehende Feature-Issues geprueft
           required: true
 
   - type: textarea
     id: pain_point
     attributes:
-      label: 你现在遇到的问题
-      description: 说清楚当前痛点，不改会带来什么影响。
+      label: 当前问题 / Current Problem / Aktuelles Problem
+      description: 说清现在哪里不方便。Describe the pain point. Beschreibe den aktuellen Schmerzpunkt.
       placeholder: 例如：每天要重复整理剪贴板，效率很低
     validations:
       required: true
@@ -31,8 +41,8 @@ body:
   - type: textarea
     id: solution
     attributes:
-      label: 你希望的方案
-      description: 直接说想要新增或修改什么。
+      label: 期望方案 / Proposed Solution / Gewuenschte Loesung
+      description: 直接说希望新增或修改什么。What should be added/changed?
       placeholder: 例如：支持按应用分组显示历史记录
     validations:
       required: true
@@ -40,8 +50,8 @@ body:
   - type: textarea
     id: value
     attributes:
-      label: 这个功能的价值
-      description: 这个功能能节省什么时间、解决什么场景、谁会受益。
+      label: 价值 / Value / Nutzen
+      description: 这个功能带来什么收益？What value does it bring? Welchen Nutzen bringt es?
       placeholder: 例如：每天节省 10 分钟，重度用户收益最大
     validations:
       required: true
@@ -49,7 +59,7 @@ body:
   - type: textarea
     id: alternatives
     attributes:
-      label: 你试过的替代方案（可选）
+      label: 替代方案（可选）/ Alternatives (optional) / Alternativen (optional)
       placeholder: 例如：目前只能手动整理或借助其他工具
     validations:
       required: false
@@ -57,8 +67,8 @@ body:
   - type: textarea
     id: references
     attributes:
-      label: 参考资料（可选）
-      description: 可附截图、录屏、草图或其他应用示例链接。
+      label: 参考资料（可选）/ References (optional) / Referenzen (optional)
+      description: 可附截图、录屏、草图或其他链接。Screenshots, mockups, links are welcome.
       placeholder: 粘贴链接或说明
     validations:
       required: false
