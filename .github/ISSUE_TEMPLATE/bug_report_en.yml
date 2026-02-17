@@ -1,0 +1,110 @@
+name: "[EN] Bug Report"
+description: Report a bug with clear steps so we can reproduce and fix it faster
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please fill in the key details below.
+        Missing details may delay troubleshooting.
+
+  - type: checkboxes
+    id: precheck
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and this is not a duplicate
+          required: true
+
+  - type: textarea
+    id: bug_summary
+    attributes:
+      label: Bug summary
+      description: Describe the bug in one clear sentence.
+      placeholder: e.g. Deck crashes when I click history after launch
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce_steps
+    attributes:
+      label: Steps to reproduce
+      description: List steps in order so we can reproduce it.
+      placeholder: |
+        1. Open Deck
+        2. Click ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual_result
+    attributes:
+      label: Actual result
+      placeholder: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_result
+    attributes:
+      label: Expected result
+      placeholder: What should happen?
+    validations:
+      required: true
+
+  - type: input
+    id: deck_version
+    attributes:
+      label: Deck version
+      placeholder: e.g. 1.2.3
+    validations:
+      required: true
+
+  - type: input
+    id: macos_version
+    attributes:
+      label: macOS version
+      placeholder: e.g. macOS 15.3
+    validations:
+      required: true
+
+  - type: dropdown
+    id: chip
+    attributes:
+      label: Chip type
+      options:
+        - Apple Silicon
+        - Intel
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: install_method
+    attributes:
+      label: Installation method (select all that apply)
+      options:
+        - label: Installed from official website
+        - label: Installed from GitHub
+        - label: Installed via in-app auto update
+        - label: Other
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots (optional)
+      description: You can drag images here.
+      placeholder: Optional
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: You can paste logs from Console.app filtered by "Deck".
+      placeholder: Optional
+    validations:
+      required: false

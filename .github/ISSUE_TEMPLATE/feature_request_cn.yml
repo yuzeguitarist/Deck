@@ -1,0 +1,61 @@
+name: "[CN] 功能建议（中国大陆）"
+description: 提需求请写清问题、方案和价值
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        尽量写具体一点：现在有什么问题，你希望怎么改。
+
+  - type: checkboxes
+    id: precheck
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有功能建议，确认不是重复需求
+          required: true
+
+  - type: textarea
+    id: pain_point
+    attributes:
+      label: 当前问题
+      description: 你现在遇到的痛点是什么？
+      placeholder: 例如：每天都要手动整理剪贴板历史，效率很低
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: 期望方案
+      description: 你希望 Deck 新增或修改什么？
+      placeholder: 例如：支持按应用分组显示历史记录
+    validations:
+      required: true
+
+  - type: textarea
+    id: value
+    attributes:
+      label: 功能价值
+      description: 这个功能能带来什么收益？
+      placeholder: 例如：每天节省 10 分钟，重度用户收益明显
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 替代方案（可选）
+      placeholder: 可留空
+    validations:
+      required: false
+
+  - type: textarea
+    id: references
+    attributes:
+      label: 参考资料（可选）
+      description: 可附截图、录屏、草图或链接。
+      placeholder: 可留空
+    validations:
+      required: false

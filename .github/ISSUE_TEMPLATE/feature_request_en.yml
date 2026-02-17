@@ -1,0 +1,62 @@
+name: "[EN] Feature Request"
+description: Suggest a feature with problem, solution, and value
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please keep it short and concrete.
+        Tell us what problem you have and what you want.
+
+  - type: checkboxes
+    id: precheck
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing feature requests and this is not a duplicate
+          required: true
+
+  - type: textarea
+    id: pain_point
+    attributes:
+      label: Current problem
+      description: What is painful in your current workflow?
+      placeholder: e.g. I need to manually regroup clipboard history every day
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solution
+      description: What do you want Deck to add or change?
+      placeholder: e.g. Add app-based grouping in history list
+    validations:
+      required: true
+
+  - type: textarea
+    id: value
+    attributes:
+      label: Value
+      description: Why is this useful? Who benefits?
+      placeholder: e.g. Saves 10 minutes daily for heavy users
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives tried (optional)
+      placeholder: Optional
+    validations:
+      required: false
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References (optional)
+      description: Screenshots, mockups, videos, or links.
+      placeholder: Optional
+    validations:
+      required: false

@@ -179,8 +179,8 @@ Questions or licensing inquiries → yuzeguitar@gmail.com
 
 ## Support
 
-- [Report a Bug](https://github.com/yuzeguitarist/Deck/issues/new?template=bug_report.yml)
-- [Request a Feature](https://github.com/yuzeguitarist/Deck/issues/new?template=feature_request.yml)
+- [Report a Bug](https://github.com/yuzeguitarist/Deck/issues/new?template=bug_report_en.yml)
+- [Request a Feature](https://github.com/yuzeguitarist/Deck/issues/new?template=feature_request_en.yml)
 - [Discussions](https://github.com/yuzeguitarist/Deck/discussions)
 
 ---
@@ -339,8 +339,8 @@ Questions or licensing inquiries → yuzeguitar@gmail.com
 
 ## 支持
 
-- [报告 Bug](https://github.com/yuzeguitarist/Deck/issues/new?template=bug_report.yml)
-- [功能建议](https://github.com/yuzeguitarist/Deck/issues/new?template=feature_request.yml)
+- [报告 Bug](https://github.com/yuzeguitarist/Deck/issues/new?template=bug_report_cn.yml)
+- [功能建议](https://github.com/yuzeguitarist/Deck/issues/new?template=feature_request_cn.yml)
 - [讨论区](https://github.com/yuzeguitarist/Deck/discussions)
 
 ---

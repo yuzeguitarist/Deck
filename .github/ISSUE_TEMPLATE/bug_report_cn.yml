@@ -1,0 +1,109 @@
+name: "[CN] Bug 反馈（中国大陆）"
+description: 提交 Bug 时请写清复现步骤，方便快速定位
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请尽量把关键信息写完整，信息越清楚，处理越快。
+
+  - type: checkboxes
+    id: precheck
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issue，确认不是重复问题
+          required: true
+
+  - type: textarea
+    id: bug_summary
+    attributes:
+      label: 问题描述
+      description: 用一句话说明你遇到的问题。
+      placeholder: 例如：启动后点击历史列表会闪退
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce_steps
+    attributes:
+      label: 复现步骤
+      description: 按顺序写步骤，确保可以稳定复现。
+      placeholder: |
+        1. 打开 Deck
+        2. 点击...
+        3. 出现...
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual_result
+    attributes:
+      label: 实际结果
+      placeholder: 实际发生了什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_result
+    attributes:
+      label: 预期结果
+      placeholder: 你希望发生什么？
+    validations:
+      required: true
+
+  - type: input
+    id: deck_version
+    attributes:
+      label: Deck 版本
+      placeholder: 例如：1.2.3
+    validations:
+      required: true
+
+  - type: input
+    id: macos_version
+    attributes:
+      label: macOS 版本
+      placeholder: 例如：macOS 15.3
+    validations:
+      required: true
+
+  - type: dropdown
+    id: chip
+    attributes:
+      label: 芯片类型
+      options:
+        - Apple Silicon
+        - Intel
+        - 其他
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: install_method
+    attributes:
+      label: 安装方式（可多选）
+      options:
+        - label: 通过官网安装
+        - label: 通过 GitHub 安装
+        - label: 通过软件内自动更新安装
+        - label: 其他
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图（可选）
+      description: 可以直接拖拽图片上传。
+      placeholder: 可留空
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志（可选）
+      description: 可在 Console.app 过滤 "Deck" 后粘贴。
+      placeholder: 可留空
+    validations:
+      required: false
