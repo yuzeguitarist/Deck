@@ -732,6 +732,9 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     /// 持久化活跃 vec 表映射（跨重启保持恢复后的读写目标）
     private let vecActiveTablesDefaultsKey = "com.deck.vec.activeTables.v2"
 
+    /// 无法立即清理的旧 vec 表（避免每次恢复都重复尝试）
+    private var vecCleanupDeferredTables: Set<String> = []
+
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // MARK: - Error Tracking (错误追踪与恢复)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1183,6 +1186,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             vecBrokenDimensionLogged.removeAll()
             vecActiveTableNames.removeAll()
             vecRecoveryInProgressDimensions.removeAll()
+            vecCleanupDeferredTables.removeAll()
             vecRecoverySequence = 0
             vecIndexEnabled = false
             vecLegacyTableCleaned = false
@@ -1421,6 +1425,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         vecBrokenDimensions.removeAll()
         vecBrokenDimensionLogged.removeAll()
         vecRecoveryInProgressDimensions.removeAll()
+        vecCleanupDeferredTables.removeAll()
         vecRecoverySequence = 0
         loadPersistedVecActiveTables()
         db = try Connection(dbPath)
@@ -1693,6 +1698,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         guard !tables.isEmpty else { return }
         let defaultName = vecDefaultTableName(for: dimension)
         for name in tables where name != activeTableName {
+            guard !vecCleanupDeferredTables.contains(name) else { continue }
             var triggerNames = [vecTriggerName(for: name)]
             if name == defaultName {
                 triggerNames.append(vecLegacyTriggerName(for: dimension))
@@ -1704,11 +1710,65 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                     log.debug("Failed to drop vec trigger \(triggerName): \(error.localizedDescription)")
                 }
             }
-            do {
-                try db.run("DROP TABLE IF EXISTS \(name)")
+            if dropVecTableWithShadowCleanup(name, db: db) {
+                vecCleanupDeferredTables.remove(name)
                 log.info("Dropped obsolete vec table \(name)")
+            } else {
+                if vecCleanupDeferredTables.insert(name).inserted {
+                    log.warn("Deferred obsolete vec table cleanup for \(name); will retry after future reinitialize")
+                }
+            }
+        }
+    }
+
+    private func listVecShadowTables(for tableName: String, db: Connection) -> [String] {
+        let pattern = "\(tableName)_%"
+        do {
+            let sql = """
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND name LIKE ?
+                ORDER BY name DESC
+            """
+            let stmt = try db.prepare(sql).bind(pattern)
+            var names: [String] = []
+            while let row = try stmt.failableNext() {
+                if let name = row[0] as? String {
+                    names.append(name)
+                }
+            }
+            return names
+        } catch {
+            return []
+        }
+    }
+
+    @discardableResult
+    private func dropVecTableWithShadowCleanup(_ tableName: String, db: Connection) -> Bool {
+        do {
+            try db.run("DROP TABLE IF EXISTS \(tableName)")
+            return true
+        } catch {
+            let merged = "\(error.localizedDescription) \(String(reflecting: error))".lowercased()
+            guard merged.contains("shadow") || merged.contains("may not be dropped") else {
+                log.debug("Failed to drop vec table \(tableName): \(error.localizedDescription)")
+                return false
+            }
+
+            let shadowTables = listVecShadowTables(for: tableName, db: db)
+            for shadowName in shadowTables {
+                do {
+                    try db.run("DROP TABLE IF EXISTS \(shadowName)")
+                } catch {
+                    log.debug("Failed to drop vec shadow table \(shadowName): \(error.localizedDescription)")
+                }
+            }
+
+            do {
+                try db.run("DROP TABLE IF EXISTS \(tableName)")
+                return true
             } catch {
-                log.debug("Failed to drop obsolete vec table \(name): \(error.localizedDescription)")
+                log.debug("Failed to drop vec table \(tableName) after shadow cleanup: \(error.localizedDescription)")
+                return false
             }
         }
     }
@@ -1756,6 +1816,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             vecBrokenDimensions.removeAll()
             vecBrokenDimensionLogged.removeAll()
             vecRecoveryInProgressDimensions.removeAll()
+            vecCleanupDeferredTables.removeAll()
             vecRecoverySequence = 0
             vecActiveTableNames.removeAll()
             persistVecActiveTables()
@@ -1781,14 +1842,17 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         let merged = "\(nsError.localizedDescription) \(String(reflecting: error))".lowercased()
         return merged.contains("sqlite-vec") ||
                merged.contains("vec0") ||
-               merged.contains("rowids get chunk position")
+               merged.contains("rowids get chunk position") ||
+               merged.contains("could not fetch vector data") ||
+               merged.contains("opening blob failed") ||
+               merged.contains("vector blob")
     }
 
     private func isVecDimensionUsable(_ dimension: Int) -> Bool {
         guard dimension > 0 else { return false }
         guard !vecBrokenDimensions.contains(dimension) else {
             if vecBrokenDimensionLogged.insert(dimension).inserted {
-                log.warn("Vec dimension \(dimension) disabled due to previous rebuild failure; skip vec index/search until next reinitialize")
+                log.warn("Vec dimension \(dimension) temporarily disabled; vec index/search will use fallback until background recovery completes")
             }
             return false
         }
