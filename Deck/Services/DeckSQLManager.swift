@@ -1654,7 +1654,11 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             guard let db = db else { return [] }
             let sql = """
                 SELECT name FROM sqlite_master
-                WHERE type='table' AND name LIKE ?
+                WHERE type='table'
+                  AND name LIKE ?
+                  AND sql IS NOT NULL
+                  AND sql LIKE 'CREATE VIRTUAL TABLE%'
+                  AND instr(lower(sql), 'using vec0') > 0
             """
             let pattern = "\(vecTableBaseName)%"
             let stmt = try db.prepare(sql).bind(pattern)
@@ -1675,7 +1679,11 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         do {
             let sql = """
                 SELECT name FROM sqlite_master
-                WHERE type='table' AND (name = ? OR name LIKE ?)
+                WHERE type='table'
+                  AND (name = ? OR name LIKE ?)
+                  AND sql IS NOT NULL
+                  AND sql LIKE 'CREATE VIRTUAL TABLE%'
+                  AND instr(lower(sql), 'using vec0') > 0
                 ORDER BY name
             """
             let stmt = try db.prepare(sql).bind(defaultName, recoveryPattern)
@@ -3457,16 +3465,17 @@ extension DeckSQLManager {
         // Serialize outside dbQueue to avoid blocking DB operations on CPU work.
         let payload = vectorToJSONString(normalized)
 
-        let success = withDB {
-            guard vecIndexEnabled, !DeckUserDefaults.securityModeEnabled else { return false }
-            guard let db = self.db else { return false }
-            guard self.isVecDimensionUsable(dimension) else { return false }
+        let outcome = withDB { () -> (succeeded: Bool, shouldLogFailure: Bool) in
+            guard vecIndexEnabled, !DeckUserDefaults.securityModeEnabled else { return (false, false) }
+            guard let db = self.db else { return (false, false) }
+            guard self.isVecDimensionUsable(dimension) else { return (false, false) }
             ensureVecTable(dimension: dimension)
             guard vecReadyDimensions.contains(dimension) else {
                 if vecMissingDimensionLogged.insert(dimension).inserted {
                     log.debug("Vec table not ready for dimension \(dimension); skipping updates")
                 }
-                return false
+                let shouldLogFailure = !self.vecBrokenDimensions.contains(dimension)
+                return (false, shouldLogFailure)
             }
 
             var tableName = self.resolveVecActiveTableName(dimension: dimension, db: db)
@@ -3484,20 +3493,21 @@ extension DeckSQLManager {
                 if resolvedTableName != tableName {
                     do {
                         _ = try upsertRow(resolvedTableName)
-                        return true
+                        return (true, false)
                     } catch {
                         tableName = resolvedTableName
                     }
                 }
                 if self.isVecInternalSQLiteError(error) {
                     let rebuilt = self.rebuildVecTable(dimension: dimension, db: db, reason: "vec upsert internal error")
-                    guard rebuilt else { return false }
+                    guard rebuilt else { return (false, false) }
                     do {
                         _ = try upsertRow(tableName)
-                        return true
+                        return (true, false)
                     } catch {
                         log.debug("Vec upsert still failed after rebuild: \(error.localizedDescription)")
-                        return false
+                        let shouldLogFailure = !self.vecBrokenDimensions.contains(dimension)
+                        return (false, shouldLogFailure)
                     }
                 }
                 do {
@@ -3509,16 +3519,16 @@ extension DeckSQLManager {
                     )
                 } catch {
                     log.debug("Vec upsert failed on table \(tableName): \(error.localizedDescription)")
-                    return false
+                    let shouldLogFailure = !self.vecBrokenDimensions.contains(dimension)
+                    return (false, shouldLogFailure)
                 }
             }
-            return true
+            return (true, false)
         }
 
-        let succeeded = (success == true)
+        let succeeded = (outcome?.succeeded == true)
         if !succeeded {
-            // If dimension has been fused off, failure is expected and should stay quiet.
-            let shouldLog = syncOnDBQueue { !vecBrokenDimensions.contains(dimension) }
+            let shouldLog = outcome?.shouldLogFailure ?? false
             if shouldLog {
                 log.debug("Vec index update failed for id=\(id), dim=\(dimension)")
             }
