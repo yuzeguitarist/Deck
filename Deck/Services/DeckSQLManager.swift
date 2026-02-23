@@ -208,7 +208,7 @@
 
 import AppKit
 import Foundation
-import SQLite
+@preconcurrency import SQLite
 import SQLite3
 import Darwin
 import Accelerate
@@ -236,6 +236,9 @@ enum Col {
 // MARK: - Maintenance helpers (storage cleanup / rollback snapshot)
 
 extension DeckSQLManager {
+    private struct UnsafeRowBatch: @unchecked Sendable {
+        let rows: [Row]
+    }
 
     struct PageInfo: Sendable {
         let pageCount: Int64
@@ -4743,14 +4746,15 @@ extension DeckSQLManager {
     func mapRowsToClipboardItems(_ rows: [Row], loadFullData: Bool = false) async -> [ClipboardItem] {
         guard !rows.isEmpty else { return [] }
         guard !Task.isCancelled else { return [] }
+        let rowBatch = UnsafeRowBatch(rows: rows)
 
         return await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            DispatchQueue.global(qos: .userInitiated).async { [weak self, rowBatch] in
                 guard let self else {
                     continuation.resume(returning: [])
                     return
                 }
-                let items = rows.compactMap { self.rowToClipboardItem($0, loadFullData: loadFullData) }
+                let items = rowBatch.rows.compactMap { self.rowToClipboardItem($0, loadFullData: loadFullData) }
                 continuation.resume(returning: items)
             }
         }
