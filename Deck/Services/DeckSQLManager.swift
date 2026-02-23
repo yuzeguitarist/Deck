@@ -714,6 +714,12 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     /// 已记录缺失维度警告的集合（避免重复日志）
     private var vecMissingDimensionLogged: Set<Int> = []
 
+    /// 已判定不可用的向量维度（当前会话内熔断，避免重复 rebuild 风暴）
+    private var vecBrokenDimensions: Set<Int> = []
+
+    /// 已记录不可用维度警告的集合（避免重复日志）
+    private var vecBrokenDimensionLogged: Set<Int> = []
+
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // MARK: - Error Tracking (错误追踪与恢复)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1161,6 +1167,8 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             dbPathLock.unlock()
             vecReadyDimensions.removeAll()
             vecMissingDimensionLogged.removeAll()
+            vecBrokenDimensions.removeAll()
+            vecBrokenDimensionLogged.removeAll()
             vecIndexEnabled = false
             vecLegacyTableCleaned = false
             ftsUsesTrigram = false
@@ -1395,6 +1403,8 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         vecReadyDimensions.removeAll()
         vecLegacyTableCleaned = false
         vecMissingDimensionLogged.removeAll()
+        vecBrokenDimensions.removeAll()
+        vecBrokenDimensionLogged.removeAll()
         db = try Connection(dbPath)
         db?.busyTimeout = 5.0
         // Cache the opened db path so validity checks don't resolve security-scoped bookmarks on every query.
@@ -1601,6 +1611,8 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 }
             }
             vecReadyDimensions.removeAll()
+            vecBrokenDimensions.removeAll()
+            vecBrokenDimensionLogged.removeAll()
         }
     }
 
@@ -1610,9 +1622,71 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         return Int(tableName.dropFirst(prefix.count))
     }
 
+    private func isVecInternalSQLiteError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        let merged = "\(nsError.localizedDescription) \(String(reflecting: error))".lowercased()
+        return merged.contains("sqlite-vec") ||
+               merged.contains("vec0") ||
+               merged.contains("rowids get chunk position")
+    }
+
+    private func isVecDimensionUsable(_ dimension: Int) -> Bool {
+        guard dimension > 0 else { return false }
+        guard !vecBrokenDimensions.contains(dimension) else {
+            if vecBrokenDimensionLogged.insert(dimension).inserted {
+                log.warn("Vec dimension \(dimension) disabled due to previous rebuild failure; skip vec index/search until next reinitialize")
+            }
+            return false
+        }
+        return true
+    }
+
+    @discardableResult
+    private func rebuildVecTable(dimension: Int, db: Connection, reason: String) -> Bool {
+        guard dimension > 0 else { return false }
+        guard isVecDimensionUsable(dimension) else { return false }
+
+        let tableName = vecTableName(for: dimension)
+        let triggerName = vecTriggerName(for: dimension)
+
+        do {
+            vecReadyDimensions.remove(dimension)
+            vecMissingDimensionLogged.remove(dimension)
+
+            try db.run("DROP TRIGGER IF EXISTS \(triggerName)")
+            try db.run("DROP TABLE IF EXISTS \(tableName)")
+
+            let sql = """
+                CREATE VIRTUAL TABLE IF NOT EXISTS \(tableName) USING vec0(
+                    embedding float[\(dimension)]
+                )
+            """
+            try db.run(sql)
+            try db.run("""
+                CREATE TRIGGER IF NOT EXISTS \(triggerName)
+                AFTER DELETE ON ClipboardHistory_embedding BEGIN
+                    DELETE FROM \(tableName) WHERE rowid = old.id;
+                END
+            """)
+
+            vecReadyDimensions.insert(dimension)
+            vecBrokenDimensions.remove(dimension)
+            vecBrokenDimensionLogged.remove(dimension)
+            log.warn("Rebuilt vec table \(tableName) due to \(reason)")
+            return true
+        } catch {
+            vecReadyDimensions.remove(dimension)
+            vecBrokenDimensions.insert(dimension)
+            log.error("Failed to rebuild vec table \(tableName): \(error.localizedDescription)")
+            log.debug("Vec rebuild detail (\(tableName)): \(String(reflecting: error))")
+            return false
+        }
+    }
+
     private func ensureVecTable(dimension: Int) {
         syncOnDBQueue {
             guard vecIndexEnabled, dimension > 0 else { return }
+            guard isVecDimensionUsable(dimension) else { return }
             guard let db = db else { return }
             if vecReadyDimensions.contains(dimension) { return }
             let tableName = vecTableName(for: dimension)
@@ -3092,6 +3166,7 @@ extension DeckSQLManager {
         let success = withDB {
             guard vecIndexEnabled, !DeckUserDefaults.securityModeEnabled else { return false }
             guard let db = self.db else { return false }
+            guard self.isVecDimensionUsable(normalized.count) else { return false }
             ensureVecTable(dimension: normalized.count)
             guard vecReadyDimensions.contains(normalized.count) else {
                 if vecMissingDimensionLogged.insert(normalized.count).inserted {
@@ -3101,13 +3176,27 @@ extension DeckSQLManager {
             }
 
             let tableName = vecTableName(for: normalized.count)
-            do {
+            let upsertRow = {
                 try db.run(
                     "INSERT OR REPLACE INTO \(tableName)(rowid, embedding) VALUES (?, ?)",
                     id,
                     payload
                 )
+            }
+            do {
+                try upsertRow()
             } catch {
+                if self.isVecInternalSQLiteError(error) {
+                    let rebuilt = self.rebuildVecTable(dimension: normalized.count, db: db, reason: "vec upsert internal error")
+                    guard rebuilt else { return false }
+                    do {
+                        try upsertRow()
+                        return true
+                    } catch {
+                        log.debug("Vec upsert still failed after rebuild: \(error.localizedDescription)")
+                        return false
+                    }
+                }
                 do {
                     try db.run("DELETE FROM \(tableName) WHERE rowid = ?", id)
                     try db.run(
@@ -3116,7 +3205,8 @@ extension DeckSQLManager {
                         payload
                     )
                 } catch {
-                    throw error
+                    log.debug("Vec upsert failed: \(error.localizedDescription)")
+                    return false
                 }
             }
             return true
@@ -3221,6 +3311,7 @@ extension DeckSQLManager {
         guard !normalized.isEmpty else { return [] }
         let isReady = syncOnDBQueue { () -> Bool in
             guard vecIndexEnabled, !DeckUserDefaults.securityModeEnabled else { return false }
+            guard self.isVecDimensionUsable(normalized.count) else { return false }
             ensureVecTable(dimension: normalized.count)
             guard vecReadyDimensions.contains(normalized.count) else {
                 if vecMissingDimensionLogged.insert(normalized.count).inserted {
@@ -3237,22 +3328,30 @@ extension DeckSQLManager {
         await log.debug("Vec search: dim=\(normalized.count), table=\(tableName), limit=\(limit)")
         let results: [(id: Int64, distance: Double)] = await withDBAsync({ () throws -> [(id: Int64, distance: Double)] in
             guard let db = self.db else { return [] }
-            let sql = """
-                SELECT rowid, distance FROM \(tableName)
-                WHERE embedding MATCH ?
-                ORDER BY distance
-                LIMIT ?
-            """
-            let stmt = try db.prepare(sql).bind(payload, limit)
-            var rows: [(id: Int64, distance: Double)] = []
-            while let row = try stmt.failableNext() {
-                guard let id = self.bindingToInt64(row[0]),
-                      let distance = self.bindingToDouble(row[1]) else {
-                    continue
+            do {
+                let sql = """
+                    SELECT rowid, distance FROM \(tableName)
+                    WHERE embedding MATCH ?
+                    ORDER BY distance
+                    LIMIT ?
+                """
+                let stmt = try db.prepare(sql).bind(payload, limit)
+                var rows: [(id: Int64, distance: Double)] = []
+                while let row = try stmt.failableNext() {
+                    guard let id = self.bindingToInt64(row[0]),
+                          let distance = self.bindingToDouble(row[1]) else {
+                        continue
+                    }
+                    rows.append((id: id, distance: distance))
                 }
-                rows.append((id: id, distance: distance))
+                return rows
+            } catch {
+                if self.isVecInternalSQLiteError(error) {
+                    _ = self.rebuildVecTable(dimension: normalized.count, db: db, reason: "vec search internal error")
+                    return []
+                }
+                throw error
             }
-            return rows
         }) ?? []
         await log.debug("Vec search results: count=\(results.count)")
         return results
