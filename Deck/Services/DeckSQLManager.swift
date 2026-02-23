@@ -1581,17 +1581,23 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         for (dimensionText, tableName) in raw {
             guard let dimension = Int(dimensionText), dimension > 0 else { continue }
             guard !tableName.isEmpty else { continue }
+            let defaultName = vecDefaultTableName(for: dimension)
+            // 默认表是天然回退目标，不需要持久化；只持久化恢复表映射。
+            guard tableName != defaultName else { continue }
             mapped[dimension] = tableName
         }
         vecActiveTableNames = mapped
     }
 
     private func persistVecActiveTables() {
-        guard !vecActiveTableNames.isEmpty else {
+        let persisted = vecActiveTableNames.filter { (dimension, tableName) in
+            !tableName.isEmpty && tableName != vecDefaultTableName(for: dimension)
+        }
+        guard !persisted.isEmpty else {
             UserDefaults.standard.removeObject(forKey: vecActiveTablesDefaultsKey)
             return
         }
-        let raw = Dictionary(uniqueKeysWithValues: vecActiveTableNames.map { (String($0.key), $0.value) })
+        let raw = Dictionary(uniqueKeysWithValues: persisted.map { (String($0.key), $0.value) })
         if let data = try? JSONEncoder().encode(raw) {
             UserDefaults.standard.set(data, forKey: vecActiveTablesDefaultsKey)
         }
@@ -1609,6 +1615,19 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
     private func vecTableName(for dimension: Int) -> String {
         vecActiveTableNames[dimension] ?? vecDefaultTableName(for: dimension)
+    }
+
+    private func setVecActiveTableName(dimension: Int, tableName: String) {
+        guard dimension > 0 else { return }
+        let defaultName = vecDefaultTableName(for: dimension)
+        if tableName == defaultName {
+            guard vecActiveTableNames.removeValue(forKey: dimension) != nil else { return }
+            persistVecActiveTables()
+            return
+        }
+        guard vecActiveTableNames[dimension] != tableName else { return }
+        vecActiveTableNames[dimension] = tableName
+        persistVecActiveTables()
     }
 
     private func vecLegacyTriggerName(for dimension: Int) -> String {
@@ -1674,22 +1693,32 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
     private func resolveVecActiveTableName(dimension: Int, db: Connection) -> String {
         let defaultName = vecDefaultTableName(for: dimension)
+        let recoveryPrefix = "\(vecTableBaseName)_recovery_\(dimension)_"
+        let tables = listVecTables(for: dimension, db: db)
+        let latestRecovery = tables.filter { $0.hasPrefix(recoveryPrefix) }.sorted().last
 
         if let active = vecActiveTableNames[dimension] {
             if vecTableExists(active, db: db) {
+                if active.hasPrefix(recoveryPrefix) {
+                    return active
+                }
+                if let latestRecovery {
+                    if latestRecovery != active {
+                        setVecActiveTableName(dimension: dimension, tableName: latestRecovery)
+                    }
+                    return latestRecovery
+                }
                 return active
             }
             vecActiveTableNames.removeValue(forKey: dimension)
             persistVecActiveTables()
         }
 
-        let tables = listVecTables(for: dimension, db: db)
-        let recoveryPrefix = "\(vecTableBaseName)_recovery_\(dimension)_"
-        if let latestRecovery = tables.filter({ $0.hasPrefix(recoveryPrefix) }).sorted().last {
-            vecActiveTableNames[dimension] = latestRecovery
-            persistVecActiveTables()
+        if let latestRecovery {
+            setVecActiveTableName(dimension: dimension, tableName: latestRecovery)
             return latestRecovery
         }
+        setVecActiveTableName(dimension: dimension, tableName: defaultName)
         return defaultName
     }
 
@@ -1721,27 +1750,6 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }
     }
 
-    private func listVecShadowTables(for tableName: String, db: Connection) -> [String] {
-        let pattern = "\(tableName)_%"
-        do {
-            let sql = """
-                SELECT name FROM sqlite_master
-                WHERE type='table' AND name LIKE ?
-                ORDER BY name DESC
-            """
-            let stmt = try db.prepare(sql).bind(pattern)
-            var names: [String] = []
-            while let row = try stmt.failableNext() {
-                if let name = row[0] as? String {
-                    names.append(name)
-                }
-            }
-            return names
-        } catch {
-            return []
-        }
-    }
-
     @discardableResult
     private func dropVecTableWithShadowCleanup(_ tableName: String, db: Connection) -> Bool {
         do {
@@ -1749,27 +1757,13 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             return true
         } catch {
             let merged = "\(error.localizedDescription) \(String(reflecting: error))".lowercased()
-            guard merged.contains("shadow") || merged.contains("may not be dropped") else {
-                log.debug("Failed to drop vec table \(tableName): \(error.localizedDescription)")
+            if merged.contains("shadow") || merged.contains("may not be dropped") {
+                // sqlite-vec 的 shadow 表不可直接 drop，延后到后续重启再清理即可。
+                log.debug("Vec table \(tableName) cleanup deferred due to shadow dependency: \(error.localizedDescription)")
                 return false
             }
-
-            let shadowTables = listVecShadowTables(for: tableName, db: db)
-            for shadowName in shadowTables {
-                do {
-                    try db.run("DROP TABLE IF EXISTS \(shadowName)")
-                } catch {
-                    log.debug("Failed to drop vec shadow table \(shadowName): \(error.localizedDescription)")
-                }
-            }
-
-            do {
-                try db.run("DROP TABLE IF EXISTS \(tableName)")
-                return true
-            } catch {
-                log.debug("Failed to drop vec table \(tableName) after shadow cleanup: \(error.localizedDescription)")
-                return false
-            }
+            log.debug("Failed to drop vec table \(tableName): \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -1939,8 +1933,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 END
             """)
 
-            self.vecActiveTableNames[dimension] = recoveryTableName
-            self.persistVecActiveTables()
+            self.setVecActiveTableName(dimension: dimension, tableName: recoveryTableName)
             self.vecReadyDimensions.insert(dimension)
             self.vecBrokenDimensions.remove(dimension)
             self.vecBrokenDimensionLogged.remove(dimension)
@@ -1991,8 +1984,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                         DELETE FROM \(tableName) WHERE rowid = old.id;
                     END
                 """)
-                vecActiveTableNames[dimension] = tableName
-                persistVecActiveTables()
+                setVecActiveTableName(dimension: dimension, tableName: tableName)
                 vecReadyDimensions.insert(dimension)
             } catch {
                 log.debug("Failed to create vec table: \(error.localizedDescription)")
@@ -3477,22 +3469,31 @@ extension DeckSQLManager {
                 return false
             }
 
-            let tableName = vecTableName(for: dimension)
-            let upsertRow = {
+            var tableName = self.resolveVecActiveTableName(dimension: dimension, db: db)
+            let upsertRow = { (targetTableName: String) in
                 try db.run(
-                    "INSERT OR REPLACE INTO \(tableName)(rowid, embedding) VALUES (?, ?)",
+                    "INSERT OR REPLACE INTO \(targetTableName)(rowid, embedding) VALUES (?, ?)",
                     id,
                     payload
                 )
             }
             do {
-                _ = try upsertRow()
+                _ = try upsertRow(tableName)
             } catch {
+                let resolvedTableName = self.resolveVecActiveTableName(dimension: dimension, db: db)
+                if resolvedTableName != tableName {
+                    do {
+                        _ = try upsertRow(resolvedTableName)
+                        return true
+                    } catch {
+                        tableName = resolvedTableName
+                    }
+                }
                 if self.isVecInternalSQLiteError(error) {
                     let rebuilt = self.rebuildVecTable(dimension: dimension, db: db, reason: "vec upsert internal error")
                     guard rebuilt else { return false }
                     do {
-                        _ = try upsertRow()
+                        _ = try upsertRow(tableName)
                         return true
                     } catch {
                         log.debug("Vec upsert still failed after rebuild: \(error.localizedDescription)")
@@ -3507,7 +3508,7 @@ extension DeckSQLManager {
                         payload
                     )
                 } catch {
-                    log.debug("Vec upsert failed: \(error.localizedDescription)")
+                    log.debug("Vec upsert failed on table \(tableName): \(error.localizedDescription)")
                     return false
                 }
             }
@@ -3631,11 +3632,11 @@ extension DeckSQLManager {
         }
         guard isReady else { return [] }
 
-        let tableName = vecTableName(for: normalized.count)
         let payload = vectorToJSONString(normalized)
-        await log.debug("Vec search: dim=\(normalized.count), table=\(tableName), limit=\(limit)")
+        await log.debug("Vec search: dim=\(normalized.count), limit=\(limit)")
         let results: [(id: Int64, distance: Double)] = await withDBAsync({ () throws -> [(id: Int64, distance: Double)] in
             guard let db = self.db else { return [] }
+            let tableName = self.resolveVecActiveTableName(dimension: normalized.count, db: db)
             do {
                 let sql = """
                     SELECT rowid, distance FROM \(tableName)
