@@ -720,6 +720,18 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     /// 已记录不可用维度警告的集合（避免重复日志）
     private var vecBrokenDimensionLogged: Set<Int> = []
 
+    /// 当前维度对应的活跃 vec 表名（支持恢复后切换到新表名）
+    private var vecActiveTableNames: [Int: String] = [:]
+
+    /// 正在进行恢复回填的维度集合（防止重复恢复任务）
+    private var vecRecoveryInProgressDimensions: Set<Int> = []
+
+    /// 恢复表序号（用于生成唯一表名）
+    private var vecRecoverySequence: Int64 = 0
+
+    /// 持久化活跃 vec 表映射（跨重启保持恢复后的读写目标）
+    private let vecActiveTablesDefaultsKey = "com.deck.vec.activeTables.v2"
+
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // MARK: - Error Tracking (错误追踪与恢复)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1169,6 +1181,9 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             vecMissingDimensionLogged.removeAll()
             vecBrokenDimensions.removeAll()
             vecBrokenDimensionLogged.removeAll()
+            vecActiveTableNames.removeAll()
+            vecRecoveryInProgressDimensions.removeAll()
+            vecRecoverySequence = 0
             vecIndexEnabled = false
             vecLegacyTableCleaned = false
             ftsUsesTrigram = false
@@ -1405,6 +1420,9 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         vecMissingDimensionLogged.removeAll()
         vecBrokenDimensions.removeAll()
         vecBrokenDimensionLogged.removeAll()
+        vecRecoveryInProgressDimensions.removeAll()
+        vecRecoverySequence = 0
+        loadPersistedVecActiveTables()
         db = try Connection(dbPath)
         db?.busyTimeout = 5.0
         // Cache the opened db path so validity checks don't resolve security-scoped bookmarks on every query.
@@ -1548,12 +1566,63 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         return result
     }
 
-    private func vecTableName(for dimension: Int) -> String {
+    private func loadPersistedVecActiveTables() {
+        guard let data = UserDefaults.standard.data(forKey: vecActiveTablesDefaultsKey),
+              let raw = try? JSONDecoder().decode([String: String].self, from: data) else {
+            vecActiveTableNames = [:]
+            return
+        }
+        var mapped: [Int: String] = [:]
+        for (dimensionText, tableName) in raw {
+            guard let dimension = Int(dimensionText), dimension > 0 else { continue }
+            guard !tableName.isEmpty else { continue }
+            mapped[dimension] = tableName
+        }
+        vecActiveTableNames = mapped
+    }
+
+    private func persistVecActiveTables() {
+        guard !vecActiveTableNames.isEmpty else {
+            UserDefaults.standard.removeObject(forKey: vecActiveTablesDefaultsKey)
+            return
+        }
+        let raw = Dictionary(uniqueKeysWithValues: vecActiveTableNames.map { (String($0.key), $0.value) })
+        if let data = try? JSONEncoder().encode(raw) {
+            UserDefaults.standard.set(data, forKey: vecActiveTablesDefaultsKey)
+        }
+    }
+
+    private func vecDefaultTableName(for dimension: Int) -> String {
         "\(vecTableBaseName)_\(dimension)"
     }
 
-    private func vecTriggerName(for dimension: Int) -> String {
+    private func vecRecoveryTableName(for dimension: Int) -> String {
+        vecRecoverySequence += 1
+        let ts = Int(Date().timeIntervalSince1970)
+        return "\(vecTableBaseName)_recovery_\(dimension)_\(ts)_\(vecRecoverySequence)"
+    }
+
+    private func vecTableName(for dimension: Int) -> String {
+        vecActiveTableNames[dimension] ?? vecDefaultTableName(for: dimension)
+    }
+
+    private func vecLegacyTriggerName(for dimension: Int) -> String {
         "\(vecTableBaseName)_ad_\(dimension)"
+    }
+
+    private func vecTriggerName(for tableName: String) -> String {
+        "\(tableName)_ad"
+    }
+
+    private func vecTriggerName(for tableName: String, dimension: Int) -> String {
+        tableName == vecDefaultTableName(for: dimension)
+            ? vecLegacyTriggerName(for: dimension)
+            : vecTriggerName(for: tableName)
+    }
+
+    private func vecTableExists(_ tableName: String, db: Connection) -> Bool {
+        let sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=? LIMIT 1"
+        return (try? db.scalar(sql, tableName) as? String) != nil
     }
 
     private func listVecTables() -> [String] {
@@ -1573,6 +1642,75 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             }
             return names
         }) ?? []
+    }
+
+    private func listVecTables(for dimension: Int, db: Connection) -> [String] {
+        guard dimension > 0 else { return [] }
+        let defaultName = vecDefaultTableName(for: dimension)
+        let recoveryPattern = "\(vecTableBaseName)_recovery_\(dimension)_%"
+        do {
+            let sql = """
+                SELECT name FROM sqlite_master
+                WHERE type='table' AND (name = ? OR name LIKE ?)
+                ORDER BY name
+            """
+            let stmt = try db.prepare(sql).bind(defaultName, recoveryPattern)
+            var names: [String] = []
+            while let row = try stmt.failableNext() {
+                if let name = row[0] as? String {
+                    names.append(name)
+                }
+            }
+            return names
+        } catch {
+            return []
+        }
+    }
+
+    private func resolveVecActiveTableName(dimension: Int, db: Connection) -> String {
+        let defaultName = vecDefaultTableName(for: dimension)
+
+        if let active = vecActiveTableNames[dimension] {
+            if vecTableExists(active, db: db) {
+                return active
+            }
+            vecActiveTableNames.removeValue(forKey: dimension)
+            persistVecActiveTables()
+        }
+
+        let tables = listVecTables(for: dimension, db: db)
+        let recoveryPrefix = "\(vecTableBaseName)_recovery_\(dimension)_"
+        if let latestRecovery = tables.filter({ $0.hasPrefix(recoveryPrefix) }).sorted().last {
+            vecActiveTableNames[dimension] = latestRecovery
+            persistVecActiveTables()
+            return latestRecovery
+        }
+        return defaultName
+    }
+
+    private func cleanupObsoleteVecTables(dimension: Int, activeTableName: String, db: Connection) {
+        let tables = listVecTables(for: dimension, db: db)
+        guard !tables.isEmpty else { return }
+        let defaultName = vecDefaultTableName(for: dimension)
+        for name in tables where name != activeTableName {
+            var triggerNames = [vecTriggerName(for: name)]
+            if name == defaultName {
+                triggerNames.append(vecLegacyTriggerName(for: dimension))
+            }
+            for triggerName in Set(triggerNames) {
+                do {
+                    try db.run("DROP TRIGGER IF EXISTS \(triggerName)")
+                } catch {
+                    log.debug("Failed to drop vec trigger \(triggerName): \(error.localizedDescription)")
+                }
+            }
+            do {
+                try db.run("DROP TABLE IF EXISTS \(name)")
+                log.info("Dropped obsolete vec table \(name)")
+            } catch {
+                log.debug("Failed to drop obsolete vec table \(name): \(error.localizedDescription)")
+            }
+        }
     }
 
     private func cleanupLegacyVecTableIfNeeded() {
@@ -1598,14 +1736,18 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         syncOnDBQueue {
             guard let db = db else { return }
             let tables = listVecTables()
-            guard !tables.isEmpty else { return }
             for name in tables {
                 do {
-                    try db.run("DROP TABLE IF EXISTS \(name)")
                     if let dimension = vecDimension(from: name) {
-                        let triggerName = vecTriggerName(for: dimension)
-                        try db.run("DROP TRIGGER IF EXISTS \(triggerName)")
+                        var triggerNames = [vecTriggerName(for: name)]
+                        if name == vecDefaultTableName(for: dimension) {
+                            triggerNames.append(vecLegacyTriggerName(for: dimension))
+                        }
+                        for triggerName in Set(triggerNames) {
+                            try db.run("DROP TRIGGER IF EXISTS \(triggerName)")
+                        }
                     }
+                    try db.run("DROP TABLE IF EXISTS \(name)")
                 } catch {
                     log.debug("Failed to drop vec table \(name): \(error.localizedDescription)")
                 }
@@ -1613,13 +1755,25 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             vecReadyDimensions.removeAll()
             vecBrokenDimensions.removeAll()
             vecBrokenDimensionLogged.removeAll()
+            vecRecoveryInProgressDimensions.removeAll()
+            vecRecoverySequence = 0
+            vecActiveTableNames.removeAll()
+            persistVecActiveTables()
         }
     }
 
     private func vecDimension(from tableName: String) -> Int? {
-        let prefix = "\(vecTableBaseName)_"
-        guard tableName.hasPrefix(prefix) else { return nil }
-        return Int(tableName.dropFirst(prefix.count))
+        let defaultPrefix = "\(vecTableBaseName)_"
+        if tableName.hasPrefix(defaultPrefix),
+           let value = Int(tableName.dropFirst(defaultPrefix.count)) {
+            return value
+        }
+
+        let recoveryPrefix = "\(vecTableBaseName)_recovery_"
+        guard tableName.hasPrefix(recoveryPrefix) else { return nil }
+        let suffix = tableName.dropFirst(recoveryPrefix.count)
+        guard let dimensionPart = suffix.split(separator: "_").first else { return nil }
+        return Int(dimensionPart)
     }
 
     private func isVecInternalSQLiteError(_ error: Error) -> Bool {
@@ -1641,48 +1795,115 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         return true
     }
 
-    @discardableResult
-    private func rebuildVecTable(dimension: Int, db: Connection, reason: String) -> Bool {
-        guard dimension > 0 else { return false }
-        guard isVecDimensionUsable(dimension) else { return false }
+    private func scheduleVecRecoveryBackfill(dimension: Int, db: Connection, reason: String) {
+        guard dimension > 0 else { return }
+        guard !vecRecoveryInProgressDimensions.contains(dimension) else { return }
 
-        let tableName = vecTableName(for: dimension)
-        let triggerName = vecTriggerName(for: dimension)
+        let recoveryTableName = vecRecoveryTableName(for: dimension)
+        let createSQL = """
+            CREATE VIRTUAL TABLE IF NOT EXISTS \(recoveryTableName) USING vec0(
+                embedding float[\(dimension)]
+            )
+        """
 
         do {
+            try db.run(createSQL)
+            vecRecoveryInProgressDimensions.insert(dimension)
             vecReadyDimensions.remove(dimension)
             vecMissingDimensionLogged.remove(dimension)
-
-            try db.run("DROP TRIGGER IF EXISTS \(triggerName)")
-            try db.run("DROP TABLE IF EXISTS \(tableName)")
-
-            let sql = """
-                CREATE VIRTUAL TABLE IF NOT EXISTS \(tableName) USING vec0(
-                    embedding float[\(dimension)]
+            vecBrokenDimensions.insert(dimension)
+            vecBrokenDimensionLogged.remove(dimension)
+            log.warn("Vec recovery started for dim=\(dimension), table=\(recoveryTableName), reason=\(reason)")
+            Task(priority: .background) { [weak self] in
+                await self?.performVecRecoveryBackfill(
+                    dimension: dimension,
+                    recoveryTableName: recoveryTableName,
+                    reason: reason
                 )
+            }
+        } catch {
+            vecBrokenDimensions.insert(dimension)
+            log.error("Failed to create vec recovery table \(recoveryTableName): \(error.localizedDescription)")
+            log.debug("Vec recovery create detail (\(recoveryTableName)): \(String(reflecting: error))")
+        }
+    }
+
+    private func performVecRecoveryBackfill(dimension: Int, recoveryTableName: String, reason: String) async {
+        let indexed: Int? = await withDBAsyncBackground {
+            guard self.vecIndexEnabled, !DeckUserDefaults.securityModeEnabled else { return nil }
+            guard let db = self.db else { return nil }
+            guard self.vecRecoveryInProgressDimensions.contains(dimension) else { return nil }
+            guard self.vecTableExists(recoveryTableName, db: db) else { return nil }
+
+            let rowBytes = dimension * MemoryLayout<Float>.size
+            let selectSQL = """
+                SELECT id, embedding
+                FROM ClipboardHistory_embedding
+                WHERE length(embedding) = ?
+                ORDER BY id DESC
             """
-            try db.run(sql)
+
+            let selectStmt = try db.prepare(selectSQL).bind(rowBytes)
+            var indexed = 0
+            try db.transaction {
+                while let row = try selectStmt.failableNext() {
+                    guard let id = self.bindingToInt64(row[0]),
+                          let rawData = self.bindingToData(row[1]) else {
+                        continue
+                    }
+                    let decoded = DeckUserDefaults.securityModeEnabled ? self.decryptData(rawData) : rawData
+                    guard let vector = self.decodeEmbedding(decoded), vector.count == dimension else {
+                        continue
+                    }
+                    let normalized = self.normalizeVector(vector)
+                    guard !normalized.isEmpty else { continue }
+                    let payload = self.vectorToJSONString(normalized)
+                    try db.run(
+                        "INSERT OR REPLACE INTO \(recoveryTableName)(rowid, embedding) VALUES (?, ?)",
+                        id,
+                        payload
+                    )
+                    indexed += 1
+                }
+            }
+
+            let triggerName = self.vecTriggerName(for: recoveryTableName, dimension: dimension)
             try db.run("""
                 CREATE TRIGGER IF NOT EXISTS \(triggerName)
                 AFTER DELETE ON ClipboardHistory_embedding BEGIN
-                    DELETE FROM \(tableName) WHERE rowid = old.id;
+                    DELETE FROM \(recoveryTableName) WHERE rowid = old.id;
                 END
             """)
 
-            vecReadyDimensions.insert(dimension)
-            vecBrokenDimensions.remove(dimension)
-            vecBrokenDimensionLogged.remove(dimension)
-            log.warn("Rebuilt vec table \(tableName) due to \(reason)")
-            return true
-        } catch {
-            vecReadyDimensions.remove(dimension)
-            vecBrokenDimensions.insert(dimension)
-            log.error("Failed to rebuild vec table \(tableName): \(error.localizedDescription)")
-            log.debug("Vec rebuild detail (\(tableName)): \(String(reflecting: error))")
-            let sqliteDetail = String(cString: sqlite3_errmsg(db.handle))
-            log.debug("Vec rebuild sqlite message (\(tableName)): \(sqliteDetail)")
-            return false
+            self.vecActiveTableNames[dimension] = recoveryTableName
+            self.persistVecActiveTables()
+            self.vecReadyDimensions.insert(dimension)
+            self.vecBrokenDimensions.remove(dimension)
+            self.vecBrokenDimensionLogged.remove(dimension)
+            self.vecMissingDimensionLogged.remove(dimension)
+            self.vecRecoveryInProgressDimensions.remove(dimension)
+            self.cleanupObsoleteVecTables(dimension: dimension, activeTableName: recoveryTableName, db: db)
+            return indexed
+        } ?? nil
+
+        if let indexed {
+            await log.warn("Vec recovery completed for dim=\(dimension), table=\(recoveryTableName), indexed=\(indexed), reason=\(reason)")
+        } else {
+            syncOnDBQueue {
+                vecRecoveryInProgressDimensions.remove(dimension)
+                vecReadyDimensions.remove(dimension)
+                vecBrokenDimensions.insert(dimension)
+            }
+            await log.error("Vec recovery failed for dim=\(dimension), table=\(recoveryTableName)")
         }
+    }
+
+    @discardableResult
+    private func rebuildVecTable(dimension: Int, db: Connection, reason: String) -> Bool {
+        guard dimension > 0 else { return false }
+        scheduleVecRecoveryBackfill(dimension: dimension, db: db, reason: reason)
+        // Recovery is asynchronous; caller should not retry vec write in current call.
+        return false
     }
 
     private func ensureVecTable(dimension: Int) {
@@ -1691,8 +1912,8 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             guard isVecDimensionUsable(dimension) else { return }
             guard let db = db else { return }
             if vecReadyDimensions.contains(dimension) { return }
-            let tableName = vecTableName(for: dimension)
-            let triggerName = vecTriggerName(for: dimension)
+            let tableName = resolveVecActiveTableName(dimension: dimension, db: db)
+            let triggerName = vecTriggerName(for: tableName, dimension: dimension)
             do {
                 let sql = """
                     CREATE VIRTUAL TABLE IF NOT EXISTS \(tableName) USING vec0(
@@ -1706,9 +1927,14 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                         DELETE FROM \(tableName) WHERE rowid = old.id;
                     END
                 """)
+                vecActiveTableNames[dimension] = tableName
+                persistVecActiveTables()
                 vecReadyDimensions.insert(dimension)
             } catch {
                 log.debug("Failed to create vec table: \(error.localizedDescription)")
+                if isVecInternalSQLiteError(error) {
+                    scheduleVecRecoveryBackfill(dimension: dimension, db: db, reason: "ensure vec table internal error")
+                }
             }
         }
     }
