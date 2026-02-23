@@ -2016,11 +2016,13 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         guard let regex = RegexCache.shared.regex(for: pattern) else { return [] }
 
         var matchingIds: [Int64] = []
+        matchingIds.reserveCapacity(limit)
         let batchSize = 500
         // 关键优化：用 keyset pagination 替代 OFFSET 扫描
         var cursor: RowCursor? = nil
         var scanned = 0
-        let maxScan = 5000  // 安全模式下最多扫描 5000 条
+        let dynamicScanFloor = max(limit * 50, 1000)
+        let maxScan = min(5000, dynamicScanFloor)  // 安全模式下最多扫描 5000 条
 
         while matchingIds.count < limit && scanned < maxScan {
             // 支持任务取消
@@ -2068,13 +2070,37 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                     let searchText = decryptString(rawSearchText)
                     let appName = decryptString(rawAppName)
                     let customTitle = rawCustomTitle.map { decryptString($0) } ?? ""
-                    let haystack = [customTitle, searchText, appName]
-                        .filter { !$0.isEmpty }
-                        .joined(separator: "\n")
 
-                    let range = NSRange(haystack.startIndex..., in: haystack)
-                    if regex.firstMatch(in: haystack, range: range) != nil {
-                        matchingIds.append(id)
+                    if !customTitle.isEmpty {
+                        let range = NSRange(customTitle.startIndex..., in: customTitle)
+                        if regex.firstMatch(in: customTitle, range: range) != nil {
+                            matchingIds.append(id)
+                            continue
+                        }
+                    }
+
+                    if !searchText.isEmpty {
+                        let range = NSRange(searchText.startIndex..., in: searchText)
+                        if regex.firstMatch(in: searchText, range: range) != nil {
+                            matchingIds.append(id)
+                            continue
+                        }
+                    }
+
+                    if !appName.isEmpty {
+                        let range = NSRange(appName.startIndex..., in: appName)
+                        if regex.firstMatch(in: appName, range: range) != nil {
+                            matchingIds.append(id)
+                            continue
+                        }
+                    }
+
+                    if customTitle.isEmpty && searchText.isEmpty && appName.isEmpty {
+                        let empty = ""
+                        let range = NSRange(empty.startIndex..., in: empty)
+                        if regex.firstMatch(in: empty, range: range) != nil {
+                            matchingIds.append(id)
+                        }
                     }
                 } catch {
                     continue
@@ -4716,12 +4742,18 @@ extension DeckSQLManager {
 
     func mapRowsToClipboardItems(_ rows: [Row], loadFullData: Bool = false) async -> [ClipboardItem] {
         guard !rows.isEmpty else { return [] }
-        if let items = await withDBAsync({
-            rows.compactMap { self.rowToClipboardItem($0, loadFullData: loadFullData) }
-        }) {
-            return items
+        guard !Task.isCancelled else { return [] }
+
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let self else {
+                    continuation.resume(returning: [])
+                    return
+                }
+                let items = rows.compactMap { self.rowToClipboardItem($0, loadFullData: loadFullData) }
+                continuation.resume(returning: items)
+            }
         }
-        return []
     }
     
     // MARK: - Encryption Migration
