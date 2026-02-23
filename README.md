@@ -129,7 +129,7 @@ More shortcuts and Vim mode are in Settings.
 ## Screenshots
 
 <p align="center">
-  <img src="photos/DeckView2.png" alt="Deck main view" width="720">
+  <img src="photos/DeckView.png" alt="Deck main view" width="720">
 </p>
 <p align="center">
   <img src="photos/DeckSettings.jpg" alt="Deck settings" width="720">
@@ -289,7 +289,7 @@ Questions or licensing inquiries → yuzeguitar@gmail.com
 ## 截图
 
 <p align="center">
-  <img src="photos/DeckView2.png" alt="Deck 主界面" width="720">
+  <img src="photos/DeckView.png" alt="Deck 主界面" width="720">
 </p>
 <p align="center">
   <img src="photos/DeckSettings.jpg" alt="Deck 设置" width="720">
