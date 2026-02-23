@@ -40,7 +40,6 @@ We take security seriously. If you find a security issue in Deck, please report 
 
 - Deck macOS application
 - Data handling and storage mechanisms
-- Authentication and authorization for Pro features
 
 ### Out of Scope
 
@@ -92,27 +91,26 @@ We take security seriously. If you find a security issue in Deck, please report 
 2. **风险评估**：评估影响范围和严重程度
 3. **修复验证**：开发并测试修复方案
 4. **发布修复**：发布包含修复的版本
-5. **后续披露**：修复发布后可公开致谢（如你同意）
+5. **公开披露**：在修复发布后，酌情公开说明并感谢报告者（如其愿意）
 
-### 受理范围
+### 适用范围
 
 - Deck macOS 应用
-- 数据处理与存储机制
-- Pro 功能相关的认证与授权
+- 数据处理和存储机制
 
-### 不受理范围
+### 不在范围
 
 - 社会工程攻击
-- 物理接触类攻击
-- 拒绝服务攻击（DoS）
-- 第三方依赖自身漏洞（请向对应维护方报告）
+- 物理攻击
+- 拒绝服务（DoS）攻击
+- 第三方依赖项的漏洞（请直接联系对应维护者）
 
-## 用户安全建议
+### 用户安全最佳实践
 
-1. 仅从官方渠道下载（GitHub Releases 或官网）。
-2. 安装前校验 SHA256。
-3. 及时更新到最新版本。
-4. 仅授予必要权限。
+1. 仅从官方渠道（GitHub Releases 或官网）下载 Deck。
+2. 安装前验证 SHA256 校验和。
+3. 保持 Deck 为最新版本。
+4. 只授予 Deck 所需的权限。
 
 ---
 
