@@ -3308,6 +3308,13 @@ extension DeckSQLManager {
 // MARK: - Database Operations
 
 extension DeckSQLManager {
+    /// Preserve existing user tag when the new payload is untagged (`-1`).
+    /// This prevents duplicate-copy upserts from silently clearing manual tags.
+    private static func mergedTagId(incoming: Int, existing: Int?) -> Int {
+        guard incoming == -1, let existing, existing != -1 else { return incoming }
+        return existing
+    }
+
     var totalCount: Int {
         return withDB {
             guard let db = self.db, let table = self.table else { return 0 }
@@ -3480,7 +3487,11 @@ extension DeckSQLManager {
                         source_anchor = excluded.source_anchor,
                         search_text = excluded.search_text,
                         content_length = excluded.content_length,
-                        tag_id = excluded.tag_id,
+                        tag_id = CASE
+                            WHEN excluded.tag_id = -1 AND ClipboardHistory.tag_id != -1
+                            THEN ClipboardHistory.tag_id
+                            ELSE excluded.tag_id
+                        END,
                         blob_path = excluded.blob_path,
                         is_temporary = excluded.is_temporary,
                         is_encrypted = excluded.is_encrypted
@@ -3523,6 +3534,8 @@ extension DeckSQLManager {
             // Fallback path: delete duplicates then insert.
             do {
                 let deleteQuery = table.filter(Col.uniqueId == payload.uniqueId)
+                let existingTagId = try db.pluck(deleteQuery.select(Col.tagId))?.get(Col.tagId)
+                let mergedTagId = Self.mergedTagId(incoming: payload.tagId, existing: existingTagId)
                 _ = try db.run(deleteQuery.delete())
 
                 let insert = table.insert(
@@ -3538,7 +3551,7 @@ extension DeckSQLManager {
                     Col.sourceAnchor <- payload.sourceAnchor,
                     Col.searchText <- payload.searchText,
                     Col.length <- payload.contentLength,
-                    Col.tagId <- payload.tagId,
+                    Col.tagId <- mergedTagId,
                     Col.blobPath <- payload.blobPath,
                     Col.isTemporary <- payload.isTemporary,
                     Col.isEncrypted <- payload.isEncrypted
@@ -3582,6 +3595,8 @@ extension DeckSQLManager {
             try db.transaction {
                 for payload in payloads {
                     let deleteQuery = table.filter(Col.uniqueId == payload.uniqueId)
+                    let existingTagId = try db.pluck(deleteQuery.select(Col.tagId))?.get(Col.tagId)
+                    let mergedTagId = Self.mergedTagId(incoming: payload.tagId, existing: existingTagId)
                     deletedTotal += try db.run(deleteQuery.delete())
                     let insert = table.insert(
                         Col.uniqueId <- payload.uniqueId,
@@ -3596,7 +3611,7 @@ extension DeckSQLManager {
                         Col.sourceAnchor <- payload.sourceAnchor,
                         Col.searchText <- payload.searchText,
                         Col.length <- payload.contentLength,
-                        Col.tagId <- payload.tagId,
+                        Col.tagId <- mergedTagId,
                         Col.blobPath <- payload.blobPath,
                         Col.isTemporary <- payload.isTemporary,
                         Col.isEncrypted <- payload.isEncrypted
