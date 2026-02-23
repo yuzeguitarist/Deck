@@ -1679,6 +1679,8 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             vecBrokenDimensions.insert(dimension)
             log.error("Failed to rebuild vec table \(tableName): \(error.localizedDescription)")
             log.debug("Vec rebuild detail (\(tableName)): \(String(reflecting: error))")
+            let sqliteDetail = String(cString: sqlite3_errmsg(db.handle))
+            log.debug("Vec rebuild sqlite message (\(tableName)): \(sqliteDetail)")
             return false
         }
     }
@@ -1768,10 +1770,11 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
         let batchSize = 100
         let maxItems = DeckUserDefaults.securityModeEnabled ? 300 : 1000
-        var processed = 0
+        var attempted = 0
+        var indexed = 0
         var offset = 0
         var dimensionCounts: [Int: Int] = [:]
-        while processed < maxItems {
+        while attempted < maxItems {
             guard !Task.isCancelled else { break }
 
             let rows: [(id: Int64, data: Data)] = syncOnDBBackgroundQueue {
@@ -1812,8 +1815,11 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 let raw = DeckUserDefaults.securityModeEnabled ? decryptData(row.data) : row.data
                 guard let vector = decodeEmbedding(raw) else { continue }
                 dimensionCounts[vector.count, default: 0] += 1
-                updateVecIndex(id: row.id, vector: vector)
-                processed += 1
+                if updateVecIndex(id: row.id, vector: vector) {
+                    indexed += 1
+                }
+                attempted += 1
+                if attempted >= maxItems { break }
             }
 
             offset += rows.count
@@ -1821,14 +1827,14 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
 
-        if processed > 0 {
+        if attempted > 0 {
             let dimensionSummary = dimensionCounts
                 .sorted(by: { $0.key < $1.key })
                 .map { "\($0.key):\($0.value)" }
                 .joined(separator: ", ")
-            await log.info("Vec index backfill completed: \(processed) items processed (dims: [\(dimensionSummary)])")
+            await log.info("Vec index backfill completed: attempted=\(attempted), indexed=\(indexed) (dims: [\(dimensionSummary)])")
         } else {
-            await log.debug("Vec index backfill completed: 0 items processed")
+            await log.debug("Vec index backfill completed: attempted=0, indexed=0")
         }
     }
 
@@ -3152,13 +3158,19 @@ extension DeckSQLManager {
         return "[\(parts.joined(separator: ","))]"
     }
 
-    private func updateVecIndex(id: Int64, vector: [Float]) {
-        guard !vector.isEmpty else { return }
+    @discardableResult
+    private func updateVecIndex(id: Int64, vector: [Float]) -> Bool {
+        guard !vector.isEmpty else { return false }
         let canIndex = syncOnDBQueue { vecIndexEnabled } && !DeckUserDefaults.securityModeEnabled
-        guard canIndex else { return }
+        guard canIndex else { return false }
 
         let normalized = normalizeVector(vector)
-        guard !normalized.isEmpty else { return }
+        guard !normalized.isEmpty else { return false }
+        let dimension = normalized.count
+
+        // Broken dimension should short-circuit early (avoid withDB and failure logs in hot path).
+        let dimensionUsable = syncOnDBQueue { self.isVecDimensionUsable(dimension) }
+        guard dimensionUsable else { return false }
 
         // Serialize outside dbQueue to avoid blocking DB operations on CPU work.
         let payload = vectorToJSONString(normalized)
@@ -3166,16 +3178,16 @@ extension DeckSQLManager {
         let success = withDB {
             guard vecIndexEnabled, !DeckUserDefaults.securityModeEnabled else { return false }
             guard let db = self.db else { return false }
-            guard self.isVecDimensionUsable(normalized.count) else { return false }
-            ensureVecTable(dimension: normalized.count)
-            guard vecReadyDimensions.contains(normalized.count) else {
-                if vecMissingDimensionLogged.insert(normalized.count).inserted {
-                    log.debug("Vec table not ready for dimension \(normalized.count); skipping updates")
+            guard self.isVecDimensionUsable(dimension) else { return false }
+            ensureVecTable(dimension: dimension)
+            guard vecReadyDimensions.contains(dimension) else {
+                if vecMissingDimensionLogged.insert(dimension).inserted {
+                    log.debug("Vec table not ready for dimension \(dimension); skipping updates")
                 }
                 return false
             }
 
-            let tableName = vecTableName(for: normalized.count)
+            let tableName = vecTableName(for: dimension)
             let upsertRow = {
                 try db.run(
                     "INSERT OR REPLACE INTO \(tableName)(rowid, embedding) VALUES (?, ?)",
@@ -3184,13 +3196,13 @@ extension DeckSQLManager {
                 )
             }
             do {
-                try upsertRow()
+                _ = try upsertRow()
             } catch {
                 if self.isVecInternalSQLiteError(error) {
-                    let rebuilt = self.rebuildVecTable(dimension: normalized.count, db: db, reason: "vec upsert internal error")
+                    let rebuilt = self.rebuildVecTable(dimension: dimension, db: db, reason: "vec upsert internal error")
                     guard rebuilt else { return false }
                     do {
-                        try upsertRow()
+                        _ = try upsertRow()
                         return true
                     } catch {
                         log.debug("Vec upsert still failed after rebuild: \(error.localizedDescription)")
@@ -3212,9 +3224,15 @@ extension DeckSQLManager {
             return true
         }
 
-        if success != true {
-            log.debug("Vec index update failed for id=\(id), dim=\(normalized.count)")
+        let succeeded = (success == true)
+        if !succeeded {
+            // If dimension has been fused off, failure is expected and should stay quiet.
+            let shouldLog = syncOnDBQueue { !vecBrokenDimensions.contains(dimension) }
+            if shouldLog {
+                log.debug("Vec index update failed for id=\(id), dim=\(dimension)")
+            }
         }
+        return succeeded
     }
 
     private func storeSemanticEmbedding(id: Int64, textHash: String, vector: [Float]) {
