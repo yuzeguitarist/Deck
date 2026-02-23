@@ -1,3 +1,5 @@
+// Copyright © 2024–2026 Yuze Pan. 保留一切权利。
+
 //
 //  Extensions.swift
 //  Deck
@@ -8,6 +10,16 @@
 import AppKit
 import SwiftUI
 import CryptoKit
+
+// MARK: - Sendable Helpers
+
+struct UncheckedSendable<Value>: @unchecked Sendable {
+    let value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+}
 
 // MARK: - Data Extensions
 
@@ -26,9 +38,9 @@ extension String {
         guard !candidate.isEmpty else { return nil }
 
         // Strip common wrappers like <...>, (...), [...], {...}, quotes.
-        if candidate.count >= 2 {
-            let first = candidate.first!
-            let last = candidate.last!
+        if candidate.count >= 2,
+           let first = candidate.first,
+           let last = candidate.last {
             let pairs: [(Character, Character)] = [("<", ">"), ("(", ")"), ("[", "]"), ("{", "}"), ("\"", "\""), ("'", "'")]
             if pairs.contains(where: { $0.0 == first && $0.1 == last }) {
                 candidate.removeFirst()
@@ -264,17 +276,12 @@ extension NSColor {
 extension Int64 {
     func formattedDate() -> String {
         let date = Date(timeIntervalSince1970: TimeInterval(self))
-        let formatter = DateFormatter()
-        formatter.dateStyle = .short
-        formatter.timeStyle = .short
-        return formatter.string(from: date)
+        return DeckFormatters.shortDateTime().string(from: date)
     }
     
     func relativeDate() -> String {
         let date = Date(timeIntervalSince1970: TimeInterval(self))
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: date, relativeTo: Date())
+        return DeckFormatters.relativeDate().localizedString(for: date, relativeTo: Date())
     }
 }
 
@@ -401,19 +408,32 @@ extension Notification.Name {
 extension NSAttributedString {
     convenience init?(with data: Data?, type: NSPasteboard.PasteboardType) {
         guard let data = data else { return nil }
-        
-        switch type {
-        case .rtf:
-            try? self.init(data: data, options: [.documentType: NSAttributedString.DocumentType.rtf], documentAttributes: nil)
-        case .rtfd, .flatRTFD:
-            try? self.init(data: data, options: [.documentType: NSAttributedString.DocumentType.rtfd], documentAttributes: nil)
-        case .string:
-            if let str = String(data: data, encoding: .utf8) {
+
+        do {
+            switch type {
+            case .rtf:
+                let value = try NSAttributedString(
+                    data: data,
+                    options: [.documentType: NSAttributedString.DocumentType.rtf],
+                    documentAttributes: nil
+                )
+                self.init(attributedString: value)
+            case .rtfd, .flatRTFD:
+                let value = try NSAttributedString(
+                    data: data,
+                    options: [.documentType: NSAttributedString.DocumentType.rtfd],
+                    documentAttributes: nil
+                )
+                self.init(attributedString: value)
+            case .string:
+                guard let str = String(data: data, encoding: .utf8) else {
+                    return nil
+                }
                 self.init(string: str)
-            } else {
+            default:
                 return nil
             }
-        default:
+        } catch {
             return nil
         }
     }

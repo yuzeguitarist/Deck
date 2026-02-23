@@ -1,0 +1,70 @@
+name: Merge main into dev
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (for git)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge main -> dev and push
+        id: do_merge
+        run: |
+          set -euo pipefail
+          git fetch origin main --prune
+
+          if ! git show-ref --verify --quiet refs/remotes/origin/dev; then
+            git checkout -B dev origin/main
+            git push origin dev
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git fetch origin dev --prune
+          git checkout -B dev origin/dev
+
+          if git merge --no-ff --no-edit origin/main; then
+            git push origin dev
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            git merge --abort || true
+          fi
+
+      - name: Open PR if merge failed (likely conflicts)
+        if: steps.do_merge.outputs.merged != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          BRANCH="auto/sync-main-into-dev"
+          git checkout -B "$BRANCH" origin/main
+          git push -f origin "$BRANCH"
+
+          existing=$(gh pr list --state open --base dev --head "$BRANCH" --json number --jq '.[0].number' || true)
+          if [ -z "${existing:-}" ]; then
+            gh pr create \
+              --base dev \
+              --head "$BRANCH" \
+              --title "Sync dev with main (auto)" \
+              --body "自动 merge main → dev 失败（可能有冲突）。请在此 PR 中解决冲突并合并。"
+          else
+            echo "PR already exists: #$existing"
+          fi

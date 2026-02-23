@@ -1,3 +1,5 @@
+// Copyright © 2024–2026 Yuze Pan. 保留一切权利。
+
 //
 //  SecurityService.swift
 //  Deck
@@ -74,7 +76,7 @@ final class SecurityService {
             return await evaluate(policy: .deviceOwnerAuthentication, reason: reason, context: context)
         }
 
-        log.warn("Authentication not available: \(error?.localizedDescription ?? "unknown")")
+        await log.warn("Authentication not available: \(error?.localizedDescription ?? "unknown")")
         return false
     }
     
@@ -96,7 +98,7 @@ final class SecurityService {
 
             return success
         } catch {
-            log.warn("Authentication failed: \(error.localizedDescription)")
+            await log.warn("Authentication failed: \(error.localizedDescription)")
             return false
         }
     }
@@ -234,7 +236,7 @@ final class SecurityService {
     
     // MARK: - Data Encryption/Decryption
     
-    func encrypt(_ data: Data) -> Data? {
+    private func encryptInternal(_ data: Data) -> Data? {
         guard let key = getOrCreateEncryptionKey() else {
             log.error("No encryption key available")
             return nil
@@ -242,14 +244,34 @@ final class SecurityService {
         
         return encrypt(data, using: key)
     }
+
+    func encrypt(_ data: Data) -> Data? {
+        encryptInternal(data)
+    }
+
+    /// Async overload to support call sites that already use `await SecurityService.shared.encrypt(...)`.
+    /// Implementation is still synchronous, but this avoids Swift Concurrency warnings.
+    func encrypt(_ data: Data) async -> Data? {
+        encryptInternal(data)
+    }
     
-    func decrypt(_ encryptedData: Data) -> Data? {
+    private func decryptInternal(_ encryptedData: Data) -> Data? {
         guard let key = getOrCreateEncryptionKey() else {
             log.error("No encryption key available")
             return nil
         }
         
         return decrypt(encryptedData, using: key)
+    }
+
+    func decrypt(_ encryptedData: Data) -> Data? {
+        decryptInternal(encryptedData)
+    }
+
+    /// Async overload to support call sites that already use `await SecurityService.shared.decrypt(...)`.
+    /// Implementation is still synchronous, but this avoids Swift Concurrency warnings.
+    func decrypt(_ encryptedData: Data) async -> Data? {
+        decryptInternal(encryptedData)
     }
 
     func decryptSilently(_ encryptedData: Data) -> Data? {
