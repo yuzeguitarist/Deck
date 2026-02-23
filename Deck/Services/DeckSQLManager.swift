@@ -4352,6 +4352,14 @@ extension DeckSQLManager {
         } ?? nil
     }
 
+    func fetchTagId(uniqueId: String) async -> Int? {
+        return await withDBAsync { () throws -> Int? in
+            guard let db = self.db, let table = self.table else { return nil }
+            let query = table.select(Col.tagId).filter(Col.uniqueId == uniqueId).order(Col.ts.desc).limit(1)
+            return try db.pluck(query)?.get(Col.tagId)
+        } ?? nil
+    }
+
     /// Ensure a non-empty unique_id for the given item, backfilling legacy rows if needed.
     func ensureNonEmptyUniqueId(for item: ClipboardItem) async -> String {
         if !item.uniqueId.isEmpty { return item.uniqueId }
