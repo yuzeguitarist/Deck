@@ -157,6 +157,19 @@ final class ScriptPluginService {
         "json-format"
     ]
 
+    // Network sandbox for scripts: avoid leaking cookies/cache from the main app and limit response size.
+    private static let maxFetchResponseBytes = 2 * 1024 * 1024  // 2 MB
+
+    private static let pluginNetworkSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.urlCache = nil
+        config.httpCookieStorage = nil
+        config.httpShouldSetCookies = false
+        config.waitsForConnectivity = false
+        return URLSession(configuration: config)
+    }()
+
     private final class ExecutionState: @unchecked Sendable {
         private let lock = NSLock()
         private var interrupted = false
@@ -994,6 +1007,12 @@ final class ScriptPluginService {
                 return Self.createFetchError(context: jsContext, message: "Invalid URL")
             }
 
+            // Restrict to http/https to avoid unintentionally granting local file access via URLSession.
+            guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+                log.error("[JS \(pluginId)] Unsupported URL scheme: \(urlString)")
+                return Self.createFetchError(context: jsContext, message: "Only http/https URLs are allowed")
+            }
+
             // 解析 options
             var request = URLRequest(url: url)
             let maxWaitTime = max(1, min(10, TimeInterval(DeckUserDefaults.scriptTimeout)))
@@ -1026,7 +1045,7 @@ final class ScriptPluginService {
 
             let semaphore = DispatchSemaphore(value: 0)
 
-            let task = URLSession.shared.dataTask(with: request) { data, response, error in
+            let task = Self.pluginNetworkSession.dataTask(with: request) { data, response, error in
                 responseData = data
                 httpResponse = response as? HTTPURLResponse
                 requestError = error
@@ -1068,6 +1087,11 @@ final class ScriptPluginService {
             if let error = requestError {
                 log.error("[JS \(pluginId)] Fetch error: \(error.localizedDescription)")
                 return Self.createFetchError(context: jsContext, message: error.localizedDescription)
+            }
+
+            if let data = responseData, data.count > Self.maxFetchResponseBytes {
+                log.error("[JS \(pluginId)] Fetch response too large (\(data.count) bytes): \(urlString)")
+                return Self.createFetchError(context: jsContext, message: "Response too large")
             }
 
             // 创建响应对象
