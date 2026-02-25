@@ -49,13 +49,13 @@ final class SecurityService {
         case .opticID:
             return "Optic ID"
         case .none:
-            return "生物识别"
+            return NSLocalizedString("生物识别", comment: "Biometrics")
         @unknown default:
-            return "生物识别"
+            return NSLocalizedString("生物识别", comment: "Biometrics")
         }
     }
     
-    func authenticate(reason: String = "验证身份以访问剪贴板历史") async -> Bool {
+    func authenticate(reason: String = NSLocalizedString("验证身份以访问剪贴板历史", comment: "Authenticate to access clipboard history")) async -> Bool {
         // Check if still authenticated within timeout (unless authEveryTime is enabled)
         if !DeckUserDefaults.authEveryTime {
             if isAuthenticated, let lastAuth = lastAuthTime,
@@ -65,7 +65,7 @@ final class SecurityService {
         }
         
         let context = LAContext()
-        context.localizedCancelTitle = "取消"
+        context.localizedCancelTitle = NSLocalizedString("取消", comment: "Cancel")
         
         var error: NSError?
         if context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) {

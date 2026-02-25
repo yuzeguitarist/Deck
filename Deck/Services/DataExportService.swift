@@ -109,7 +109,7 @@ final class DataExportService {
         Task { @MainActor in
             let isSecurityMode = DeckUserDefaults.securityModeEnabled
             if isSecurityMode {
-                let authenticated = await SecurityService.shared.authenticate(reason: "验证身份以导出数据")
+                let authenticated = await SecurityService.shared.authenticate(reason: NSLocalizedString("验证身份以导出数据", comment: "Authenticate to export data"))
                 guard authenticated else {
                     completion(.failure(ExportError.authenticationFailed))
                     return
@@ -236,7 +236,7 @@ final class DataExportService {
         Task {
             // Check if security mode is enabled - require authentication
             if DeckUserDefaults.securityModeEnabled {
-                let authenticated = await SecurityService.shared.authenticate(reason: "验证身份以导入数据")
+                let authenticated = await SecurityService.shared.authenticate(reason: NSLocalizedString("验证身份以导入数据", comment: "Authenticate to import data"))
                 guard authenticated else {
                     await MainActor.run {
                         completion(.failure(ExportError.authenticationFailed))
@@ -479,11 +479,11 @@ final class DataExportService {
         var errorDescription: String? {
             switch self {
             case .authenticationFailed:
-                return "身份验证失败"
+                return NSLocalizedString("身份验证失败", comment: "Authentication failed")
             case .noData:
-                return "没有可导出的数据"
+                return NSLocalizedString("没有可导出的数据", comment: "No data to export")
             case .invalidFormat:
-                return "文件格式无效"
+                return NSLocalizedString("文件格式无效", comment: "Invalid file format")
             }
         }
     }
@@ -497,8 +497,8 @@ extension DataExportService {
         savePanel.allowedContentTypes = [.json]
         savePanel.nameFieldStringValue = "Deck_Export_\(formatDate(Date())).json"
         savePanel.canCreateDirectories = true
-        savePanel.title = "导出剪贴板历史"
-        savePanel.message = "选择保存位置"
+        savePanel.title = NSLocalizedString("导出剪贴板历史", comment: "Export clipboard history title")
+        savePanel.message = NSLocalizedString("选择保存位置", comment: "Choose export destination")
         
         savePanel.begin { [weak self] response in
             guard response == .OK, let targetURL = savePanel.url else { return }
@@ -510,14 +510,17 @@ extension DataExportService {
                         NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: url.deletingLastPathComponent().path)
                         
                         let alert = NSAlert()
-                        alert.messageText = "导出成功"
-                        alert.informativeText = "已导出 \(self?.lastExportedCount ?? 0) 条记录"
+                        alert.messageText = NSLocalizedString("导出成功", comment: "Export success")
+                        alert.informativeText = String(
+                            format: NSLocalizedString("已导出 %@ 条记录", comment: "Exported record count"),
+                            "\(self?.lastExportedCount ?? 0)"
+                        )
                         alert.alertStyle = .informational
                         alert.runModal()
                         
                     case .failure(let error):
                         let alert = NSAlert()
-                        alert.messageText = "导出失败"
+                        alert.messageText = NSLocalizedString("导出失败", comment: "Export failed")
                         alert.informativeText = error.localizedDescription
                         alert.alertStyle = .warning
                         alert.runModal()
@@ -532,8 +535,8 @@ extension DataExportService {
         openPanel.allowedContentTypes = [.json]
         openPanel.canChooseFiles = true
         openPanel.canChooseDirectories = false
-        openPanel.title = "导入剪贴板历史"
-        openPanel.message = "选择要导入的 JSON 文件"
+        openPanel.title = NSLocalizedString("导入剪贴板历史", comment: "Import clipboard history title")
+        openPanel.message = NSLocalizedString("选择要导入的 JSON 文件", comment: "Choose JSON file to import")
         
         openPanel.begin { [weak self] response in
             guard response == .OK, let url = openPanel.url else { return }
@@ -543,14 +546,17 @@ extension DataExportService {
                     switch result {
                     case .success(let count):
                         let alert = NSAlert()
-                        alert.messageText = "导入成功"
-                        alert.informativeText = "已导入 \(count) 条剪贴板记录"
+                        alert.messageText = NSLocalizedString("导入成功", comment: "Import success")
+                        alert.informativeText = String(
+                            format: NSLocalizedString("已导入 %@ 条剪贴板记录", comment: "Imported clipboard record count"),
+                            "\(count)"
+                        )
                         alert.alertStyle = .informational
                         alert.runModal()
                         
                     case .failure(let error):
                         let alert = NSAlert()
-                        alert.messageText = "导入失败"
+                        alert.messageText = NSLocalizedString("导入失败", comment: "Import failed")
                         alert.informativeText = error.localizedDescription
                         alert.alertStyle = .warning
                         alert.runModal()
