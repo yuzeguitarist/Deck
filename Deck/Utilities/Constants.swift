@@ -49,7 +49,7 @@ enum Const {
     
     static let smallRadius: CGFloat = 8.0
     static let panelCornerRadius: CGFloat = 28.0
-    static let panelTopPadding: CGFloat = Const.space12 + 2.0
+    static let panelTopPadding: CGFloat = 10.0
     static let searchFieldRadius: CGFloat = 12.0
     
     // Icon sizes
@@ -168,8 +168,8 @@ enum Const {
     static let scriptMaxOutputLength: Int = 100_000        // 100KB max output
 
     // Animation
-    static let showDuration: Double = 0.2
-    static let hideDuration: Double = 0.25
+    static let showDuration: Double = 0.16
+    static let hideDuration: Double = 0.18
     
     // Card shape
     static let contentShape = UnevenRoundedRectangle(
