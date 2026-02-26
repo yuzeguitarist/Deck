@@ -1584,19 +1584,29 @@ final class ClipboardItem: Identifiable, Equatable {
             if let size = imageSize() {
                 return "\(Int(size.width)) × \(Int(size.height))"
             }
-            return "图片"
+            return NSLocalizedString("图片", comment: "Clipboard item description: image")
         case .text, .richText, .code:
             let formatted = DeckFormatters.decimalNumber().string(from: NSNumber(value: contentLength)) ?? "\(contentLength)"
-            return "\(formatted) 个字符"
+            return String(
+                format: NSLocalizedString("%@ 个字符", comment: "Clipboard item description: character count"),
+                formatted
+            )
         case .file:
-            guard let paths = filePaths else { return "文件" }
-            if paths.count > 1 { return "\(paths.count) 个文件" }
+            guard let paths = filePaths else {
+                return NSLocalizedString("文件", comment: "Clipboard item description: file")
+            }
+            if paths.count > 1 {
+                return String(
+                    format: NSLocalizedString("%d 个文件", comment: "Clipboard item description: file count"),
+                    paths.count
+                )
+            }
             let firstPath = Self.normalizeFilePath(paths.first ?? "")
             return URL(fileURLWithPath: firstPath).lastPathComponent
         case .url:
-            return String(data: data, encoding: .utf8) ?? "链接"
+            return String(data: data, encoding: .utf8) ?? NSLocalizedString("链接", comment: "Clipboard item description: url")
         case .color:
-            return String(data: data, encoding: .utf8) ?? "颜色"
+            return String(data: data, encoding: .utf8) ?? NSLocalizedString("颜色", comment: "Clipboard item description: color")
         }
     }
     
