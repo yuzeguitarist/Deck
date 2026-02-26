@@ -92,11 +92,13 @@ extension String {
             return true
         }
 
-        // Already has a scheme: accept common web schemes only.
+        // Already has a scheme: accept common web schemes + Apple Music/Podcasts deep links.
         if let url = buildURL(candidate),
            let scheme = url.scheme?.lowercased(),
-           ["http", "https", "ftp"].contains(scheme) {
-            guard let host = url.host, isValidHost(host) else { return nil }
+           ["http", "https", "ftp", "itms", "itmss", "music", "podcast", "podcasts"].contains(scheme) {
+            if let host = url.host {
+                guard isValidHost(host) else { return nil }
+            }
             return url
         }
 

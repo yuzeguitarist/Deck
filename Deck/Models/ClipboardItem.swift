@@ -18,8 +18,16 @@ typealias PasteboardType = NSPasteboard.PasteboardType
 extension PasteboardType {
     // Image types first to prioritize image detection over fileURL
     static var supportedTypes: [PasteboardType] = [
-        .png, .tiff, .jpeg, .heic, .heif, .gif, .webp, .bmp, .rtfd, .flatRTFD, .rtf, .fileURL, .string
+        // Image types first to prioritize image detection over fileURL
+        .png, .tiff, .jpeg, .heic, .heif, .gif, .webp, .bmp,
+        .rtfd, .flatRTFD, .rtf,
+        .fileURL,
+        // System apps may put a URL in `public.url`.
+        .publicURL,
+        .string
     ]
+
+    static let publicURL = NSPasteboard.PasteboardType("public.url")
 
     static let jpeg = NSPasteboard.PasteboardType("public.jpeg")
     static let heic = NSPasteboard.PasteboardType("public.heic")
@@ -861,6 +869,7 @@ final class ClipboardItem: Identifiable, Equatable {
         
         let app = NSWorkspace.shared.frontmostApplication
         let filteredTypes = Self.filteredPasteboardTypes(from: item.types)
+
         guard let type = PasteboardType.supportedTypes.first(where: { filteredTypes.contains($0) }) else {
             let rawTypes = item.types.map(\.rawValue).joined(separator: ",")
             switch Self.resolveTextFallbackPayload(from: item, filteredTypes: filteredTypes) {
@@ -912,7 +921,19 @@ final class ClipboardItem: Identifiable, Equatable {
 
         var content: Data?
         var filePaths: [String] = []
-        if (type == .rtfd || type == .flatRTFD),
+        if type == .publicURL {
+            // Some apps (Safari, Notes, Music, Podcasts...) may write `public.url`.
+            // Normalize it into plain string so downstream URL detection works consistently.
+            let urlString = item.string(forType: .publicURL)
+                ?? Self.decodeStringFromData(item.data(forType: .publicURL))
+                ?? plainTextCandidate
+
+            guard let urlString, !urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return nil
+            }
+            resolvedType = .string
+            content = urlString.data(using: .utf8) ?? Data()
+        } else if (type == .rtfd || type == .flatRTFD),
            hasPlainTextCandidate,
            let plainData = plainTextCandidate?.data(using: .utf8) {
             // Prefer plain text for RTFD to avoid heavy decoding and NSSecureCoding warnings.
