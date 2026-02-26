@@ -224,11 +224,16 @@ final class ScriptPluginService {
 
     /// 创建示例脚本
     private func createExampleScripts() {
+        let wordCountCharsLabel = NSLocalizedString("字符数", comment: "Default script output label: character count")
+        let wordCountCharsNoSpaceLabel = NSLocalizedString("字符数(不含空格)", comment: "Default script output label: character count without spaces")
+        let wordCountWordsLabel = NSLocalizedString("单词数", comment: "Default script output label: word count")
+        let wordCountLinesLabel = NSLocalizedString("行数", comment: "Default script output label: line count")
+
         createDefaultScript(
             directoryName: "word-count",
             manifest: ScriptManifest(
-                name: "字数统计",
-                description: "统计文本的字符数、单词数和行数",
+                name: NSLocalizedString("字数统计", comment: "Default script name: word count"),
+                description: NSLocalizedString("统计文本的字符数、单词数和行数", comment: "Default script description: word count"),
                 author: defaultPluginAuthor,
                 version: "1.0.0",
                 main: "index.js",
@@ -242,10 +247,10 @@ final class ScriptPluginService {
                 const words = input.trim().split(/\\s+/).filter(w => w.length > 0).length;
                 const lines = input.split('\\n').length;
 
-                return "字符数: " + chars + "\\n" +
-                       "字符数(不含空格): " + charsNoSpace + "\\n" +
-                       "单词数: " + words + "\\n" +
-                       "行数: " + lines;
+                return "\(wordCountCharsLabel): " + chars + "\\n" +
+                       "\(wordCountCharsNoSpaceLabel): " + charsNoSpace + "\\n" +
+                       "\(wordCountWordsLabel): " + words + "\\n" +
+                       "\(wordCountLinesLabel): " + lines;
             }
             """
         )
@@ -253,8 +258,8 @@ final class ScriptPluginService {
         createDefaultScript(
             directoryName: "remove-emoji",
             manifest: ScriptManifest(
-                name: "去除表情符号",
-                description: "移除文本中的表情符号",
+                name: NSLocalizedString("去除表情符号", comment: "Default script name: remove emoji"),
+                description: NSLocalizedString("移除文本中的表情符号", comment: "Default script description: remove emoji"),
                 author: defaultPluginAuthor,
                 version: "1.0.0",
                 main: "index.js",
@@ -288,8 +293,8 @@ final class ScriptPluginService {
         createDefaultScript(
             directoryName: "strip-markdown",
             manifest: ScriptManifest(
-                name: "去除 Markdown 格式",
-                description: "删除 Markdown 语法，保留纯文本内容",
+                name: NSLocalizedString("去除 Markdown 格式", comment: "Default script name: strip markdown"),
+                description: NSLocalizedString("删除 Markdown 语法，保留纯文本内容", comment: "Default script description: strip markdown"),
                 author: defaultPluginAuthor,
                 version: "1.0.0",
                 main: "index.js",
@@ -336,8 +341,8 @@ final class ScriptPluginService {
         createDefaultScript(
             directoryName: "remove-empty-lines",
             manifest: ScriptManifest(
-                name: "去空行",
-                description: "删除空白行，仅保留有内容的行",
+                name: NSLocalizedString("去空行", comment: "Default script name: remove empty lines"),
+                description: NSLocalizedString("删除空白行，仅保留有内容的行", comment: "Default script description: remove empty lines"),
                 author: defaultPluginAuthor,
                 version: "1.0.0",
                 main: "index.js",
@@ -361,8 +366,8 @@ final class ScriptPluginService {
         createDefaultScript(
             directoryName: "extract-urls",
             manifest: ScriptManifest(
-                name: "提取 URL",
-                description: "提取文本中的 URL（基于 Deck SmartText 逻辑）",
+                name: NSLocalizedString("提取 URL", comment: "Default script name: extract url"),
+                description: NSLocalizedString("提取文本中的 URL（基于 Deck SmartText 逻辑）", comment: "Default script description: extract url"),
                 author: defaultPluginAuthor,
                 version: "1.0.0",
                 main: "index.js",
@@ -379,8 +384,8 @@ final class ScriptPluginService {
         createDefaultScript(
             directoryName: "extract-emails",
             manifest: ScriptManifest(
-                name: "提取邮箱",
-                description: "提取文本中的邮箱地址（基于 Deck SmartText 逻辑）",
+                name: NSLocalizedString("提取邮箱", comment: "Default script name: extract email"),
+                description: NSLocalizedString("提取文本中的邮箱地址（基于 Deck SmartText 逻辑）", comment: "Default script description: extract email"),
                 author: defaultPluginAuthor,
                 version: "1.0.0",
                 main: "index.js",
@@ -397,8 +402,8 @@ final class ScriptPluginService {
         createDefaultScript(
             directoryName: "line-number",
             manifest: ScriptManifest(
-                name: "行号前缀",
-                description: "为每行添加行号前缀",
+                name: NSLocalizedString("行号前缀", comment: "Default script name: line number prefix"),
+                description: NSLocalizedString("为每行添加行号前缀", comment: "Default script description: line number prefix"),
                 author: defaultPluginAuthor,
                 version: "1.0.0",
                 main: "index.js",
@@ -683,7 +688,11 @@ final class ScriptPluginService {
     func executeTransform(pluginId: String, input: String) -> ScriptResult {
         if Thread.isMainThread {
             log.warn("executeTransform called on main thread; use executeTransformAsync instead")
-            return ScriptResult(success: false, output: nil, error: "脚本执行应使用异步 API")
+            return ScriptResult(
+                success: false,
+                output: nil,
+                error: NSLocalizedString("脚本执行应使用异步 API", comment: "Script execution should use async API")
+            )
         }
         return executeTransformInternal(pluginId: pluginId, input: input)
     }
@@ -693,7 +702,11 @@ final class ScriptPluginService {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async { [weak self] in
                 let result = self?.executeTransformInternal(pluginId: pluginId, input: input)
-                    ?? ScriptResult(success: false, output: nil, error: "执行失败")
+                    ?? ScriptResult(
+                        success: false,
+                        output: nil,
+                        error: NSLocalizedString("执行失败", comment: "Script execution failed")
+                    )
                 continuation.resume(returning: result)
             }
         }
@@ -706,7 +719,11 @@ final class ScriptPluginService {
             return plugins.first(where: { $0.id == pluginId })
         }()
         guard let plugin else {
-            return ScriptResult(success: false, output: nil, error: "插件不存在")
+            return ScriptResult(
+                success: false,
+                output: nil,
+                error: NSLocalizedString("插件不存在", comment: "Script plugin does not exist")
+            )
         }
 
         // 输入长度检查
@@ -715,7 +732,10 @@ final class ScriptPluginService {
             return ScriptResult(
                 success: false,
                 output: nil,
-                error: "输入超过最大长度限制 (\(maxInput) 字符)"
+                error: String(
+                    format: NSLocalizedString("输入超过最大长度限制 (%d 字符)", comment: "Script input too long"),
+                    maxInput
+                )
             )
         }
 
@@ -727,7 +747,10 @@ final class ScriptPluginService {
             return ScriptResult(
                 success: false,
                 output: nil,
-                error: "输出超过最大长度限制 (\(Const.scriptMaxOutputLength) 字符)"
+                error: String(
+                    format: NSLocalizedString("输出超过最大长度限制 (%d 字符)", comment: "Script output too long"),
+                    Const.scriptMaxOutputLength
+                )
             )
         }
 
@@ -809,13 +832,20 @@ final class ScriptPluginService {
             return ScriptResult(
                 success: false,
                 output: nil,
-                error: "脚本执行超时（超过 \(Int(timeout)) 秒）\n注意：包含死循环的脚本可能仍在后台运行"
+                error: String(
+                    format: NSLocalizedString("脚本执行超时（超过 %d 秒）\n注意：包含死循环的脚本可能仍在后台运行", comment: "Script execution timeout"),
+                    Int(timeout)
+                )
             )
         }
 
         // 清理任务追踪
         finishTask(executionId)
-        return resultBox.result ?? ScriptResult(success: false, output: nil, error: "执行失败")
+        return resultBox.result ?? ScriptResult(
+            success: false,
+            output: nil,
+            error: NSLocalizedString("执行失败", comment: "Script execution failed")
+        )
     }
 
     /// 执行脚本（内部方法，不带安全检查）
@@ -828,18 +858,30 @@ final class ScriptPluginService {
         // 每次执行都创建新的 JSContext，确保干净的执行环境
         // 这样超时后旧的 context 会被丢弃，不影响后续执行
         guard let context = createContext(for: plugin, executionState: executionState, timeout: timeout) else {
-            return ScriptResult(success: false, output: nil, error: "无法创建 JavaScript 环境")
+            return ScriptResult(
+                success: false,
+                output: nil,
+                error: NSLocalizedString("无法创建 JavaScript 环境", comment: "Cannot create JavaScript context")
+            )
         }
 
         // 调用 transform 函数
         guard let transformFunc = context.objectForKeyedSubscript("transform"),
               !transformFunc.isUndefined else {
-            return ScriptResult(success: false, output: nil, error: "脚本中未定义 transform 函数")
+            return ScriptResult(
+                success: false,
+                output: nil,
+                error: NSLocalizedString("脚本中未定义 transform 函数", comment: "transform function not defined in script")
+            )
         }
         
         // 检查是否已被中断
         if executionState.isInterrupted() {
-            return ScriptResult(success: false, output: nil, error: "脚本已被中断")
+            return ScriptResult(
+                success: false,
+                output: nil,
+                error: NSLocalizedString("脚本已被中断", comment: "Script interrupted")
+            )
         }
 
         // 执行转换
@@ -847,19 +889,27 @@ final class ScriptPluginService {
         
         // 再次检查中断状态
         if executionState.isInterrupted() {
-            return ScriptResult(success: false, output: nil, error: "脚本已被中断")
+            return ScriptResult(
+                success: false,
+                output: nil,
+                error: NSLocalizedString("脚本已被中断", comment: "Script interrupted")
+            )
         }
 
         // 检查异常
         if let exception = context.exception {
-            let errorMessage = exception.toString() ?? "未知错误"
+            let errorMessage = exception.toString() ?? NSLocalizedString("未知错误", comment: "Unknown script error")
             context.exception = nil  // 清除异常
             return ScriptResult(success: false, output: nil, error: errorMessage)
         }
 
         // 获取结果
         guard let outputString = result?.toString() else {
-            return ScriptResult(success: false, output: nil, error: "转换结果无效")
+            return ScriptResult(
+                success: false,
+                output: nil,
+                error: NSLocalizedString("转换结果无效", comment: "Invalid transformed result")
+            )
         }
 
         return ScriptResult(success: true, output: outputString, error: nil)

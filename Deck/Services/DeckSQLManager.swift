@@ -1136,7 +1136,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     /// 检查数据库健康状态
     func checkDatabaseHealth() -> (isHealthy: Bool, message: String) {
         guard syncOnDBQueue({ db != nil }) else {
-            return (false, "数据库连接未建立")
+            return (false, NSLocalizedString("数据库连接未建立", comment: "Database health: connection not established"))
         }
 
         // 检查数据库是否可读写
@@ -1146,21 +1146,27 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         } ?? false
 
         if !canWrite {
-            return (false, "数据库无法正常访问")
+            return (false, NSLocalizedString("数据库无法正常访问", comment: "Database health: cannot access"))
         }
 
         // 检查最近是否有错误
         let recentErrorCount = syncOnErrorStateQueue { consecutiveErrorCount }
         if recentErrorCount > 0 {
-            return (false, "最近有 \(recentErrorCount) 次数据库操作失败")
+            return (
+                false,
+                String(
+                    format: NSLocalizedString("最近有 %d 次数据库操作失败", comment: "Database health: recent error count"),
+                    recentErrorCount
+                )
+            )
         }
 
         // 轻量完整性检查（用于用户主动诊断）
         if !performIntegrityCheck() {
-            return (false, "数据库完整性检查未通过")
+            return (false, NSLocalizedString("数据库完整性检查未通过", comment: "Database health: integrity check failed"))
         }
 
-        return (true, "数据库运行正常")
+        return (true, NSLocalizedString("数据库运行正常", comment: "Database health: healthy"))
     }
     
     func setup() {
@@ -3370,7 +3376,10 @@ extension DeckSQLManager {
             return true
         }
         guard shouldNotify else { return }
-        notifyUserOfDBError("安全模式加密失败，请重新认证或关闭安全模式后重试", isCritical: true)
+        notifyUserOfDBError(
+            NSLocalizedString("安全模式加密失败，请重新认证或关闭安全模式后重试", comment: "Security mode encryption failed"),
+            isCritical: true
+        )
     }
 
     // MARK: - Semantic Embedding Helpers
