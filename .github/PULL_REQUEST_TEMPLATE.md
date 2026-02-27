@@ -1,52 +1,56 @@
-## 重要规则
+## Important Rules | 重要规则
 
-> 所有 PR 必须合并到 `dev`，不要提到 `main`。  
+> Base branch must be `dev` (do not open PRs with `main` as base).
+> PR 的目标分支必须是 `dev`（不要将 `main` 作为 base 分支）。
+
+> PRs with missing details may be sent back for completion.
 > 信息过少或未按模板填写的 PR 可能会被退回补充。
 
-## 这次改了什么（必填）
+## What changed? (Required) | 这次改了什么（必填）
 
-- 
+-
 
-## 关联 Issue（必填）
+## Related Issue (Optional) | 关联 Issue（选填）
 
-Fixes #
+- Fixes #123 (if applicable)
+- N/A
 
-## 改动类型（必选）
+## Change type (Required) | 改动类型（必选）
 
-- [ ] Bug 修复
-- [ ] 新功能
-- [ ] 重构 / 性能优化
-- [ ] UI / 样式调整
-- [ ] 文档 / 测试更新
-- [ ] Breaking Change（请在下方说明）
+- [ ] Bug fix | Bug 修复
+- [ ] New feature | 新功能
+- [ ] Refactor / Performance | 重构 / 性能优化
+- [ ] UI / Style adjustment | UI / 样式调整
+- [ ] Docs / Tests update | 文档 / 测试更新
+- [ ] Breaking change (describe below) | Breaking Change（请在下方说明）
 
-## 验证方式（必填）
+## Validation (Required) | 验证方式（必填）
 
-- [ ] 我已本地自测
-- [ ] 我已运行 `./scripts/code-quality.sh` 且分数 >= 80
-- [ ] 相关测试已通过（如适用）
+- [ ] I tested locally | 我已本地自测
+- [ ] I ran `./scripts/code-quality.sh` and score >= 80 | 我已运行 `./scripts/code-quality.sh` 且分数 >= 80
+- [ ] Relevant tests passed (if applicable) | 相关测试已通过（如适用）
 
-代码质量分数：
+Code quality score | 代码质量分数：
 ```text
 Score: __/100
 ```
 
-测试环境：
-- macOS：
-- Xcode：
-- 设备：
+Test environment | 测试环境：
+- macOS:
+- Xcode:
+- Device / 设备:
 
-## 截图 / 录屏（UI 改动必填）
+## Screenshots / Recording (Required for UI changes) | 截图 / 录屏（UI 改动必填）
 
-<!-- UI 有变化时请贴前后对比 -->
+<!-- Add before/after if UI changed | UI 有变化时请贴前后对比 -->
 
-## 自检（必勾）
+## Self-check (Required) | 自检（必勾）
 
-- [ ] 目标分支是 `dev`
-- [ ] 我已自查主要风险点
-- [ ] 我已补充必要文档/注释（如适用）
+- [ ] Base branch is `dev` | 目标分支是 `dev`
+- [ ] I reviewed major risks | 我已自查主要风险点
+- [ ] I updated docs/comments if needed | 我已补充必要文档/注释（如适用）
 
-## 风险与回滚（选填）
+## Risk & Rollback (Optional) | 风险与回滚（选填）
 
-- 风险点：
-- 回滚方式：
+- Risks / 风险点:
+- Rollback plan / 回滚方式:
