@@ -1,1 +1,11 @@
 blank_issues_enabled: false
+contact_links:
+  - name: 💬 Discussions / 使用讨论
+    url: https://github.com/yuzeguitarist/Deck/discussions
+    about: Ask usage questions, share ideas, and discuss roadmap.
+  - name: 🔐 Security Report / 安全漏洞报告
+    url: https://github.com/yuzeguitarist/Deck/security/advisories/new
+    about: Please report security vulnerabilities privately.
+  - name: 📚 Documentation & Releases / 文档与发布说明
+    url: https://github.com/yuzeguitarist/Deck/releases
+    about: Check release notes and docs before filing a new issue.

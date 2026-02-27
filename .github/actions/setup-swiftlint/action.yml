@@ -1,0 +1,22 @@
+name: Setup SwiftLint
+description: Restore Homebrew cache and install SwiftLint if missing
+runs:
+  using: composite
+  steps:
+    - name: Cache Homebrew downloads
+      uses: actions/cache@v4
+      with:
+        path: ~/Library/Caches/Homebrew
+        key: ${{ runner.os }}-homebrew-swiftlint-${{ hashFiles('.github/actions/setup-swiftlint/action.yml') }}
+        restore-keys: |
+          ${{ runner.os }}-homebrew-swiftlint-
+          ${{ runner.os }}-homebrew-
+
+    - name: Install SwiftLint
+      shell: bash
+      run: |
+        if command -v swiftlint >/dev/null 2>&1; then
+          echo "SwiftLint already installed: $(swiftlint version)"
+        else
+          brew install swiftlint
+        fi
