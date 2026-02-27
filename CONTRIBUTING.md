@@ -44,7 +44,7 @@ This project and everyone participating in it is governed by our [Code of Conduc
 
 ### Prerequisites
 
-- macOS 13.0+
+- macOS 14.0+
 - Xcode 15.0+
 - Swift 5.9+
 - Git
@@ -205,10 +205,10 @@ Before pushing to your fork, you MUST run the code quality script:
 
 ### After Merge
 
-Your name will be added to:
+Your contribution may be credited in:
 - Contributors list in README
 - Release notes for the version including your changes
-- CHANGELOG.md
+- GitHub Releases notes
 
 ## Coding Standards
 
@@ -318,7 +318,7 @@ docs(readme): update installation instructions
 
 ### 环境要求
 
-- macOS 13.0+
+- macOS 14.0+
 - Xcode 15.0+
 - Swift 5.9+
 - Git
@@ -479,10 +479,10 @@ main          <- 仅稳定发布版本（受保护）
 
 ### 合并后
 
-你的名字将被添加到：
+你的贡献可能会体现在：
 - README 的贡献者列表
 - 包含你更改的版本发布说明
-- CHANGELOG.md
+- GitHub Releases 发布说明
 
 ## 代码规范
 

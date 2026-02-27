@@ -90,6 +90,28 @@ body:
         - label: 通过软件内自动更新安装
         - label: 其他
 
+  - type: dropdown
+    id: reproducibility
+    attributes:
+      label: 可复现频率
+      description: 该问题出现频率如何？
+      options:
+        - 每次都出现（100%）
+        - 经常出现（>50%）
+        - 偶尔出现（<50%）
+        - 很难复现
+    validations:
+      required: true
+
+  - type: input
+    id: last_known_good
+    attributes:
+      label: 是否回归问题
+      description: 如果是回归，请填写最后一个正常版本。
+      placeholder: 例如：1.2.2 正常，1.2.3 开始异常（或填写 N/A）
+    validations:
+      required: true
+
   - type: textarea
     id: screenshots
     attributes:

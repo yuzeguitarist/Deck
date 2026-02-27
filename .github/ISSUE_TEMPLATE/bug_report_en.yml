@@ -91,6 +91,28 @@ body:
         - label: Installed via in-app auto update
         - label: Other
 
+  - type: dropdown
+    id: reproducibility
+    attributes:
+      label: Reproducibility
+      description: How often does this happen?
+      options:
+        - Always (100%)
+        - Often (>50%)
+        - Sometimes (<50%)
+        - Rarely (hard to reproduce)
+    validations:
+      required: true
+
+  - type: input
+    id: last_known_good
+    attributes:
+      label: Regression check
+      description: If this is a regression, what was the last known good Deck version?
+      placeholder: e.g. Worked in 1.2.2, broken since 1.2.3 (or N/A)
+    validations:
+      required: true
+
   - type: textarea
     id: screenshots
     attributes:
