@@ -107,6 +107,12 @@ final class SecurityService {
     
     private let keychainService = "com.deck.encryption"
     private let keychainAccount = "master-key"
+    
+    private enum KeychainLoadResult {
+        case success(Data)
+        case notFound
+        case failure(OSStatus)
+    }
 
     // MARK: - In-Memory Key Cache
     private func cachedKeyIfValid(now: Date = Date()) -> SymmetricKey? {
@@ -143,10 +149,16 @@ final class SecurityService {
         }
 
         // Try to get existing key from Keychain
-        if let keyData = getKeyFromKeychain() {
+        switch getKeyFromKeychain() {
+        case .success(let keyData):
             let key = SymmetricKey(data: keyData)
             cacheKey(key)
             return key
+        case .failure(let status):
+            log.error("Failed to read encryption key from Keychain: \(status)")
+            return nil
+        case .notFound:
+            break
         }
         
         // Generate new key
@@ -162,7 +174,7 @@ final class SecurityService {
         return nil
     }
     
-    private func getKeyFromKeychain() -> Data? {
+    private func getKeyFromKeychain() -> KeychainLoadResult {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
@@ -175,10 +187,17 @@ final class SecurityService {
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         
         if status == errSecSuccess {
-            return result as? Data
+            guard let data = result as? Data else {
+                return .failure(errSecInternalError)
+            }
+            return .success(data)
         }
         
-        return nil
+        if status == errSecItemNotFound {
+            return .notFound
+        }
+        
+        return .failure(status)
     }
     
     private func saveKeyToKeychain(_ keyData: Data) -> Bool {
