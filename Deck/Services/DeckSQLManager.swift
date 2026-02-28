@@ -4375,7 +4375,7 @@ extension DeckSQLManager {
         offset: Int? = nil
     ) async -> [Row] {
         guard !Task.isCancelled else { return [] }
-        let ord = order ?? [Col.ts.desc]
+        let ord = order ?? [Col.ts.desc, Col.id.desc]
 
         return await withDBAsync {
             guard let db = self.db, let table = self.table else { return [] }
@@ -5211,7 +5211,7 @@ extension DeckSQLManager {
             let batchResult: (rows: [Row], count: Int)? = await withDBAsync {
                 guard let db = self.db, let table = self.table else { return ([], 0) }
                 let query = table
-                    .select(Col.id, Col.data, Col.previewData, Col.searchText, Col.appName, Col.customTitle, Col.sourceAnchor)
+                    .select(Col.id, Col.data, Col.previewData, Col.searchText, Col.appName, Col.customTitle, Col.sourceAnchor, Col.isEncrypted)
                     .filter(Col.id > lastId)
                     .order(Col.id.asc)
                     .limit(batchSize)
@@ -5242,6 +5242,7 @@ extension DeckSQLManager {
                             let rawAppName = try row.get(Col.appName)
                             let rawCustomTitle = try row.get(Col.customTitle)
                             let rawSourceAnchor = try row.get(Col.sourceAnchor)
+                            let rawIsEncrypted = (try? row.get(Col.isEncrypted)) ?? false
 
                             let newData: Data
                             let newPreviewData: Data?
@@ -5294,12 +5295,65 @@ extension DeckSQLManager {
                                     newSourceAnchor = nil
                                 }
                             } else {
-                                newData = SecurityService.shared.decryptSilently(rawData) ?? rawData
-                                newPreviewData = rawPreviewData.map { SecurityService.shared.decryptSilently($0) ?? $0 }
-                                newSearchText = self.decryptStringSilently(rawSearchText)
-                                newAppName = self.decryptStringSilently(rawAppName)
-                                newCustomTitle = rawCustomTitle.map { self.decryptStringSilently($0) }
-                                newSourceAnchor = rawSourceAnchor.map { self.decryptStringSilently($0) }
+                                let decryptedData = SecurityService.shared.decryptSilently(rawData)
+                                if rawIsEncrypted && decryptedData == nil && !rawData.isEmpty {
+                                    throw NSError(domain: "DeckSQL", code: -16, userInfo: nil)
+                                }
+                                newData = decryptedData ?? rawData
+
+                                if let rawPreviewData {
+                                    let decryptedPreview = SecurityService.shared.decryptSilently(rawPreviewData)
+                                    if rawIsEncrypted && decryptedPreview == nil && !rawPreviewData.isEmpty {
+                                        throw NSError(domain: "DeckSQL", code: -17, userInfo: nil)
+                                    }
+                                    newPreviewData = decryptedPreview ?? rawPreviewData
+                                } else {
+                                    newPreviewData = nil
+                                }
+
+                                let maybeDecryptedSearch = self.decryptStringSilently(rawSearchText)
+                                if rawIsEncrypted,
+                                   maybeDecryptedSearch == rawSearchText,
+                                   !rawSearchText.isEmpty,
+                                   Data(base64Encoded: rawSearchText) != nil {
+                                    throw NSError(domain: "DeckSQL", code: -18, userInfo: nil)
+                                }
+                                newSearchText = maybeDecryptedSearch
+
+                                let maybeDecryptedAppName = self.decryptStringSilently(rawAppName)
+                                if rawIsEncrypted,
+                                   maybeDecryptedAppName == rawAppName,
+                                   !rawAppName.isEmpty,
+                                   Data(base64Encoded: rawAppName) != nil {
+                                    throw NSError(domain: "DeckSQL", code: -19, userInfo: nil)
+                                }
+                                newAppName = maybeDecryptedAppName
+
+                                if let rawCustomTitle {
+                                    let maybeDecryptedTitle = self.decryptStringSilently(rawCustomTitle)
+                                    if rawIsEncrypted,
+                                       maybeDecryptedTitle == rawCustomTitle,
+                                       !rawCustomTitle.isEmpty,
+                                       Data(base64Encoded: rawCustomTitle) != nil {
+                                        throw NSError(domain: "DeckSQL", code: -20, userInfo: nil)
+                                    }
+                                    newCustomTitle = maybeDecryptedTitle
+                                } else {
+                                    newCustomTitle = nil
+                                }
+
+                                if let rawSourceAnchor {
+                                    let maybeDecryptedAnchor = self.decryptStringSilently(rawSourceAnchor)
+                                    if rawIsEncrypted,
+                                       maybeDecryptedAnchor == rawSourceAnchor,
+                                       !rawSourceAnchor.isEmpty,
+                                       Data(base64Encoded: rawSourceAnchor) != nil {
+                                        throw NSError(domain: "DeckSQL", code: -21, userInfo: nil)
+                                    }
+                                    newSourceAnchor = maybeDecryptedAnchor
+                                } else {
+                                    newSourceAnchor = nil
+                                }
                             }
 
                             let query = table.filter(Col.id == id)
@@ -5346,10 +5400,18 @@ extension DeckSQLManager {
         await log.info("Encryption migration completed: \(totalProcessed) items processed")
 
         // 迁移 blob 文件的加密状态
-        await BlobStorage.shared.migrateEncryption(encrypt: encrypt)
+        let blobMigrated = await BlobStorage.shared.migrateEncryption(encrypt: encrypt)
+        guard blobMigrated else {
+            await log.error("Encryption migration failed: blob migration failed")
+            return false
+        }
 
         // 更新数据库中的 blob_path（加密后缀变化）
-        await updateBlobPathsAfterMigration(encrypt: encrypt)
+        let blobPathUpdated = await updateBlobPathsAfterMigration(encrypt: encrypt)
+        guard blobPathUpdated else {
+            await log.error("Encryption migration failed: blob_path update failed")
+            return false
+        }
 
         // 迁移语义向量缓存表的加密状态
         await migrateEmbeddingEncryption(encrypt: encrypt)
@@ -5360,7 +5422,7 @@ extension DeckSQLManager {
     }
 
     /// 更新数据库中的 blob_path 字段（加密迁移后路径后缀变化）
-    private func updateBlobPathsAfterMigration(encrypt: Bool) async {
+    private func updateBlobPathsAfterMigration(encrypt: Bool) async -> Bool {
         let rows: [Row] = await withDBAsync {
             guard let db = self.db, let table = self.table else { return [] }
             // 查找所有有 blob_path 的记录
@@ -5369,6 +5431,7 @@ extension DeckSQLManager {
             return Array(try db.prepare(query))
         } ?? []
 
+        var hasError = false
         for row in rows {
             do {
                 let id = try row.get(Col.id)
@@ -5384,16 +5447,26 @@ extension DeckSQLManager {
                 }
 
                 if newPath != oldPath {
-                    _ = await withDBAsync {
-                        guard let db = self.db, let table = self.table else { return }
+                    guard FileManager.default.fileExists(atPath: newPath) else {
+                        hasError = true
+                        await log.error("Blob path migration missing file for id=\(id): \(newPath)")
+                        continue
+                    }
+                    let updated: Bool = await withDBAsync {
+                        guard let db = self.db, let table = self.table else { return false }
                         let updateQuery = table.filter(Col.id == id)
-                        try db.run(updateQuery.update(Col.blobPath <- newPath))
+                        return try db.run(updateQuery.update(Col.blobPath <- newPath)) > 0
+                    } ?? false
+                    if !updated {
+                        hasError = true
                     }
                 }
             } catch {
+                hasError = true
                 continue
             }
         }
+        return !hasError
     }
 
     private func migrateEmbeddingEncryption(encrypt: Bool) async {

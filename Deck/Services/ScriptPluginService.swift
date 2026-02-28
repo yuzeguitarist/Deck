@@ -9,6 +9,7 @@
 //
 
 import AppKit
+import Dispatch
 import Foundation
 import JavaScriptCore
 import CryptoKit
@@ -141,6 +142,13 @@ final class ScriptPluginService {
     private var pendingReloadWorkItem: DispatchWorkItem?
     private var lastReloadTime = Date.distantPast
     private let minReloadInterval: TimeInterval = 0.3
+    private let watchQueue = DispatchQueue(label: "deck.script.watch", qos: .utility)
+    private let watchLock = NSLock()
+    private var scriptsDirectoryWatcher: FileSystemWatcher?
+    private var pluginPathWatchers: [String: FileSystemWatcher] = [:]
+    private let watchEventMask: DispatchSource.FileSystemEvent = [
+        .write, .delete, .rename, .attrib, .extend, .link, .revoke
+    ]
     private let stateLock = NSLock()
     private var executionStates: [String: ExecutionState] = [:]
     private let scriptExecutionQueue = DispatchQueue(
@@ -187,6 +195,43 @@ final class ScriptPluginService {
         }
     }
 
+    private final class FileSystemWatcher {
+        private var source: DispatchSourceFileSystemObject?
+
+        init?(
+            path: String,
+            eventMask: DispatchSource.FileSystemEvent,
+            queue: DispatchQueue,
+            onChange: @escaping @Sendable (String) -> Void
+        ) {
+            let fileDescriptor = open(path, O_EVTONLY)
+            guard fileDescriptor >= 0 else { return nil }
+
+            let source = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: fileDescriptor,
+                eventMask: eventMask,
+                queue: queue
+            )
+            source.setEventHandler { [path] in
+                onChange(path)
+            }
+            source.setCancelHandler {
+                close(fileDescriptor)
+            }
+            source.resume()
+            self.source = source
+        }
+
+        func cancel() {
+            source?.cancel()
+            source = nil
+        }
+
+        deinit {
+            cancel()
+        }
+    }
+
     /// 脚本目录路径
     private var scriptsDirectoryURL: URL {
         let homeDir = FileManager.default.homeDirectoryForCurrentUser
@@ -195,7 +240,12 @@ final class ScriptPluginService {
 
     private init() {
         ensureScriptsDirectory()
+        startWatchingScriptsDirectory()
         loadPlugins()
+    }
+
+    deinit {
+        stopScriptWatchers()
     }
 
     // MARK: - Directory Setup
@@ -502,6 +552,81 @@ final class ScriptPluginService {
 
     // MARK: - Plugin Loading
 
+    private func makeWatcher(for path: String) -> FileSystemWatcher? {
+        FileSystemWatcher(
+            path: path,
+            eventMask: watchEventMask,
+            queue: watchQueue
+        ) { [weak self] changedPath in
+            log.debug("Script watcher detected change: \(changedPath)")
+            self?.reloadPlugins()
+        }
+    }
+
+    private func startWatchingScriptsDirectory() {
+        watchLock.lock()
+        defer { watchLock.unlock() }
+        guard scriptsDirectoryWatcher == nil else { return }
+
+        let rootPath = scriptsDirectoryURL.standardizedFileURL.path
+        scriptsDirectoryWatcher = makeWatcher(for: rootPath)
+        if scriptsDirectoryWatcher == nil {
+            log.warn("Failed to watch scripts directory: \(rootPath)")
+        } else {
+            log.info("Started watching scripts directory: \(rootPath)")
+        }
+    }
+
+    private func stopScriptWatchers() {
+        watchLock.lock()
+        let rootWatcher = scriptsDirectoryWatcher
+        let watchers = pluginPathWatchers.values
+        scriptsDirectoryWatcher = nil
+        pluginPathWatchers.removeAll()
+        watchLock.unlock()
+
+        rootWatcher?.cancel()
+        for watcher in watchers {
+            watcher.cancel()
+        }
+    }
+
+    private func watchedPaths(for plugins: [ScriptPlugin]) -> Set<String> {
+        var paths: Set<String> = []
+        for plugin in plugins {
+            let scriptURL = URL(fileURLWithPath: plugin.scriptPath).standardizedFileURL
+            let directoryURL = scriptURL.deletingLastPathComponent().standardizedFileURL
+            let manifestURL = directoryURL.appendingPathComponent("manifest.json").standardizedFileURL
+            paths.insert(directoryURL.path)
+            paths.insert(manifestURL.path)
+            paths.insert(scriptURL.path)
+        }
+        return paths
+    }
+
+    private func refreshScriptWatchTargets(with plugins: [ScriptPlugin]) {
+        let desiredPaths = watchedPaths(for: plugins)
+
+        watchLock.lock()
+        defer { watchLock.unlock() }
+
+        if scriptsDirectoryWatcher == nil {
+            scriptsDirectoryWatcher = makeWatcher(for: scriptsDirectoryURL.standardizedFileURL.path)
+        }
+
+        // 这里直接全量重建，避免某些编辑器原子替换文件后 watcher 绑定到旧 inode 导致失效。
+        for watcher in pluginPathWatchers.values {
+            watcher.cancel()
+        }
+        pluginPathWatchers.removeAll(keepingCapacity: true)
+
+        for path in desiredPaths {
+            if let watcher = makeWatcher(for: path) {
+                pluginPathWatchers[path] = watcher
+            }
+        }
+    }
+
     /// 重新加载所有插件
     func reloadPlugins() {
         let now = Date()
@@ -565,6 +690,7 @@ final class ScriptPluginService {
             DispatchQueue.main.async(execute: apply)
         }
 
+        refreshScriptWatchTargets(with: loaded)
         log.info("Loaded \(loaded.count) script plugins")
     }
 
@@ -653,6 +779,16 @@ final class ScriptPluginService {
             log.warn("Failed to hash script file: \(error.localizedDescription)")
             return nil
         }
+    }
+
+    func plugin(by pluginId: String) -> ScriptPlugin? {
+        pluginsLock.lock()
+        defer { pluginsLock.unlock() }
+        return plugins.first(where: { $0.id == pluginId })
+    }
+
+    func pluginDisplayName(for pluginId: String) -> String? {
+        plugin(by: pluginId)?.name
     }
 
     // MARK: - Script Execution
