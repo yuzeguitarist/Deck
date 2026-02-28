@@ -105,6 +105,72 @@ final class DataExportService {
         exportDataInternal(targetURL: targetURL, completion: completion)
     }
 
+    private static func makeStagingExportURL(for outputURL: URL) -> URL {
+        let directory = outputURL.deletingLastPathComponent()
+        let name = ".\(outputURL.lastPathComponent).\(UUID().uuidString).tmp"
+        return directory.appendingPathComponent(name)
+    }
+
+    private static func promoteStagingExport(from stagingURL: URL, to outputURL: URL) throws {
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: outputURL.path) {
+            _ = try fileManager.replaceItemAt(outputURL, withItemAt: stagingURL)
+        } else {
+            try fileManager.moveItem(at: stagingURL, to: outputURL)
+        }
+    }
+
+    private static let lineSeparatorLS = Data([0xE2, 0x80, 0xA8]) // U+2028
+    private static let lineSeparatorPS = Data([0xE2, 0x80, 0xA9]) // U+2029
+    private static let lineSeparatorLSEscaped = Data("\\u2028".utf8)
+    private static let lineSeparatorPSEscaped = Data("\\u2029".utf8)
+
+    private static func containsJSONLineSeparators(_ data: Data) -> Bool {
+        guard data.count >= 3 else { return false }
+        return data.withUnsafeBytes { rawBuffer in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            guard let base = bytes.baseAddress else { return false }
+            let count = bytes.count
+            var i = 0
+            while i <= count - 3 {
+                if base[i] == 0xE2, base[i + 1] == 0x80 {
+                    let marker = base[i + 2]
+                    if marker == 0xA8 || marker == 0xA9 {
+                        return true
+                    }
+                }
+                i += 1
+            }
+            return false
+        }
+    }
+
+    private static func replaceAll(in data: Data, target: Data, replacement: Data) -> Data {
+        guard !target.isEmpty else { return data }
+        guard data.range(of: target) != nil else { return data }
+
+        var result = Data()
+        result.reserveCapacity(data.count)
+        var searchStart = data.startIndex
+        while searchStart < data.endIndex,
+              let range = data[searchStart...].range(of: target) {
+            result.append(data[searchStart..<range.lowerBound])
+            result.append(replacement)
+            searchStart = range.upperBound
+        }
+        result.append(data[searchStart...])
+        return result
+    }
+
+    private static func sanitizeEncodedJSONForIDE(_ data: Data) -> Data {
+        guard containsJSONLineSeparators(data) else { return data }
+
+        var sanitized = data
+        sanitized = replaceAll(in: sanitized, target: lineSeparatorLS, replacement: lineSeparatorLSEscaped)
+        sanitized = replaceAll(in: sanitized, target: lineSeparatorPS, replacement: lineSeparatorPSEscaped)
+        return sanitized
+    }
+
     private func exportDataInternal(targetURL: URL?, completion: @escaping (Result<URL, Error>) -> Void) {
         Task { @MainActor in
             let isSecurityMode = DeckUserDefaults.securityModeEnabled
@@ -119,33 +185,42 @@ final class DataExportService {
             // 清理之前可能残留的临时文件
             cleanupTempFile()
 
+            var outputURL: URL?
+            var stagingURL: URL?
             do {
-                let outputURL: URL
+                let resolvedOutputURL: URL
                 if let targetURL {
-                    outputURL = targetURL
-                    if FileManager.default.fileExists(atPath: targetURL.path) {
-                        try FileManager.default.removeItem(at: targetURL)
-                    }
+                    resolvedOutputURL = targetURL
                 } else {
                     let tempDir = getSecureTempDirectory()
                     let fileName = "Deck_Export_\(formatDate(Date())).json"
                     let tempURL = tempDir.appendingPathComponent(fileName)
-                    outputURL = tempURL
+                    resolvedOutputURL = tempURL
                     currentExportTempURL = tempURL
                 }
 
+                outputURL = resolvedOutputURL
+                let resolvedStagingURL = Self.makeStagingExportURL(for: resolvedOutputURL)
+                stagingURL = resolvedStagingURL
+                try? FileManager.default.removeItem(at: resolvedStagingURL)
+
                 let exportedCount = try await Task.detached(priority: .utility) {
-                    try await Self.exportLargeDataset(to: outputURL)
+                    try await Self.exportLargeDataset(to: resolvedStagingURL)
                 }.value
 
+                try Self.promoteStagingExport(from: resolvedStagingURL, to: resolvedOutputURL)
                 lastExportedCount = exportedCount
-                completion(.success(outputURL))
+                completion(.success(resolvedOutputURL))
             } catch {
+                if let stagingURL {
+                    try? FileManager.default.removeItem(at: stagingURL)
+                }
                 if targetURL == nil, let tempURL = currentExportTempURL {
                     try? FileManager.default.removeItem(at: tempURL)
                     currentExportTempURL = nil
-                } else if let targetURL {
-                    try? FileManager.default.removeItem(at: targetURL)
+                } else if targetURL != nil, let outputURL {
+                    // 目标文件导出失败时不要删除用户已有备份，仅清理临时中间文件。
+                    await log.warn("Export failed; keeping existing file at \(outputURL.path)")
                 }
                 lastExportedCount = 0
                 completion(.failure(error))
@@ -158,7 +233,7 @@ final class DataExportService {
         encoder.dateEncodingStrategy = .iso8601
 
         let dateString = Date().ISO8601Format()
-        let header = #"{"version":1,"exportDate":""# + dateString + #""# + #","items":["#
+        let header = #"{"version":1,"exportDate":"\#(dateString)","items":["#
         guard let headerData = header.data(using: .utf8) else {
             throw ExportError.invalidFormat
         }
@@ -173,8 +248,12 @@ final class DataExportService {
         defer { try? handle.close() }
         try handle.seekToEnd()
 
-        let batchSize = 500
+        // 大数据导出时控制单批内存占用，避免一次拉太多大图/大文本。
+        let batchSize = 200
         let commaData = Data([UInt8(ascii: ",")])
+        let flushThreshold = 1 * 1024 * 1024
+        var writeBuffer = Data()
+        writeBuffer.reserveCapacity(flushThreshold + 64 * 1024)
         var isFirst = true
         var exportedCount = 0
         var cursorTimestamp: Int64?
@@ -190,7 +269,8 @@ final class DataExportService {
             if batch.isEmpty { break }
 
             for item in batch {
-                let fullData = item.resolvedData() ?? item.data
+                // loadFullData=true 时通常已经有完整数据，避免重复读 blob。
+                let fullData = item.hasFullData ? item.data : (item.resolvedData() ?? item.data)
                 let isLargeBlob = item.blobPath != nil
 
                 let exportItem = ExportItem(
@@ -210,11 +290,16 @@ final class DataExportService {
                     isTemporary: item.isTemporary,
                     isLargeBlob: isLargeBlob
                 )
-                let data = try encoder.encode(exportItem)
+                let encodedData = try encoder.encode(exportItem)
+                let data = Self.sanitizeEncodedJSONForIDE(encodedData)
                 if !isFirst {
-                    try handle.write(contentsOf: commaData)
+                    writeBuffer.append(commaData)
                 }
-                try handle.write(contentsOf: data)
+                writeBuffer.append(data)
+                if writeBuffer.count >= flushThreshold {
+                    try handle.write(contentsOf: writeBuffer)
+                    writeBuffer.removeAll(keepingCapacity: true)
+                }
                 isFirst = false
                 exportedCount += 1
             }
@@ -226,7 +311,10 @@ final class DataExportService {
             cursorId = lastId
         }
 
-        try handle.write(contentsOf: Data([UInt8(ascii: "]"), UInt8(ascii: "}")]))
+        if !writeBuffer.isEmpty {
+            try handle.write(contentsOf: writeBuffer)
+        }
+        try handle.write(contentsOf: Data([UInt8(ascii: "]"), UInt8(ascii: "}"), UInt8(ascii: "\n")]))
         return exportedCount
     }
     
