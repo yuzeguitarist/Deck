@@ -135,6 +135,12 @@ final class ScriptPluginService {
 
     private(set) var plugins: [ScriptPlugin] = []
     private let pluginsLock = NSLock()
+    private var pluginsById: [String: ScriptPlugin] = [:]
+    private let scriptCacheLock = NSLock()
+    private var scriptContentCache: [String: String] = [:]
+    private let networkAuthCacheLock = NSLock()
+    private var authorizedNetworkPluginHashesCache: [String: String] = [:]
+    private var authorizedNetworkLegacyPluginsCache: Set<String> = []
     private let maxManifestBytes = 64 * 1024
     private let maxScriptBytes = 1 * 1024 * 1024
     private let reloadQueue = DispatchQueue(label: "deck.script.reload", qos: .utility)
@@ -238,9 +244,77 @@ final class ScriptPluginService {
         return homeDir.appendingPathComponent(".deck/scripts", isDirectory: true)
     }
 
+    private func reloadNetworkAuthorizationCache() {
+        let hashes = DeckUserDefaults.authorizedNetworkPluginHashes
+        let legacy = Set(DeckUserDefaults.authorizedNetworkPlugins)
+        networkAuthCacheLock.lock()
+        authorizedNetworkPluginHashesCache = hashes
+        authorizedNetworkLegacyPluginsCache = legacy
+        networkAuthCacheLock.unlock()
+    }
+
+    private func isNetworkAuthorized(pluginId: String, scriptHash: String?) -> Bool {
+        guard let scriptHash = scriptHash?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !scriptHash.isEmpty else {
+            return false
+        }
+
+        networkAuthCacheLock.lock()
+        let storedHash = authorizedNetworkPluginHashesCache[pluginId]
+        let hasLegacyAuth = authorizedNetworkLegacyPluginsCache.contains(pluginId)
+        networkAuthCacheLock.unlock()
+
+        if let storedHash {
+            return storedHash == scriptHash
+        }
+
+        // 保持旧行为：命中 legacy 授权时自动迁移到 hash 绑定。
+        if hasLegacyAuth {
+            DeckUserDefaults.authorizeNetworkPlugin(pluginId: pluginId, scriptHash: scriptHash)
+            networkAuthCacheLock.lock()
+            authorizedNetworkPluginHashesCache[pluginId] = scriptHash
+            authorizedNetworkLegacyPluginsCache.remove(pluginId)
+            networkAuthCacheLock.unlock()
+            return true
+        }
+
+        return false
+    }
+
+    private func readScriptContentFromDisk(for plugin: ScriptPlugin) -> String? {
+        do {
+            let attrs = try FileManager.default.attributesOfItem(atPath: plugin.scriptPath)
+            let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+            guard size > 0, size <= maxScriptBytes else {
+                log.warn("Plugin script too large (\(size) bytes): \(plugin.scriptPath)")
+                return nil
+            }
+        } catch {
+            log.warn("Failed to stat plugin script: \(error.localizedDescription)")
+            return nil
+        }
+
+        guard let scriptContent = try? String(contentsOfFile: plugin.scriptPath, encoding: .utf8) else {
+            log.error("Failed to read script: \(plugin.scriptPath)")
+            return nil
+        }
+        return scriptContent
+    }
+
+    private func preloadScriptContents(for plugins: [ScriptPlugin]) -> [String: String] {
+        var cache: [String: String] = [:]
+        cache.reserveCapacity(plugins.count)
+        for plugin in plugins {
+            guard let content = readScriptContentFromDisk(for: plugin) else { continue }
+            cache[plugin.id] = content
+        }
+        return cache
+    }
+
     private init() {
         ensureScriptsDirectory()
         startWatchingScriptsDirectory()
+        reloadNetworkAuthorizationCache()
         loadPlugins()
     }
 
@@ -678,11 +752,21 @@ final class ScriptPluginService {
             }
         }
 
+        let loadedById = loaded.reduce(into: [String: ScriptPlugin]()) { result, plugin in
+            result[plugin.id] = plugin
+        }
+        let scriptCache = preloadScriptContents(for: loaded)
+        reloadNetworkAuthorizationCache()
+
         let apply: () -> Void = { [weak self] in
             guard let self else { return }
             self.pluginsLock.lock()
             self.plugins = loaded
+            self.pluginsById = loadedById
             self.pluginsLock.unlock()
+            self.scriptCacheLock.lock()
+            self.scriptContentCache = scriptCache
+            self.scriptCacheLock.unlock()
         }
         if Thread.isMainThread {
             apply()
@@ -749,7 +833,8 @@ final class ScriptPluginService {
             return nil
         }
 
-        let scriptHash = computeScriptHash(at: scriptPath)
+        let requiresNetwork = manifest.permissions?.network ?? false
+        let scriptHash = requiresNetwork ? computeScriptHash(at: scriptPath) : nil
 
         return ScriptPlugin(
             id: directory.lastPathComponent,
@@ -760,7 +845,7 @@ final class ScriptPluginService {
             scriptPath: scriptPath,
             scriptHash: scriptHash,
             icon: manifest.icon,
-            requiresNetwork: manifest.permissions?.network ?? false
+            requiresNetwork: requiresNetwork
         )
     }
 
@@ -784,7 +869,7 @@ final class ScriptPluginService {
     func plugin(by pluginId: String) -> ScriptPlugin? {
         pluginsLock.lock()
         defer { pluginsLock.unlock() }
-        return plugins.first(where: { $0.id == pluginId })
+        return pluginsById[pluginId]
     }
 
     func pluginDisplayName(for pluginId: String) -> String? {
@@ -852,7 +937,7 @@ final class ScriptPluginService {
         let plugin: ScriptPlugin? = {
             pluginsLock.lock()
             defer { pluginsLock.unlock() }
-            return plugins.first(where: { $0.id == pluginId })
+            return pluginsById[pluginId]
         }()
         guard let plugin else {
             return ScriptResult(
@@ -1144,25 +1229,23 @@ final class ScriptPluginService {
         context.setObject(atob, forKeyedSubscript: "atob" as NSString)
 
         // 如果插件有网络权限，添加 fetch API
-        if plugin.requiresNetwork && plugin.isNetworkAuthorized {
+        if plugin.requiresNetwork && isNetworkAuthorized(pluginId: plugin.id, scriptHash: plugin.scriptHash) {
             setupNetworkAPI(context: context, pluginId: plugin.id, executionState: executionState)
         }
 
-        // 加载脚本
-        do {
-            let attrs = try FileManager.default.attributesOfItem(atPath: plugin.scriptPath)
-            let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
-            guard size > 0, size <= maxScriptBytes else {
-                log.warn("Plugin script too large (\(size) bytes): \(plugin.scriptPath)")
-                return nil
-            }
-        } catch {
-            log.warn("Failed to stat plugin script: \(error.localizedDescription)")
-            return nil
-        }
-        guard let scriptContent = try? String(contentsOfFile: plugin.scriptPath, encoding: .utf8) else {
-            log.error("Failed to read script: \(plugin.scriptPath)")
-            return nil
+        // 优先使用预加载缓存，未命中时回退磁盘读取并回填缓存。
+        let scriptContent: String
+        scriptCacheLock.lock()
+        let cachedScript = scriptContentCache[plugin.id]
+        scriptCacheLock.unlock()
+        if let cachedScript {
+            scriptContent = cachedScript
+        } else {
+            guard let loaded = readScriptContentFromDisk(for: plugin) else { return nil }
+            scriptCacheLock.lock()
+            scriptContentCache[plugin.id] = loaded
+            scriptCacheLock.unlock()
+            scriptContent = loaded
         }
 
         context.evaluateScript(scriptContent)
@@ -1370,15 +1453,17 @@ final class ScriptPluginService {
         let scriptHash: String? = {
             pluginsLock.lock()
             defer { pluginsLock.unlock() }
-            return plugins.first(where: { $0.id == pluginId })?.scriptHash
+            return pluginsById[pluginId]?.scriptHash
         }()
         DeckUserDefaults.authorizeNetworkPlugin(pluginId: pluginId, scriptHash: scriptHash)
+        reloadNetworkAuthorizationCache()
         log.info("Authorized network permission for plugin: \(pluginId)")
     }
 
     /// 撤销插件网络权限
     func revokeNetworkPermission(for pluginId: String) {
         DeckUserDefaults.revokeNetworkPlugin(pluginId: pluginId)
+        reloadNetworkAuthorizationCache()
         log.info("Revoked network permission for plugin: \(pluginId)")
     }
 
