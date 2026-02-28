@@ -93,13 +93,24 @@ extension String {
         }
 
         // Already has a scheme: accept common web schemes + Apple Music/Podcasts deep links.
+        // Be conservative for host-less forms like `http:foo` / `music:abc` to avoid treating plain text as URL.
         if let url = buildURL(candidate),
-           let scheme = url.scheme?.lowercased(),
-           ["http", "https", "ftp", "itms", "itmss", "music", "podcast", "podcasts"].contains(scheme) {
-            if let host = url.host {
-                guard isValidHost(host) else { return nil }
+           let scheme = url.scheme?.lowercased() {
+            switch scheme {
+            case "http", "https", "ftp":
+                // Require a valid host for web URLs.
+                guard let host = url.host, isValidHost(host) else { return nil }
+                return url
+            case "itms", "itmss", "music", "podcast", "podcasts":
+                // Require an authority marker (://) for deep links to avoid false positives like `podcast:true`.
+                guard candidate.contains("://") else { return nil }
+                if let host = url.host {
+                    guard isValidHost(host) else { return nil }
+                }
+                return url
+            default:
+                break
             }
-            return url
         }
 
         // www.* shorthand
