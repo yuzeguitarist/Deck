@@ -117,7 +117,7 @@
 | `Enter` | Paste selected |
 | `Shift + Enter` | Paste as plain text |
 | `Cmd + Number` | Quick paste (1–9) |
-| `Cmd + Q` | Toggle queue mode |
+| `Option + Q` | Toggle queue mode |
 | `Space` | Toggle preview |
 | `Esc` | Close |
 
@@ -277,7 +277,7 @@ Questions or licensing inquiries → yuzeguitar@gmail.com
 | `Enter` | 粘贴选中项 |
 | `Shift + Enter` | 粘贴为纯文本 |
 | `Cmd + 数字` | 快速粘贴 (1–9) |
-| `Cmd + Q` | 切换队列模式 |
+| `Option + Q` | 切换队列模式 |
 | `Space` | 切换预览 |
 | `Esc` | 关闭 |
 
