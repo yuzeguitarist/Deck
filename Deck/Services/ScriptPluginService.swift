@@ -152,8 +152,13 @@ final class ScriptPluginService {
     private let watchLock = NSLock()
     private var scriptsDirectoryWatcher: FileSystemWatcher?
     private var pluginPathWatchers: [String: FileSystemWatcher] = [:]
-    private let watchEventMask: DispatchSource.FileSystemEvent = [
+    // 目录需要监听 .attrib，才能感知新建文件/文件夹等变化。
+    private let directoryWatchEventMask: DispatchSource.FileSystemEvent = [
         .write, .delete, .rename, .attrib, .extend, .link, .revoke
+    ]
+    // 文件不监听 .attrib，避免读取脚本文件时触发自循环重载。
+    private let fileWatchEventMask: DispatchSource.FileSystemEvent = [
+        .write, .delete, .rename, .extend, .link, .revoke
     ]
     private let stateLock = NSLock()
     private var executionStates: [String: ExecutionState] = [:]
@@ -626,13 +631,21 @@ final class ScriptPluginService {
 
     // MARK: - Plugin Loading
 
+    private func watchEventMask(for path: String) -> DispatchSource.FileSystemEvent {
+        var isDirectory = ObjCBool(false)
+        if FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory),
+           isDirectory.boolValue {
+            return directoryWatchEventMask
+        }
+        return fileWatchEventMask
+    }
+
     private func makeWatcher(for path: String) -> FileSystemWatcher? {
         FileSystemWatcher(
             path: path,
-            eventMask: watchEventMask,
+            eventMask: watchEventMask(for: path),
             queue: watchQueue
         ) { [weak self] changedPath in
-            log.debug("Script watcher detected change: \(changedPath)")
             self?.reloadPlugins()
         }
     }
@@ -667,6 +680,7 @@ final class ScriptPluginService {
 
     private func watchedPaths(for plugins: [ScriptPlugin]) -> Set<String> {
         var paths: Set<String> = []
+        paths.formUnion(pluginCandidateDirectoryPaths())
         for plugin in plugins {
             let scriptURL = URL(fileURLWithPath: plugin.scriptPath).standardizedFileURL
             let directoryURL = scriptURL.deletingLastPathComponent().standardizedFileURL
@@ -674,6 +688,28 @@ final class ScriptPluginService {
             paths.insert(directoryURL.path)
             paths.insert(manifestURL.path)
             paths.insert(scriptURL.path)
+        }
+        return paths
+    }
+
+    private func pluginCandidateDirectoryPaths() -> Set<String> {
+        let fm = FileManager.default
+        guard let contents = try? fm.contentsOfDirectory(
+            at: scriptsDirectoryURL,
+            includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey],
+            options: .skipsHiddenFiles
+        ) else {
+            return []
+        }
+
+        var paths: Set<String> = []
+        for url in contents {
+            guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+                  values.isDirectory == true,
+                  values.isSymbolicLink != true else {
+                continue
+            }
+            paths.insert(url.standardizedFileURL.path)
         }
         return paths
     }
