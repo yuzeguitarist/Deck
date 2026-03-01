@@ -2191,6 +2191,28 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         removeRecoveryBackupFiles(at: backupPath)
     }
 
+    /// 立即从数据库恢复备份还原数据库
+    /// - Returns: 是否恢复成功
+    func restoreDatabaseRecoveryBackupNow() -> Bool {
+        guard DeckUserDefaults.databaseAutoBackupEnabled else {
+            log.warn("Recovery backup restore skipped because automatic backup is disabled")
+            return false
+        }
+
+        let basePath = getStoragePath()
+        let paths = databasePaths(for: basePath)
+        guard FileManager.default.fileExists(atPath: paths.backupPath) else {
+            log.warn("Recovery backup restore skipped because backup file is missing")
+            return false
+        }
+
+        return syncOnDBQueue {
+            db = nil
+            table = nil
+            return restoreDatabaseFromBackup(dbPath: paths.dbPath, backupPath: paths.backupPath)
+        }
+    }
+
     private func removeRecoveryBackupFiles(at backupPath: String) {
         let fileManager = FileManager.default
         let tempPath = backupPath + ".tmp"
