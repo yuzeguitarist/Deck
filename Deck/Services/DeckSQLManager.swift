@@ -4608,7 +4608,7 @@ extension DeckSQLManager {
 
         // 分批扫描参数
         let batchSize = 500
-        // ✅ 关键优化：用 (timestamp,id) cursor 做 keyset pagination，
+        // 关键优化：用 (timestamp,id) cursor 做 keyset pagination，
         // 避免 OFFSET 在大表上越来越慢（SQLite 需要扫描+丢弃 offset 行）
         var cursor: RowCursor? = nil
         var scanned = 0
