@@ -25,6 +25,21 @@ enum LayoutMode: Int, CaseIterable, Identifiable {
     }
 }
 
+/// 竖版模式停靠位置
+enum VerticalPanelSide: Int, CaseIterable, Identifiable {
+    case right = 0
+    case left = 1
+
+    var id: Int { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .left: return NSLocalizedString("靠左", comment: "Vertical panel side: Left")
+        case .right: return NSLocalizedString("靠右", comment: "Vertical panel side: Right")
+        }
+    }
+}
+
 enum Const {
     // Card dimensions (horizontal mode)
     static let cardSize: CGFloat = 200.0
