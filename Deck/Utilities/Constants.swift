@@ -10,14 +10,37 @@
 import Foundation
 import SwiftUI
 
+/// 面板布局模式
+enum LayoutMode: Int, CaseIterable, Identifiable {
+    case horizontal = 0   // 底部横向弹出（默认）
+    case vertical  = 1    // 侧边竖向弹出
+
+    var id: Int { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .horizontal: return NSLocalizedString("横版模式", comment: "Layout mode: Horizontal")
+        case .vertical:   return NSLocalizedString("竖版模式", comment: "Layout mode: Vertical")
+        }
+    }
+}
+
 enum Const {
-    // Card dimensions
+    // Card dimensions (horizontal mode)
     static let cardSize: CGFloat = 200.0
     static let cardContentSize: CGFloat = 150.0
     static let cardHeaderSize: CGFloat = 40.0
     static let cardSpace: CGFloat = 16.0
     static let cardBottomPadding: CGFloat = 12.0
     static let linkCardImageSize: CGSize = CGSize(width: 640.0, height: 360.0)
+
+    // Vertical mode card/row dimensions
+    static let verticalWindowWidth: CGFloat = 380.0
+    static let verticalWindowInset: CGFloat = 7.0
+    static let verticalRowHeight: CGFloat = 72.0
+    static let verticalRowSpace: CGFloat = 4.0
+    static let verticalRowIconSize: CGFloat = 40.0
+    static let verticalRowTrailingWidth: CGFloat = 60.0
     
     // Window dimensions
     static let windowHeight: CGFloat = 305.0
