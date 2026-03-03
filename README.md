@@ -1,3 +1,7 @@
+> [!WARNING]
+> Important: Some third-party repositories are impersonating Deck and distributing suspicious ZIP packages. Please read [Security Notice / 安全警告](SECURITY-NOTICE.md).
+> 重要：有第三方仓库冒用 Deck 名称分发可疑 ZIP 包，请先阅读[安全警告 / Security Notice](SECURITY-NOTICE.md)。
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="photos/deck-macOS-Dark-1024x1024@1x.png">
