@@ -179,7 +179,7 @@ This project is **partially open source** under **GPL-3.0 with Commons Clause** 
 - Derivatives must use the same license.
 - Commercial use requires permission.
 
-Questions or licensing inquiries → yuzeguitar@gmail.com
+Questions or licensing inquiries → hi@deckclip.app
 
 ## Support
 
@@ -339,7 +339,7 @@ Questions or licensing inquiries → yuzeguitar@gmail.com
 - 衍生作品须使用相同许可证
 - 商业用途需获得许可
 
-如有疑问或授权需求，请联系：yuzeguitar@gmail.com
+如有疑问或授权需求，请联系：hi@deckclip.app
 
 ## 支持
 
