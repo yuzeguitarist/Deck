@@ -54,7 +54,7 @@ an individual is officially representing the community in public spaces.
 
 Instances of abusive, harassing, or otherwise unacceptable behavior may be
 reported to the community leaders responsible for enforcement at
-yuzeguitar@gmail.com.
+report@deckclip.app.
 
 All complaints will be reviewed and investigated promptly and fairly.
 
@@ -109,7 +109,7 @@ https://www.contributor-covenant.org/version/2/0/code_of_conduct.html.
 ## 执行
 
 可以向负责执行的社区领导者报告滥用、骚扰或其他不可接受的行为：
-yuzeguitar@gmail.com
+report@deckclip.app
 
 所有投诉都将被及时、公正地审查和调查。
 

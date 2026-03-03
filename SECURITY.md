@@ -20,7 +20,7 @@ We take security seriously. If you find a security issue in Deck, please report 
 
 ### Please DO
 
-1. Email `yuzeguitar@gmail.com` with:
+1. Email `report@deckclip.app` with:
    - A clear description of the issue
    - Steps to reproduce
    - Potential impact
@@ -77,7 +77,7 @@ We take security seriously. If you find a security issue in Deck, please report 
 
 ### 请这样做
 
-1. 发送邮件到 `yuzeguitar@gmail.com`，并尽量包含：
+1. 发送邮件到 `report@deckclip.app`，并尽量包含：
    - 漏洞的清晰描述
    - 复现步骤
    - 潜在影响
