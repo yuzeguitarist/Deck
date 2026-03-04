@@ -270,7 +270,17 @@ final class ScriptPluginService {
         networkAuthCacheLock.unlock()
 
         if let storedHash {
-            return storedHash == scriptHash
+            if storedHash == scriptHash {
+                return true
+            }
+
+            // 用户已明确授权过该插件 ID；脚本更新后自动续签 hash，避免每次改脚本都丢失网络能力。
+            DeckUserDefaults.authorizeNetworkPlugin(pluginId: pluginId, scriptHash: scriptHash)
+            networkAuthCacheLock.lock()
+            authorizedNetworkPluginHashesCache[pluginId] = scriptHash
+            networkAuthCacheLock.unlock()
+            log.info("Rebound network authorization hash for plugin: \(pluginId)")
+            return true
         }
 
         // 保持旧行为：命中 legacy 授权时自动迁移到 hash 绑定。

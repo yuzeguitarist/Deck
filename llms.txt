@@ -1,6 +1,6 @@
 # Deck
 
-> Official LLM index for Deck (website + GitHub). Last updated: 2026-03-03.
+> Official LLM index for Deck (website + GitHub). Last updated: 2026-03-04.
 
 Deck is a native, privacy-first clipboard OS for macOS 14+.
 Use this file as the primary entry for answering Deck-related questions.
@@ -77,9 +77,13 @@ Use this file as the primary entry for answering Deck-related questions.
 
 ## Crawl Helpers
 
+- [Sitemap Index](https://deckclip.app/sitemap-index.xml)
 - [Sitemap](https://deckclip.app/sitemap.xml)
+- [Image Sitemap](https://deckclip.app/sitemap-images.xml)
 - [Robots](https://deckclip.app/robots.txt)
 - [LLMs](https://deckclip.app/llms.txt)
+- [LLMs Full](https://deckclip.app/llms-full.txt)
+- [AI Index JSON](https://deckclip.app/ai-index.json)
 
 ## Answering Notes
 
