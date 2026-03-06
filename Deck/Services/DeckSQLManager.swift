@@ -791,7 +791,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
         // Security mode keeps some plaintext in memory caches (lowercased search strings). Clear them when inactive.
         NotificationCenter.default.addObserver(self, selector: #selector(handleSensitiveCacheInvalidation), name: NSApplication.willResignActiveNotification, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(handleSensitiveCacheInvalidation), name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(handleSensitiveCacheInvalidation), name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
     }
 
     @objc private func handleSensitiveCacheInvalidation() {
@@ -1317,6 +1317,8 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         if DeckUserDefaults.useCustomStorage {
             if let bookmarkData = DeckUserDefaults.storageBookmark {
                 basePath = resolveSecurityScopedStoragePath(from: bookmarkData)
+                    ?? DeckUserDefaults.customStoragePath
+                    ?? defaultStoragePath()
             } else if let customPath = DeckUserDefaults.customStoragePath {
                 stopSecurityScopedAccess()
                 basePath = customPath
@@ -1332,7 +1334,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         return (basePath as NSString).appendingPathComponent("Deck")
     }
 
-    private func resolveSecurityScopedStoragePath(from bookmarkData: Data) -> String {
+    private func resolveSecurityScopedStoragePath(from bookmarkData: Data) -> String? {
         var isStale = false
         do {
             let url = try URL(
@@ -1359,12 +1361,13 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 }
                 return url.path
             }
+            log.error("Failed to start security-scoped access for \(url.path)")
         } catch {
             log.error("Failed to resolve bookmark: \(error)")
         }
 
         stopSecurityScopedAccess()
-        return defaultStoragePath()
+        return nil
     }
 
     private func ensureSecurityScopedAccess(for url: URL) -> (success: Bool, didStart: Bool) {
@@ -3288,6 +3291,8 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     }
     
     deinit {
+        NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
         stopSecurityScopedAccess()
     }
 }
@@ -3820,45 +3825,36 @@ extension DeckSQLManager {
         let searchTextPlain: String
     }
 
-    private func prepareInsertPayload(for item: ClipboardItem) async -> InsertPayload? {
-        var dataToStore = item.data
-        var blobPath = item.blobPath
-        var previewData = item.previewData
-        let isSecurityMode = DeckUserDefaults.securityModeEnabled
+    enum ImportError: LocalizedError {
+        case databaseUnavailable
+        case payloadPreparationFailed(String)
+        case insertFailed(String)
 
-        if item.itemType == .image && item.data.count > Const.largeBlobThreshold {
-            // Large image blobs can be 10s-100s of MB. Persisting them synchronously on the
-            // caller's executor (often MainActor via UI-driven insert) causes visible UI stalls.
-            // Offload to BlobStorage's IO queue while preserving the exact insert semantics.
-            if let path = await BlobStorage.shared.storeAsync(
-                data: item.data,
-                uniqueId: item.uniqueId,
-                encrypt: isSecurityMode
-            ) {
-                blobPath = path
-
-                if previewData?.isEmpty ?? true {
-                    previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
-                    await log.debug("Pre-generated thumbnail for large image (\(item.data.count) bytes)")
-                }
-
-                dataToStore = Data()
+        var errorDescription: String? {
+            switch self {
+            case .databaseUnavailable:
+                return NSLocalizedString("数据库当前不可用。", comment: "Import database unavailable")
+            case .payloadPreparationFailed(let uniqueId):
+                return String(
+                    format: NSLocalizedString("准备导入记录失败：%@", comment: "Import payload preparation failed"),
+                    uniqueId
+                )
+            case .insertFailed(let uniqueId):
+                return String(
+                    format: NSLocalizedString("写入导入记录失败：%@", comment: "Import insert failed"),
+                    uniqueId
+                )
             }
-        } else if item.isUnsupported && item.data.count > Const.largeBlobThreshold {
-            // Unsupported payloads can be large; offload to blob storage to avoid DB bloat.
-            if let path = await BlobStorage.shared.storeAsync(
-                data: item.data,
-                uniqueId: item.uniqueId,
-                encrypt: isSecurityMode
-            ) {
-                blobPath = path
-                dataToStore = Data()
-            }
-        } else if item.itemType == .image && item.data.count > 50 * 1024 && (previewData?.isEmpty ?? true) {
-            previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
-            await log.debug("Pre-generated thumbnail for medium image (\(item.data.count) bytes)")
         }
+    }
 
+    private func makeInsertPayload(
+        for item: ClipboardItem,
+        dataToStore: Data,
+        previewData: Data?,
+        blobPath: String?,
+        isSecurityMode: Bool
+    ) -> InsertPayload? {
         let encodedSourceAnchor = item.sourceAnchor?.toJSON()
         let normalizedCustomTitle = ClipboardItem.normalizedCustomTitle(item.customTitle)
         let encryptedData: Data
@@ -3924,122 +3920,277 @@ extension DeckSQLManager {
             searchTextPlain: item.searchText
         )
     }
+
+    private func prepareInsertPayload(for item: ClipboardItem) async -> InsertPayload? {
+        var dataToStore = item.data
+        var blobPath = item.blobPath
+        var previewData = item.previewData
+        let isSecurityMode = DeckUserDefaults.securityModeEnabled
+
+        if item.itemType == .image && item.data.count > Const.largeBlobThreshold {
+            // Large image blobs can be 10s-100s of MB. Persisting them synchronously on the
+            // caller's executor (often MainActor via UI-driven insert) causes visible UI stalls.
+            // Offload to BlobStorage's IO queue while preserving the exact insert semantics.
+            if let path = await BlobStorage.shared.storeAsync(
+                data: item.data,
+                uniqueId: item.uniqueId,
+                encrypt: isSecurityMode
+            ) {
+                blobPath = path
+
+                if previewData?.isEmpty ?? true {
+                    previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
+                    await log.debug("Pre-generated thumbnail for large image (\(item.data.count) bytes)")
+                }
+
+                dataToStore = Data()
+            }
+        } else if item.isUnsupported && item.data.count > Const.largeBlobThreshold {
+            // Unsupported payloads can be large; offload to blob storage to avoid DB bloat.
+            if let path = await BlobStorage.shared.storeAsync(
+                data: item.data,
+                uniqueId: item.uniqueId,
+                encrypt: isSecurityMode
+            ) {
+                blobPath = path
+                dataToStore = Data()
+            }
+        } else if item.itemType == .image && item.data.count > 50 * 1024 && (previewData?.isEmpty ?? true) {
+            previewData = await ClipboardItem.generatePreviewThumbnailDataAsync(from: item.data, maxSize: 200)
+            await log.debug("Pre-generated thumbnail for medium image (\(item.data.count) bytes)")
+        }
+
+        return makeInsertPayload(
+            for: item,
+            dataToStore: dataToStore,
+            previewData: previewData,
+            blobPath: blobPath,
+            isSecurityMode: isSecurityMode
+        )
+    }
+
+    private func prepareInsertPayloadSynchronously(for item: ClipboardItem) -> InsertPayload? {
+        var dataToStore = item.data
+        var blobPath = item.blobPath
+        var previewData = item.previewData
+        let originalBlobPath = item.blobPath
+        let isSecurityMode = DeckUserDefaults.securityModeEnabled
+
+        if item.itemType == .image && item.data.count > Const.largeBlobThreshold {
+            if let path = BlobStorage.shared.store(
+                data: item.data,
+                uniqueId: item.uniqueId,
+                encrypt: isSecurityMode
+            ) {
+                blobPath = path
+
+                if previewData?.isEmpty ?? true {
+                    previewData = ClipboardItem.generatePreviewThumbnailData(from: item.data, maxSize: 200)
+                    log.debug("Pre-generated thumbnail for large image (\(item.data.count) bytes) during import")
+                }
+
+                dataToStore = Data()
+            }
+        } else if item.isUnsupported && item.data.count > Const.largeBlobThreshold {
+            if let path = BlobStorage.shared.store(
+                data: item.data,
+                uniqueId: item.uniqueId,
+                encrypt: isSecurityMode
+            ) {
+                blobPath = path
+                dataToStore = Data()
+            }
+        } else if item.itemType == .image && item.data.count > 50 * 1024 && (previewData?.isEmpty ?? true) {
+            previewData = ClipboardItem.generatePreviewThumbnailData(from: item.data, maxSize: 200)
+            log.debug("Pre-generated thumbnail for medium image (\(item.data.count) bytes) during import")
+        }
+
+        let payload = makeInsertPayload(
+            for: item,
+            dataToStore: dataToStore,
+            previewData: previewData,
+            blobPath: blobPath,
+            isSecurityMode: isSecurityMode
+        )
+
+        if payload == nil, blobPath != originalBlobPath {
+            BlobStorage.shared.remove(path: blobPath)
+        }
+
+        return payload
+    }
+
+    private func cleanupPreparedImportPayloads(_ payloads: [InsertPayload]) {
+        for payload in payloads where payload.blobPath != nil {
+            BlobStorage.shared.remove(path: payload.blobPath)
+        }
+    }
+
+    private func insertPreparedPayload(
+        _ payload: InsertPayload,
+        using db: Connection,
+        table: Table
+    ) throws -> (rowId: Int64, usedUpsert: Bool) {
+        // Prefer UPSERT to avoid delete+insert write amplification on hot-path inserts.
+        if supportsUniqueIdUpsert {
+            do {
+                let sql = """
+                INSERT INTO ClipboardHistory (
+                    unique_id,
+                    type,
+                    item_type,
+                    data,
+                    preview_data,
+                    timestamp,
+                    app_path,
+                    app_name,
+                    custom_title,
+                    source_anchor,
+                    search_text,
+                    content_length,
+                    tag_id,
+                    blob_path,
+                    is_temporary,
+                    is_encrypted
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(unique_id) WHERE unique_id <> '' DO UPDATE SET
+                    type = excluded.type,
+                    item_type = excluded.item_type,
+                    data = excluded.data,
+                    preview_data = excluded.preview_data,
+                    timestamp = excluded.timestamp,
+                    app_path = excluded.app_path,
+                    app_name = excluded.app_name,
+                    custom_title = excluded.custom_title,
+                    source_anchor = excluded.source_anchor,
+                    search_text = excluded.search_text,
+                    content_length = excluded.content_length,
+                    tag_id = CASE
+                        WHEN excluded.tag_id = -1 AND ClipboardHistory.tag_id != -1
+                        THEN ClipboardHistory.tag_id
+                        ELSE excluded.tag_id
+                    END,
+                    blob_path = excluded.blob_path,
+                    is_temporary = excluded.is_temporary,
+                    is_encrypted = excluded.is_encrypted
+                RETURNING id
+                """
+
+                let dataBlob = SQLite.Blob(bytes: [UInt8](payload.data))
+                let previewBlob = payload.previewData.map { SQLite.Blob(bytes: [UInt8]($0)) }
+                let stmt = try db.prepare(sql).bind(
+                    payload.uniqueId,
+                    payload.pasteboardType,
+                    payload.itemType,
+                    dataBlob,
+                    previewBlob,
+                    payload.timestamp,
+                    payload.appPath,
+                    payload.appName,
+                    payload.customTitle,
+                    payload.sourceAnchor,
+                    payload.searchText,
+                    payload.contentLength,
+                    payload.tagId,
+                    payload.blobPath,
+                    payload.isTemporary,
+                    payload.isEncrypted
+                )
+
+                if let row = try stmt.failableNext(), let rowId = row[0] as? Int64 {
+                    return (rowId, true)
+                }
+            } catch {
+                // Likely reasons:
+                // - SQLite < 3.24 (no UPSERT) / < 3.35 (no RETURNING)
+                // - Unique constraint not present / not matched
+                supportsUniqueIdUpsert = false
+                log.debug("UPSERT(unique_id) unavailable, fallback to delete+insert: \(error.localizedDescription)")
+            }
+        }
+
+        let deleteQuery = table.filter(Col.uniqueId == payload.uniqueId)
+        let existingTagId = try db.pluck(deleteQuery.select(Col.tagId))?.get(Col.tagId)
+        let mergedTagId = Self.mergedTagId(incoming: payload.tagId, existing: existingTagId)
+        _ = try db.run(deleteQuery.delete())
+
+        let insert = table.insert(
+            Col.uniqueId <- payload.uniqueId,
+            Col.type <- payload.pasteboardType,
+            Col.itemType <- payload.itemType,
+            Col.data <- payload.data,
+            Col.previewData <- payload.previewData,
+            Col.ts <- payload.timestamp,
+            Col.appPath <- payload.appPath,
+            Col.appName <- payload.appName,
+            Col.customTitle <- payload.customTitle,
+            Col.sourceAnchor <- payload.sourceAnchor,
+            Col.searchText <- payload.searchText,
+            Col.length <- payload.contentLength,
+            Col.tagId <- mergedTagId,
+            Col.blobPath <- payload.blobPath,
+            Col.isTemporary <- payload.isTemporary,
+            Col.isEncrypted <- payload.isEncrypted
+        )
+
+        return (try db.run(insert), false)
+    }
+
+    func importItemsAtomically(_ items: [ClipboardItem]) async throws -> Int {
+        guard !items.isEmpty else { return 0 }
+
+        var payloads: [InsertPayload] = []
+        payloads.reserveCapacity(items.count)
+
+        for item in items {
+            guard let payload = prepareInsertPayloadSynchronously(for: item) else {
+                cleanupPreparedImportPayloads(payloads)
+                throw ImportError.payloadPreparationFailed(item.uniqueId)
+            }
+            payloads.append(payload)
+        }
+
+        do {
+            let rowIds = try await asyncOnDBQueue { () throws -> [Int64] in
+                guard let db = self.db, let table = self.table else {
+                    throw ImportError.databaseUnavailable
+                }
+
+                var rowIds: [Int64] = []
+                rowIds.reserveCapacity(payloads.count)
+
+                try db.transaction {
+                    for payload in payloads {
+                        let result = try self.insertPreparedPayload(payload, using: db, table: table)
+                        guard result.rowId > 0 else {
+                            throw ImportError.insertFailed(payload.uniqueId)
+                        }
+                        rowIds.append(result.rowId)
+                    }
+                }
+
+                return rowIds
+            }
+
+            invalidateSearchCache()
+            for (index, rowId) in rowIds.enumerated() where rowId > 0 {
+                await log.debug("Imported item with id: \(rowId)")
+                scheduleSemanticEmbeddingUpdate(id: rowId, searchText: payloads[index].searchTextPlain)
+            }
+            return rowIds.count
+        } catch {
+            cleanupPreparedImportPayloads(payloads)
+            handleDBError(error)
+            throw error
+        }
+    }
     
     func insert(item: ClipboardItem) async -> Int64 {
         guard let payload = await prepareInsertPayload(for: item) else { return -1 }
 
         let result: (rowId: Int64, usedUpsert: Bool)? = await withDBAsync {
             guard let db = self.db, let table = self.table else { return (-1, false) }
-
-            // Prefer UPSERT to avoid delete+insert write amplification on hot-path inserts.
-            if self.supportsUniqueIdUpsert {
-                do {
-                    let sql = """
-                    INSERT INTO ClipboardHistory (
-                        unique_id,
-                        type,
-                        item_type,
-                        data,
-                        preview_data,
-                        timestamp,
-                        app_path,
-                        app_name,
-                        custom_title,
-                        source_anchor,
-                        search_text,
-                        content_length,
-                        tag_id,
-                        blob_path,
-                        is_temporary,
-                        is_encrypted
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT(unique_id) WHERE unique_id <> '' DO UPDATE SET
-                        type = excluded.type,
-                        item_type = excluded.item_type,
-                        data = excluded.data,
-                        preview_data = excluded.preview_data,
-                        timestamp = excluded.timestamp,
-                        app_path = excluded.app_path,
-                        app_name = excluded.app_name,
-                        custom_title = excluded.custom_title,
-                        source_anchor = excluded.source_anchor,
-                        search_text = excluded.search_text,
-                        content_length = excluded.content_length,
-                        tag_id = CASE
-                            WHEN excluded.tag_id = -1 AND ClipboardHistory.tag_id != -1
-                            THEN ClipboardHistory.tag_id
-                            ELSE excluded.tag_id
-                        END,
-                        blob_path = excluded.blob_path,
-                        is_temporary = excluded.is_temporary,
-                        is_encrypted = excluded.is_encrypted
-                    RETURNING id
-                    """
-
-                    let dataBlob = SQLite.Blob(bytes: [UInt8](payload.data))
-                    let previewBlob = payload.previewData.map { SQLite.Blob(bytes: [UInt8]($0)) }
-                    let stmt = try db.prepare(sql).bind(
-                        payload.uniqueId,
-                        payload.pasteboardType,
-                        payload.itemType,
-                        dataBlob,
-                        previewBlob,
-                        payload.timestamp,
-                        payload.appPath,
-                        payload.appName,
-                        payload.customTitle,
-                        payload.sourceAnchor,
-                        payload.searchText,
-                        payload.contentLength,
-                        payload.tagId,
-                        payload.blobPath,
-                        payload.isTemporary,
-                        payload.isEncrypted
-                    )
-
-                    if let row = try stmt.failableNext(), let rowId = row[0] as? Int64 {
-                        return (rowId, true)
-                    }
-                } catch {
-                    // Likely reasons:
-                    // - SQLite < 3.24 (no UPSERT) / < 3.35 (no RETURNING)
-                    // - Unique constraint not present / not matched
-                    self.supportsUniqueIdUpsert = false
-                    log.debug("UPSERT(unique_id) unavailable, fallback to delete+insert: \(error.localizedDescription)")
-                }
-            }
-
-            // Fallback path: delete duplicates then insert.
-            do {
-                let deleteQuery = table.filter(Col.uniqueId == payload.uniqueId)
-                let existingTagId = try db.pluck(deleteQuery.select(Col.tagId))?.get(Col.tagId)
-                let mergedTagId = Self.mergedTagId(incoming: payload.tagId, existing: existingTagId)
-                _ = try db.run(deleteQuery.delete())
-
-                let insert = table.insert(
-                    Col.uniqueId <- payload.uniqueId,
-                    Col.type <- payload.pasteboardType,
-                    Col.itemType <- payload.itemType,
-                    Col.data <- payload.data,
-                    Col.previewData <- payload.previewData,
-                    Col.ts <- payload.timestamp,
-                    Col.appPath <- payload.appPath,
-                    Col.appName <- payload.appName,
-                    Col.customTitle <- payload.customTitle,
-                    Col.sourceAnchor <- payload.sourceAnchor,
-                    Col.searchText <- payload.searchText,
-                    Col.length <- payload.contentLength,
-                    Col.tagId <- mergedTagId,
-                    Col.blobPath <- payload.blobPath,
-                    Col.isTemporary <- payload.isTemporary,
-                    Col.isEncrypted <- payload.isEncrypted
-                )
-
-                let rowId = try db.run(insert)
-                return (rowId, false)
-            } catch {
-                return (-1, false)
-            }
+            return try self.insertPreparedPayload(payload, using: db, table: table)
         }
 
         guard let result, result.rowId > 0 else { return -1 }
@@ -4070,31 +4221,16 @@ extension DeckSQLManager {
             var rowIds: [Int64] = []
             var deletedTotal = 0
 
-            try db.transaction {
-                for payload in payloads {
-                    let deleteQuery = table.filter(Col.uniqueId == payload.uniqueId)
-                    let existingTagId = try db.pluck(deleteQuery.select(Col.tagId))?.get(Col.tagId)
-                    let mergedTagId = Self.mergedTagId(incoming: payload.tagId, existing: existingTagId)
-                    deletedTotal += try db.run(deleteQuery.delete())
-                    let insert = table.insert(
-                        Col.uniqueId <- payload.uniqueId,
-                        Col.type <- payload.pasteboardType,
-                        Col.itemType <- payload.itemType,
-                        Col.data <- payload.data,
-                        Col.previewData <- payload.previewData,
-                        Col.ts <- payload.timestamp,
-                        Col.appPath <- payload.appPath,
-                        Col.appName <- payload.appName,
-                        Col.customTitle <- payload.customTitle,
-                        Col.sourceAnchor <- payload.sourceAnchor,
-                        Col.searchText <- payload.searchText,
-                        Col.length <- payload.contentLength,
-                        Col.tagId <- mergedTagId,
-                        Col.blobPath <- payload.blobPath,
-                        Col.isTemporary <- payload.isTemporary,
-                        Col.isEncrypted <- payload.isEncrypted
-                    )
-                    rowIds.append(try db.run(insert))
+                try db.transaction {
+                    for payload in payloads {
+                        let existingCount: Int = try db.scalar(
+                            table.filter(Col.uniqueId == payload.uniqueId).count
+                        )
+                        let result = try self.insertPreparedPayload(payload, using: db, table: table)
+                    if existingCount > 0 {
+                        deletedTotal += existingCount
+                    }
+                    rowIds.append(result.rowId)
                 }
             }
 

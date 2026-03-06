@@ -345,29 +345,13 @@ final class DataExportService {
                     
                     if isLargeFile {
                         await log.info("Importing large file (\(fileSize / 1024 / 1024) MB) using streaming parser")
-                        return try await Self.importLargeExport(from: url, decoder: decoder)
+                        let exportItems = try Self.parseLargeExportItems(from: url, decoder: decoder)
+                        return try await Self.importExportItems(exportItems)
                     }
 
                     let data = try Data(contentsOf: url)
                     let exportData = try decoder.decode(ExportData.self, from: data)
-
-                    // 批量导入并显示进度
-                    var importedCount = 0
-                    let totalCount = exportData.items.count
-                    let batchSize = 50
-
-                    for (index, exportItem) in exportData.items.enumerated() {
-                        await Self.insertExportItem(exportItem)
-                        importedCount += 1
-
-                        // 每批次后让出执行，避免长时间阻塞
-                        if (index + 1) % batchSize == 0 {
-                            await Task.yield()
-                            await log.debug("Import progress: \(importedCount)/\(totalCount)")
-                        }
-                    }
-
-                    return importedCount
+                    return try await Self.importExportItems(exportData.items)
                 }.value
 
                 await DeckDataStore.shared.loadInitialData()
@@ -383,7 +367,7 @@ final class DataExportService {
         }
     }
 
-    nonisolated private static func importLargeExport(from url: URL, decoder: JSONDecoder) async throws -> Int {
+    nonisolated private static func parseLargeExportItems(from url: URL, decoder: JSONDecoder) throws -> [ExportItem] {
         enum ParseState {
             case seekingItemsKey
             case seekingArrayStart
@@ -407,16 +391,25 @@ final class DataExportService {
         let batchSize = 50
 
         var buffer = Data()
+        var bufferStart = 0
         var state: ParseState = .seekingItemsKey
         var objectBuffer = Data()
         var inString = false
         var isEscaped = false
         var depth = 0
-        var importedCount = 0
+        var exportItems: [ExportItem] = []
         var reachedEOF = false
 
-        while !reachedEOF || !buffer.isEmpty {
-            if !reachedEOF && buffer.count < chunkSize {
+        func compactBufferIfNeeded(force: Bool = false) {
+            guard bufferStart > 0 else { return }
+            if force || bufferStart >= chunkSize || bufferStart * 2 >= buffer.count {
+                buffer.removeSubrange(..<bufferStart)
+                bufferStart = 0
+            }
+        }
+
+        while !reachedEOF || bufferStart < buffer.count {
+            if !reachedEOF && (buffer.count - bufferStart) < chunkSize {
                 let chunk = try handle.read(upToCount: chunkSize) ?? Data()
                 if chunk.isEmpty {
                     reachedEOF = true
@@ -429,29 +422,33 @@ final class DataExportService {
 
             switch state {
             case .seekingItemsKey:
-                if let range = buffer.range(of: itemsKey) {
-                    let removeCount = buffer.distance(from: buffer.startIndex, to: range.upperBound)
-                    buffer.removeFirst(removeCount)
+                let available = buffer[bufferStart...]
+                if let range = available.range(of: itemsKey) {
+                    bufferStart = range.upperBound
                     state = .seekingArrayStart
+                    compactBufferIfNeeded()
                     madeProgress = true
-                } else if buffer.count > itemsKey.count {
-                    buffer = buffer.suffix(itemsKey.count - 1)
+                } else if available.count > itemsKey.count {
+                    bufferStart = buffer.count - (itemsKey.count - 1)
+                    compactBufferIfNeeded(force: true)
                     madeProgress = true
                 }
 
             case .seekingArrayStart:
-                if let idx = buffer.firstIndex(of: openBracket) {
-                    let removeCount = buffer.distance(from: buffer.startIndex, to: idx) + 1
-                    buffer.removeFirst(removeCount)
+                let available = buffer[bufferStart...]
+                if let idx = available.firstIndex(of: openBracket) {
+                    bufferStart = idx + 1
                     state = .readingItems
+                    compactBufferIfNeeded()
                     madeProgress = true
-                } else if buffer.count > 1 {
-                    buffer = buffer.suffix(1)
+                } else if available.count > 1 {
+                    bufferStart = buffer.count - 1
+                    compactBufferIfNeeded(force: true)
                     madeProgress = true
                 }
 
             case .readingItems:
-                var cursor = 0
+                var cursor = bufferStart
                 while cursor < buffer.count {
                     let byte = buffer[cursor]
                     if depth == 0 {
@@ -487,13 +484,14 @@ final class DataExportService {
                                 depth -= 1
                                 if depth == 0 {
                                     let exportItem = try decoder.decode(ExportItem.self, from: objectBuffer)
-                                    await Self.insertExportItem(exportItem)
-                                    importedCount += 1
+                                    exportItems.append(exportItem)
 
-                                    if importedCount % batchSize == 0 {
-                                        await Task.yield()
-                                        await log.debug("Import progress: \(importedCount)")
-                                    }
+                if exportItems.count % batchSize == 0 {
+                    let parsedCount = exportItems.count
+                    Task { @MainActor in
+                        log.debug("Import parse progress: \(parsedCount)")
+                    }
+                }
 
                                     objectBuffer.removeAll(keepingCapacity: true)
                                 }
@@ -503,8 +501,9 @@ final class DataExportService {
                     cursor += 1
                 }
 
-                if cursor > 0 {
-                    buffer.removeFirst(cursor)
+                if cursor > bufferStart {
+                    bufferStart = cursor
+                    compactBufferIfNeeded()
                     madeProgress = true
                 }
 
@@ -521,16 +520,16 @@ final class DataExportService {
             }
         }
 
-        if state != .done || depth != 0 {
+        if state != .done || depth != 0 || inString {
             throw ExportError.invalidFormat
         }
 
-        return importedCount
+        return exportItems
     }
 
-    private static func insertExportItem(_ exportItem: ExportItem) async {
+    private static func clipboardItem(from exportItem: ExportItem) -> ClipboardItem {
         // 对于大图，insert 方法会自动处理 blob offload
-        let item = ClipboardItem(
+        ClipboardItem(
             pasteboardType: PasteboardType(exportItem.type),
             data: exportItem.data,
             previewData: exportItem.previewData,
@@ -545,8 +544,12 @@ final class DataExportService {
             isTemporary: exportItem.isTemporary ?? false,
             uniqueId: exportItem.uniqueId
         )
+    }
 
-        _ = await DeckSQLManager.shared.insert(item: item)
+    private static func importExportItems(_ exportItems: [ExportItem]) async throws -> Int {
+        guard !exportItems.isEmpty else { return 0 }
+        let items = exportItems.map(Self.clipboardItem(from:))
+        return try await DeckSQLManager.shared.importItemsAtomically(items)
     }
     
     // MARK: - Helpers
