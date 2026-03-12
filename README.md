@@ -72,7 +72,6 @@
 
 ### Sync & Sharing
 
-- **iCloud Sync** via CloudKit, with optional end-to-end encryption.
 - **LAN Sharing** with AES-GCM encryption and TOTP verification.
 - **Direct IP Connection** — connect to peers by IP address, bypassing VPN or Bonjour issues.
 
