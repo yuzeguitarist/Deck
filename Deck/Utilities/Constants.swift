@@ -59,6 +59,9 @@ enum Const {
     
     // Window dimensions
     static let windowHeight: CGFloat = 305.0
+    static let minHorizontalPanelHeight: CGFloat = 305.0
+    static let maxHorizontalPanelHeight: CGFloat = 420.0
+    static let resizeHandleHeight: CGFloat = 8.0
     static let topBarHeight: CGFloat = 44.0
     static let settingWidth: CGFloat = {
         // Use wider window for English/German due to longer text

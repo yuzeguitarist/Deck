@@ -31,18 +31,18 @@ struct QuickPasteBadgeView: View {
     }
 
     var body: some View {
-        HStack(spacing: 3) {
+        HStack(spacing: 1.5) {
             Image(systemName: "list.number")
-                .font(.system(size: 15, weight: .regular))
+                .font(.system(size: 11, weight: .regular))
 
             Text("\(number)")
-                .font(.system(size: 16, weight: .regular))
+                .font(.system(size: 12, weight: .regular))
         }
         .foregroundStyle(foregroundColor)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
+        .padding(.horizontal, 3)
+        .padding(.vertical, 1.5)
         .background(
-            RoundedRectangle(cornerRadius: 5, style: .continuous)
+            RoundedRectangle(cornerRadius: 2.5, style: .continuous)
                 .fill(backgroundColor)
         )
         .fixedSize()
@@ -195,8 +195,8 @@ struct ClipItemCardView: View {
         .overlay(alignment: .bottomTrailing) {
             if let quickPasteNumber {
                 QuickPasteBadgeView(number: quickPasteNumber)
-                    .padding(.trailing, 6)
-                    .padding(.bottom, 6)
+                    .padding(.trailing, 4)
+                    .padding(.bottom, 7)
             }
         }
         .zIndex(quickPasteNumber == nil ? 0 : 1)
