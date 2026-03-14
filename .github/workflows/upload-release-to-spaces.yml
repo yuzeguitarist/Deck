@@ -27,6 +27,7 @@ jobs:
         run: |
           mkdir -p dist
           gh release download "${{ github.event.release.tag_name }}" \
+            --repo "${{ github.repository }}" \
             --pattern "Deck.dmg" \
             --dir dist
 
