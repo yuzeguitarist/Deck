@@ -1,0 +1,85 @@
+name: Upload DMG to DigitalOcean Spaces
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+
+    env:
+      SPACES_REGION: sgp1
+      SPACES_BUCKET: deckclip
+
+    steps:
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install boto3
+
+      - name: Download release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist
+          gh release download "${{ github.event.release.tag_name }}" \
+            --pattern "Deck.dmg" \
+            --dir dist
+
+          ls -lh dist
+
+      - name: Rename and upload to Spaces
+        env:
+          SPACES_KEY: ${{ secrets.DO_SPACES_KEY }}
+          SPACES_SECRET: ${{ secrets.DO_SPACES_SECRET }}
+          TAG_NAME: ${{ github.event.release.tag_name }}
+        run: |
+          python <<'PY'
+          import os
+          from pathlib import Path
+          import boto3
+
+          tag = os.environ["TAG_NAME"].strip()   # 例如 v1.0.1
+          src = Path("dist/Deck.dmg")
+
+          if not src.exists():
+              raise FileNotFoundError("dist/Deck.dmg not found")
+
+          new_name = f"Deck-{tag}.dmg"          # 变成 Deck-v1.0.1.dmg
+          renamed = src.with_name(new_name)
+          src.rename(renamed)
+
+          bucket = os.environ["SPACES_BUCKET"]
+          region = os.environ["SPACES_REGION"]
+
+          client = boto3.client(
+              "s3",
+              region_name=region,
+              endpoint_url=f"https://{region}.digitaloceanspaces.com",
+              aws_access_key_id=os.environ["SPACES_KEY"],
+              aws_secret_access_key=os.environ["SPACES_SECRET"],
+          )
+
+          object_key = f"releases/{new_name}"
+
+          client.upload_file(
+              str(renamed),
+              bucket,
+              object_key,
+              ExtraArgs={
+                  "ACL": "public-read",
+                  "ContentType": "application/x-apple-diskimage",
+                  "CacheControl": "public, max-age=31536000, immutable"
+              }
+          )
+
+          public_url = f"https://{bucket}.{region}.digitaloceanspaces.com/{object_key}"
+
+          print("Uploaded file:", new_name)
+          print("Object key:", object_key)
+          print("Public URL:", public_url)
+          PY
