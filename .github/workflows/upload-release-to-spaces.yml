@@ -16,6 +16,9 @@ jobs:
       SPACES_BUCKET: deckclip
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -44,13 +47,13 @@ jobs:
           from pathlib import Path
           import boto3
 
-          tag = os.environ["TAG_NAME"].strip()   # 例如 v1.0.1
+          tag = os.environ["TAG_NAME"].strip()
           src = Path("dist/Deck.dmg")
 
           if not src.exists():
               raise FileNotFoundError("dist/Deck.dmg not found")
 
-          new_name = f"Deck-{tag}.dmg"          # 变成 Deck-v1.0.1.dmg
+          new_name = f"Deck-{tag}.dmg"
           renamed = src.with_name(new_name)
           src.rename(renamed)
 
