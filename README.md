@@ -16,9 +16,11 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/platform-macOS_14+-blue?style=flat-square" alt="Platform">
-  <img src="https://img.shields.io/badge/swift-5.9+-F05138?style=flat-square&logo=swift&logoColor=white" alt="Swift">
-  <img src="https://img.shields.io/badge/license-GPL--3.0-green?style=flat-square" alt="License">
+  <a href="https://deckclip.app">
+    <img src="https://img.shields.io/badge/platform-macOS_14+-blue?style=flat-square" alt="Platform">
+    <img src="https://img.shields.io/badge/swift-5.9+-F05138?style=flat-square&logo=swift&logoColor=white" alt="Swift">
+    <img src="https://img.shields.io/badge/license-GPL--3.0-green?style=flat-square" alt="License">
+  </a>
 </p>
 
 ---
@@ -120,10 +122,14 @@ More shortcuts and Vim mode are in Settings.
 ## Screenshots
 
 <p align="center">
-  <img src="photos/DeckView.webp" alt="Deck Main View" width="1024">
+  <a href="https://deckclip.app">
+    <img src="photos/DeckView.webp" alt="Deck Main View" width="1024">
+  </a>
 </p>
 <p align="center">
-  <img src="photos/ai-chat.webp" alt="Deck AI Chat" width="1024">
+  <a href="https://deckclip.app">
+    <img src="photos/ai-chat.webp" alt="Deck AI Chat" width="1024">
+  </a>
 </p>
 
 ## Support Deck
