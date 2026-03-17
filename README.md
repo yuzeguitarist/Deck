@@ -2,8 +2,6 @@
     <img width="1024" alt="Deck, the modern, native, privacy-first clipboard OS for macOS" src="photos/Deck.webp">
 </a>
 
----
-
 <p align="center">
   <a href="#features">Features</a> •
   <a href="#integrations">Integrations</a> •
