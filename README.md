@@ -156,12 +156,6 @@ More shortcuts and Vim mode are in Settings.
   <img src="photos/buy_me_a_coffee.jpg" alt="WeChat Pay and Alipay QR code" width="320">
 </p>
 
-## Contributing
-
-Contributions to the open-sourced parts are welcome! Please read the [Contributing Guide](CONTRIBUTING.md) before submitting a PR.
-
-> All PRs must target the `dev` branch, not `main`.
-
 ## License
 
 This project is **partially open source** under **GPL-3.0 with Commons Clause** — see [LICENSE](LICENSE).
