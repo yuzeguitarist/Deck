@@ -94,6 +94,7 @@
 
 - Privacy policy: https://deckclip.app/privacy
 - Terms: https://deckclip.app/terms
+- License: https://deckclip.app/license
 - Repo license: https://github.com/yuzeguitarist/Deck/blob/main/LICENSE.txt
 - Security policy: https://github.com/yuzeguitarist/Deck/security/policy
 
