@@ -178,7 +178,7 @@ Questions or licensing inquiries → hi@deckclip.app
 
 ## Star History
 
-<a href="https://www.star-history.com/?type=timeline&legend=top-left&repos=yuzeguitarist%2FDeck">
+<a href="https://deckclip.app">
  <picture>
    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=yuzeguitarist/Deck&type=timeline&theme=dark&legend=top-left" />
    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=yuzeguitarist/Deck&type=timeline&legend=top-left" />
