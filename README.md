@@ -10,6 +10,7 @@
   <a href="#screenshots">Screenshots</a> •
   <a href="#support-deck">Support</a> •
   <a href="#license">License</a> •
+  <a href="https://deckclip.app">Website</a> •
   <a href="README_CN.md">中文</a>
 </p>
 

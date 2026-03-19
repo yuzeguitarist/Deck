@@ -10,6 +10,7 @@
   <a href="#截图">截图</a> •
   <a href="#支持作者">支持作者</a> •
   <a href="#许可证">许可证</a> •
+  <a href="https://deckclip.app/zh-cn">网站</a> •
   <a href="README.md">English</a>
 </p>
 
