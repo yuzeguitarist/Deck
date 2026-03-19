@@ -183,6 +183,18 @@
 
 ---
 
+## Star History
+
+<a href="https://www.star-history.com/?type=timeline&legend=top-left&repos=yuzeguitarist%2FDeck">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/image?repos=yuzeguitarist/Deck&type=timeline&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/image?repos=yuzeguitarist/Deck&type=timeline&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/image?repos=yuzeguitarist/Deck&type=timeline&legend=top-left" />
+ </picture>
+</a>
+
+---
+
 <p align="center">
   版权所有 © 2024-2026 Yuze Pan. 保留一切权利。
 </p>
