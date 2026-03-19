@@ -667,6 +667,9 @@ struct HistoryListView: View {
             if vm.isRulePickerPresented, vm.rulePickerMode == .list {
                 vm.dismissRulePicker()
             }
+            if DeckUserDefaults.vimNavigationEnabled {
+                vm.isVimInsertModeActive = true
+            }
             vm.focusArea = .search
             vm.refreshSearchFocus()
             return nil
