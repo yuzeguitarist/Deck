@@ -1,6 +1,5 @@
-# 将 GitHub Release（tag / 标题 / 说明 / 附件链接）同步到仓库根目录 CHANGELOG.md
-# - release published：仅处理本次事件中的 Release（不全量拉取列表）
-# - workflow_dispatch：分页拉取全部历史 Release，只补全文件中尚未存在的 tag
+# 同步 GitHub Release → CHANGELOG.md（英文正文）与 CHANGELOG_CN.md（中文正文）
+# release published：仅处理当前 Release；workflow_dispatch：分页补全缺失 tag（以 CHANGELOG.md 去重）
 
 name: Release Changelog Bot
 
@@ -36,7 +35,7 @@ jobs:
             echo "sync_mode=incremental" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Sync CHANGELOG.md
+      - name: Sync CHANGELOG.md & CHANGELOG_CN.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
@@ -53,7 +52,7 @@ jobs:
             exit 0
           fi
           rm -f .release-changelog-changed
-          git add CHANGELOG.md
+          git add CHANGELOG.md CHANGELOG_CN.md
           if git diff --staged --quiet; then
             echo "无暂存差异"
             exit 0
