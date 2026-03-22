@@ -4611,6 +4611,23 @@ extension DeckSQLManager {
         } ?? []
     }
 
+    /// 取当前过滤条件下「最旧」的一段行（`timestamp ASC, id ASC`），用于一次跳到列表末尾而无需 OFFSET 扫全表。
+    func fetchListTailPage(
+        filter: SQLite.Expression<Bool>? = nil,
+        limit: Int
+    ) async -> [Row] {
+        guard !Task.isCancelled else { return [] }
+        let safeLimit = max(1, limit)
+
+        return await withDBAsync {
+            guard let db = self.db, let table = self.table else { return [] }
+            var query = self.listModeBaseQuery(table: table)
+            if let f = filter { query = query.filter(f) }
+            query = query.order(Col.ts.asc, Col.id.asc).limit(safeLimit)
+            return Array(try db.prepare(query))
+        } ?? []
+    }
+
     private func buildFTSQuery(from keyword: String, useTrigram: Bool) -> String {
         let terms = keyword
             .components(separatedBy: .whitespacesAndNewlines)

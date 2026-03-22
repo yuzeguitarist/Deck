@@ -459,6 +459,8 @@ struct HistoryListView: View {
     /// 提取的 items 变更处理，横版/竖版共享
     private func handleItemsChanged() {
         let trimmedQuery = vm.query.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isListTail = dataStore.lastChangeType == .listTail
+        let isListHead = dataStore.lastChangeType == .listHead
         let shouldReorder = DeckUserDefaults.contextAwareEnabled &&
             trimmedQuery.isEmpty &&
             !pasteQueue.isQueueMode
@@ -470,6 +472,28 @@ struct HistoryListView: View {
         }
         if dataStore.lastChangeType == .search || dataStore.lastChangeType == .reset {
             selectedId = displayItems.first?.id
+        } else if isListTail {
+            if dataStore.items.isEmpty {
+                NSSound.beep()
+            } else {
+                interaction.lastSelectionWasRepeating = false
+                let id = dataStore.items.last?.id
+                selectedId = id
+                if isPreviewOpen, let id {
+                    schedulePreviewUpdate(for: id, isRepeating: false)
+                }
+            }
+        } else if isListHead {
+            if dataStore.items.isEmpty {
+                NSSound.beep()
+            } else {
+                interaction.lastSelectionWasRepeating = false
+                let id = dataStore.items.first?.id
+                selectedId = id
+                if isPreviewOpen, let id {
+                    schedulePreviewUpdate(for: id, isRepeating: false)
+                }
+            }
         }
     }
 
@@ -865,6 +889,25 @@ struct HistoryListView: View {
 
         if hasOnlyControlModifier(event) {
             switch event.keyCode {
+            case KeyCode.a:
+                // Emacs：行首 → 数据库真·最新一页（与 ⌃E 对称；⌃E 后必须用 DB 头页恢复，否则会困在尾页切片里）
+                Task { @MainActor in
+                    let ok = await dataStore.jumpToTrueListHead()
+                    if ok {
+                        handleItemsChanged()
+                    }
+                }
+                return nil
+            case KeyCode.e:
+                // Emacs：行尾 → 数据库真·末尾一页（单次查询，不扫中间分页）
+                Task { @MainActor in
+                    let ok = await dataStore.jumpToTrueListTail()
+                    if ok {
+                        // 内容与上次相同时 `onChange(items)` 可能不触发，需主动跑一遍以刷新 orderedItems 并把选中移到末尾
+                        handleItemsChanged()
+                    }
+                }
+                return nil
             case KeyCode.p:
                 return moveSelection(offset: -1, isRepeating: event.isARepeat)
             case KeyCode.n:

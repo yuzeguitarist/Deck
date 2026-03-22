@@ -115,6 +115,7 @@ final class EventDispatcher {
 enum KeyCode {
     static let a: UInt16 = UInt16(kVK_ANSI_A)
     static let b: UInt16 = UInt16(kVK_ANSI_B)
+    static let e: UInt16 = UInt16(kVK_ANSI_E)
     static let c: UInt16 = UInt16(kVK_ANSI_C)
     static let f: UInt16 = UInt16(kVK_ANSI_F)
     static let h: UInt16 = UInt16(kVK_ANSI_H)
