@@ -229,3 +229,25 @@ enum Const {
         style: .continuous
     )
 }
+
+// MARK: - Support & outbound links
+
+enum DeckSupportLinks {
+    static let githubRepositoryURL = URL(string: "https://github.com/yuzeguitarist/Deck")!
+
+    private static let pricingSupportSectionAnchor = "pricing-support"
+
+    static var localizedPricingSupportURL: URL {
+        var components = URLComponents(string: pricingPageBaseURLString())!
+        components.fragment = pricingSupportSectionAnchor
+        return components.url!
+    }
+
+    private static func pricingPageBaseURLString() -> String {
+        let candidates = Bundle.main.preferredLocalizations + Locale.preferredLanguages
+        for candidate in candidates where candidate.lowercased().hasPrefix("zh") {
+            return "https://deckclip.app/zh-cn/pricing"
+        }
+        return "https://deckclip.app/pricing"
+    }
+}
