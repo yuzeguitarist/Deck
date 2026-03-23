@@ -1571,6 +1571,24 @@ struct ClipItemCardView: View {
             }
         }
 
+        // System Share submenu
+        Menu {
+            ForEach(Array(SystemSharingService.cachedServices.enumerated()), id: \.offset) { _, service in
+                Button {
+                    SystemSharingService.performShare(for: item, service: service)
+                    MainWindowController.shared.dismissPanelAndRestoreFocus()
+                } label: {
+                    Label {
+                        Text(service.title)
+                    } icon: {
+                        Image(nsImage: service.image)
+                    }
+                }
+            }
+        } label: {
+            Label(String(localized: "系统分享"), systemImage: "square.and.arrow.up")
+        }
+
         // Ask AI
         if canAskAI {
             Divider()
