@@ -1,0 +1,17 @@
+name: Notify Homebrew Tap
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger homebrew-deck bump
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          gh api repos/yuzeguitarist/homebrew-deck/dispatches \
+            -f event_type=deck-release \
+            -f "client_payload[tag]=${{ github.event.release.tag_name }}"
