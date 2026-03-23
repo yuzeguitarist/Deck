@@ -5,7 +5,7 @@ This file is auto-generated from GitHub Releases by [release-changelog-bot](.git
 <!-- release-changelog-bot:auto -->
 
 <!-- release-changelog-bot:tag:v1.3.7 -->
-## v1.3.7 — v1.3.7
+## v1.3.7 — v1.3.7 | fastidious
 
 - **Tag:** `v1.3.7`
 - **Published:** 2026-03-23T13:53:49Z
