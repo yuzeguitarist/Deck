@@ -4,6 +4,76 @@ This file is auto-generated from GitHub Releases by [release-changelog-bot](.git
 
 <!-- release-changelog-bot:auto -->
 
+<!-- release-changelog-bot:tag:v1.3.7 -->
+## v1.3.7 — v1.3.7
+
+- **Tag:** `v1.3.7`
+- **Published:** 2026-03-23T13:53:49Z
+
+### Release notes
+
+<p align="center">
+  <a href="https://deckclip.app/download" rel="noopener noreferrer" target="_blank">
+    <img width="1525" height="896" alt="Deck" src="https://github.com/yuzeguitarist/Deck/raw/main/photos/Deck.webp" style="max-width: 100%; height: auto;" />
+  </a>
+</p>
+
+---
+
+## Release Notes v1.3.7
+
+### TL;DR
+-   Homebrew Cask submission is in progress; once merged, install with `brew install --cask deckclip`.  
+- **⌃A / ⌃E**  
+  History supports Emacs-style shortcuts to jump to the true newest or oldest page from the database.  
+-   Tail jumps use one targeted fetch instead of paging through the middle; search tail jumps cap candidates on very large libraries.  
+-   Fixes ⌃E stopping on repeat use and ⌃A after ⌃E leaving you stuck on the tail until reopening the panel.  
+-   Paused recording no longer ingests clipboard changes that happened during pause when you resume.  
+-   The feedback destination sheet opened from Settings › About works for Cancel and both options, matching the keyboard shortcut entry.  
+-   About adds a Support section: the Deck icon opens the pricing page at Support Development, plus GitHub; the website locale follows app language (Chinese vs English site).  
+-   Stricter DB init semantics; template items stored on disk with legacy migration/repair; iCloud sync improvements for encryption, file URLs, metadata, and crash recovery; Smart Rule no longer auto-authorizes networked script plugins; tighter permissions and safer Keychain updates for AI auth.  
+-   Web fetch/search assembles large bodies more efficiently; removing a LAN manual peer clears outbound scheduling state for that IP so stale map entries do not accumulate.  
+
+### Added
+-   Deck is now available via Homebrew Cask: `brew install --cask deckclip`. Future releases are synced automatically from GitHub Releases.  
+-   Card context menu adds a "System Share" submenu listing AirDrop, Messages, Mail, and all macOS sharing services — no need to drag to Finder first. Supported in both horizontal and vertical layout modes.  
+-   With history focus, ⌃A reloads the newest page from the database and selects the chronologically newest item; ⌃E fetches the oldest page in one query and selects the chronologically oldest item, independent of context-aware visual order.  
+-   Settings › About adds Support the Author: one row with the app icon opens the pricing page at the Support Development section; another opens the GitHub repository. Chinese app language uses the Chinese site; otherwise the English site.  
+
+### Improvements
+-   Jumping to the list end reads the oldest slice directly by sort order instead of paging forward from the middle.  
+-   When the library is very large, tail jumps in search mode use a tighter one-shot candidate cap to avoid excessive work.  
+-   Support-section icons share consistent sizing and alignment, with a clearer, smoother GitHub mark.  
+-   Template payloads live under Application Support with metadata indices in UserDefaults; security mode encrypts template files; remove/move operations update indices only instead of rewriting every payload.  
+-   `lastSyncDate` updates whenever a fetch attempt finishes (including early error exits), decoupled from whether the server change token advanced.  
+-   Async response bytes are buffered in chunks before appending to `Data`, reducing CPU and allocation work for multi-megabyte bodies while keeping the 5 MB cap and overflow behavior.  
+
+### Fixes
+-   Subsequent ⌃E presses are no longer blocked by the shared loading flag used for “load more”; pagination marks loading only inside its async work.  
+-   After ⌃E, ⌃A previously selected the first item of the in-memory tail slice, not the global newest, and newer items seemed missing until reopening; it now reloads the true head page symmetrically to ⌃E.  
+-   Clipboard captures made while recording is paused are no longer saved the moment you resume; only copies after resuming are recorded.  
+-   Feedback destination dialog is presented on the next main-loop turn so AppKit modal sessions started from Settings SwiftUI actions receive clicks in the content area, not only the title-bar close control.  
+-   `isInitialized` flips true only after integrity, custom SQL functions, table creation, and migrations succeed; failed integrity recovery no longer leaves a false “ready” flag.  
+-   Storage version advances only after a successful legacy decode and payload write; decode failures keep legacy data for retry. Orphan legacy blobs are repaired when indices are empty but old JSON remains.  
+-   When a file-URL image is materialized to bytes for the template library, the stored pasteboard type matches the image payload.  
+-   fileURL items upload only when local resolution yields real content (not just the path string); images use concrete image types; unresolvable items are skipped with logging.  
+-   With iCloud encryption, app path/name follow the same rules as other fields: encrypt-or-omit with warnings, no silent plaintext; `encryptAppMeta` matches receiver decryption.  
+-   Persisted in-flight upload names are cleared only for succeeded or cancelled records; failed records pending re-queue stay listed until the next successful completion path.  
+- **iCloud：Server change token**  
+  Corrupt server change token data in UserDefaults is removed after a decode failure.  
+-   Smart Rule no longer auto-authorizes script plugins that require network access; users must approve in plugin settings.  
+-   Tighter POSIX permissions on `auth.json` (700/600); API keys prefer `SecItemUpdate` over delete-then-add to avoid losing the previous secret on add failure.  
+-   Removing a manual peer drops the outbound-connect epoch entry for that IP instead of retaining the key with an incremented counter, trimming stale entries when peers are added and removed over time.  
+
+### Compatibility & Behavior Notes
+-   Shortcuts use the Control modifier on macOS; the history list must have focus (not while typing in search, etc.).  
+-   After ⌃E, the visible list is that tail page until ⌃A reloads the newest page or another action reloads the head (e.g. reopening the panel).  
+-   On first launch after upgrade, template items migrate from the legacy UserDefaults blob to `~/Library/Application Support/Deck/TemplateItems/`; a repair pass may recover from a partially migrated state.
+
+### Assets
+
+- [`Deck.dmg`](https://github.com/yuzeguitarist/Deck/releases/download/v1.3.7/Deck.dmg)
+
 <!-- release-changelog-bot:tag:v1.3.6 -->
 ## v1.3.6 — v1.3.6 | recherché
 
