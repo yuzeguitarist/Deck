@@ -12,6 +12,7 @@ import Observation
 import UniformTypeIdentifiers
 import QuickLookThumbnailing
 import PDFKit
+import ImageIO
 
 typealias PasteboardType = NSPasteboard.PasteboardType
 
@@ -1624,6 +1625,70 @@ final class ClipboardItem: Identifiable, Equatable {
         return (String(searchText.prefix(maxCharacters)) + "\n...", true)
     }
     
+    // MARK: - List row thumbnail (off-main-thread)
+
+    /// Snapshot for loading list row thumbnails without touching the main actor for disk I/O.
+    struct ListRowThumbnailInput: Sendable {
+        let fileURLImagePath: String?
+        let blobPath: String?
+        let inlineData: Data
+    }
+
+    /// Capture paths/data for thumbnail loading. Does not read files (no main-thread disk I/O beyond struct copy).
+    func makeListRowThumbnailInput() -> ListRowThumbnailInput {
+        var filePath: String?
+        if itemType == .image, pasteboardType == .fileURL,
+           let paths = filePaths, let first = paths.first {
+            filePath = Self.normalizeFilePath(first)
+        }
+        return ListRowThumbnailInput(
+            fileURLImagePath: filePath,
+            blobPath: blobPath,
+            inlineData: data
+        )
+    }
+
+    /// Load a downsampled thumbnail for the vertical list row entirely on a background thread.
+    nonisolated static func cgImageForListRowThumbnail(input: ListRowThumbnailInput, maxPixelSize: Int) -> CGImage? {
+        if let path = input.fileURLImagePath {
+            let url = URL(fileURLWithPath: path)
+            if FileManager.default.fileExists(atPath: path),
+               let thumb = Self.downsampledCGImage(fromFileURL: url, maxPixelSize: maxPixelSize) {
+                return thumb
+            }
+        }
+        if let blob = input.blobPath, FileManager.default.fileExists(atPath: blob),
+           let blobData = BlobStorage.shared.load(path: blob) {
+            return Self.downsampledCGImage(from: blobData, maxPixelSize: maxPixelSize)
+        }
+        guard !input.inlineData.isEmpty else { return nil }
+        return Self.downsampledCGImage(from: input.inlineData, maxPixelSize: maxPixelSize)
+    }
+
+    nonisolated private static func downsampledCGImage(from data: Data, maxPixelSize: Int) -> CGImage? {
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions) else { return nil }
+        let thumbnailOptions = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixelSize)
+        ] as CFDictionary
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions)
+    }
+
+    nonisolated private static func downsampledCGImage(fromFileURL url: URL, maxPixelSize: Int) -> CGImage? {
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions) else { return nil }
+        let thumbnailOptions = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixelSize)
+        ] as CFDictionary
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions)
+    }
+
     /// 获取完整数据：若存在外部文件则优先读文件（自动解密），否则返回内存数据
     func resolvedData() -> Data? {
         if let blobPath, FileManager.default.fileExists(atPath: blobPath) {

@@ -1332,6 +1332,10 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             }
 
             backfillFileSearchTextIfNeeded()
+            let storageDirForCleanup = basePath
+            Task.detached(priority: .utility) {
+                LANReceivedCleanup.cleanupExpiredDirectories(storagePath: storageDirForCleanup)
+            }
             Task { @MainActor in
                 DeckSQLManager.shared.ensureFTSTrigramIfAvailable()
             }

@@ -344,9 +344,8 @@ final class DataExportService {
                     decoder.dateDecodingStrategy = .iso8601
                     
                     if isLargeFile {
-                        await log.info("Importing large file (\(fileSize / 1024 / 1024) MB) using streaming parser")
-                        let exportItems = try Self.parseLargeExportItems(from: url, decoder: decoder)
-                        return try await Self.importExportItems(exportItems)
+                        await log.info("Importing large file (\(fileSize / 1024 / 1024) MB) using streaming parser + batched DB import")
+                        return try await Self.parseLargeExportFileStreamingImport(from: url, decoder: decoder)
                     }
 
                     let data = try Data(contentsOf: url)
@@ -367,7 +366,8 @@ final class DataExportService {
         }
     }
 
-    nonisolated private static func parseLargeExportItems(from url: URL, decoder: JSONDecoder) throws -> [ExportItem] {
+    /// Stream-parse a large export file and commit rows in batches (F8: avoid holding all `ExportItem` in memory).
+    private static func parseLargeExportFileStreamingImport(from url: URL, decoder: JSONDecoder, sqlImportBatchSize: Int = 200) async throws -> Int {
         enum ParseState {
             case seekingItemsKey
             case seekingArrayStart
@@ -388,7 +388,7 @@ final class DataExportService {
 
         let chunkSize = 64 * 1024
         let maxObjectBytes = 200 * 1024 * 1024
-        let batchSize = 50
+        let logProgressEvery = 500
 
         var buffer = Data()
         var bufferStart = 0
@@ -397,7 +397,9 @@ final class DataExportService {
         var inString = false
         var isEscaped = false
         var depth = 0
-        var exportItems: [ExportItem] = []
+        var pendingBatch: [ExportItem] = []
+        var totalImported = 0
+        var parsedObjectCount = 0
         var reachedEOF = false
 
         func compactBufferIfNeeded(force: Bool = false) {
@@ -484,16 +486,21 @@ final class DataExportService {
                                 depth -= 1
                                 if depth == 0 {
                                     let exportItem = try decoder.decode(ExportItem.self, from: objectBuffer)
-                                    exportItems.append(exportItem)
-
-                if exportItems.count % batchSize == 0 {
-                    let parsedCount = exportItems.count
-                    Task { @MainActor in
-                        log.debug("Import parse progress: \(parsedCount)")
-                    }
-                }
-
                                     objectBuffer.removeAll(keepingCapacity: true)
+                                    pendingBatch.append(exportItem)
+                                    parsedObjectCount += 1
+
+                                    if pendingBatch.count >= sqlImportBatchSize {
+                                        let mapped = pendingBatch.map(Self.clipboardItem(from:))
+                                        totalImported += try await DeckSQLManager.shared.importItemsAtomically(mapped)
+                                        pendingBatch.removeAll(keepingCapacity: true)
+                                    }
+
+                                    if parsedObjectCount % logProgressEvery == 0 {
+                                        await MainActor.run {
+                                            log.debug("Import streaming progress: parsed \(parsedObjectCount), committed \(totalImported)")
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -524,7 +531,12 @@ final class DataExportService {
             throw ExportError.invalidFormat
         }
 
-        return exportItems
+        if !pendingBatch.isEmpty {
+            let mapped = pendingBatch.map(Self.clipboardItem(from:))
+            totalImported += try await DeckSQLManager.shared.importItemsAtomically(mapped)
+        }
+
+        return totalImported
     }
 
     private static func clipboardItem(from exportItem: ExportItem) -> ClipboardItem {
