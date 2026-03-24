@@ -439,11 +439,13 @@ struct HistoryListView: View {
     @ViewBuilder
     private func verticalRow(for item: ClipboardItem, at index: Int) -> some View {
         let isItemSelected = selectedId == item.id
+        let quickPasteNumber = quickPasteOverlayMap[item.id]
 
         ClipItemRowView(
             item: item,
             isSelected: isItemSelected,
             showPreview: makePreviewBinding(for: item.id),
+            quickPasteNumber: quickPasteNumber,
             onDelete: { deleteItem(item) }
         )
         .onTapGesture {

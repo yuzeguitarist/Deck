@@ -125,6 +125,15 @@ enum Const {
         }
     })
 
+    /// 竖版行副标题里快捷粘贴 `#` 序号用色（与队列模式同排版，队列仍为 `.orange`）。
+    static let verticalQuickPasteSubtitleIndexColor: Color = Color(nsColor: NSColor(name: nil) { appearance in
+        if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+            return NSColor.white.withAlphaComponent(0.72)
+        } else {
+            return NSColor.black.withAlphaComponent(0.52)
+        }
+    })
+
     /// 卡片头部背景色 - 使用更高对比度的颜色
     static let cardHeaderBackground: Color = Color(nsColor: NSColor(name: nil) { appearance in
         if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
