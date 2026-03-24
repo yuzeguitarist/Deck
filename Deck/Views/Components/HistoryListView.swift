@@ -130,11 +130,17 @@ struct HistoryListView: View {
         guard isQuickPasteModifierHeld else { return [:] }
         return quickPasteNumbers(in: displayItems)
     }
+
+    private var shouldShowInitialLoadingState: Bool {
+        dataStore.items.isEmpty && dataStore.isPreparingInitialPresentation
+    }
     
     var body: some View {
         VStack(spacing: 0) {
             Group {
-                if dataStore.items.isEmpty {
+                if shouldShowInitialLoadingState {
+                    initialLoadingView
+                } else if dataStore.items.isEmpty {
                     emptyStateView
                 } else {
                     scrollContent
@@ -233,6 +239,21 @@ struct HistoryListView: View {
                 .font(.subheadline)
                 .foregroundStyle(.tertiary)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var initialLoadingView: some View {
+        VStack(spacing: 6) {
+            Text(NSLocalizedString("正在载入最近记录", comment: "History loading title"))
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
+
+            Text(NSLocalizedString("先显示缓存，再同步最新内容", comment: "History loading subtitle"))
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(.horizontal, Const.space12)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     

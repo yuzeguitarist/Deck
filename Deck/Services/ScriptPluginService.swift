@@ -42,7 +42,27 @@ private enum JSExecutionTimeLimiter {
 
 // MARK: - Script Plugin Model
 
-struct ScriptPlugin: Identifiable, Codable {
+enum PluginKind: String, Codable, CaseIterable, Sendable {
+    case transform
+    case analyze
+    case action
+    case workflow
+
+    var displayName: String {
+        switch self {
+        case .transform:
+            return NSLocalizedString("转换", comment: "Plugin kind display: transform")
+        case .analyze:
+            return NSLocalizedString("分析", comment: "Plugin kind display: analyze")
+        case .action:
+            return NSLocalizedString("动作", comment: "Plugin kind display: action")
+        case .workflow:
+            return NSLocalizedString("工作流", comment: "Plugin kind display: workflow")
+        }
+    }
+}
+
+struct ScriptPlugin: Identifiable, Codable, Sendable {
     let id: String
     let name: String
     let description: String?
@@ -52,6 +72,8 @@ struct ScriptPlugin: Identifiable, Codable {
     let scriptHash: String?
     let icon: String?
     let requiresNetwork: Bool  // 是否需要网络权限
+    let apiVersion: Int
+    let kind: PluginKind
 
     init(
         id: String,
@@ -62,7 +84,9 @@ struct ScriptPlugin: Identifiable, Codable {
         scriptPath: String,
         scriptHash: String? = nil,
         icon: String?,
-        requiresNetwork: Bool
+        requiresNetwork: Bool,
+        apiVersion: Int = 1,
+        kind: PluginKind = .transform
     ) {
         self.id = id
         self.name = name
@@ -73,6 +97,8 @@ struct ScriptPlugin: Identifiable, Codable {
         self.scriptHash = scriptHash
         self.icon = icon
         self.requiresNetwork = requiresNetwork
+        self.apiVersion = apiVersion
+        self.kind = kind
     }
 
     var displayName: String {
@@ -81,6 +107,14 @@ struct ScriptPlugin: Identifiable, Codable {
 
     var displayIcon: String {
         icon ?? "scroll"
+    }
+
+    var displayKind: String {
+        kind.displayName
+    }
+
+    var isLegacyProtocol: Bool {
+        apiVersion < 2
     }
 
     /// 是否已获得网络权限授权
@@ -99,6 +133,8 @@ struct ScriptPlugin: Identifiable, Codable {
         case scriptHash
         case icon
         case requiresNetwork
+        case apiVersion
+        case kind
     }
 }
 
@@ -113,15 +149,113 @@ struct ScriptManifest: Codable {
     let main: String  // 主脚本文件名
     let icon: String?
     let permissions: ScriptPermissions?  // 权限声明
+    let apiVersion: Int?
+    let kind: String?
+
+    init(
+        name: String,
+        description: String?,
+        author: String?,
+        version: String?,
+        main: String,
+        icon: String?,
+        permissions: ScriptPermissions? = nil,
+        apiVersion: Int? = nil,
+        kind: String? = nil
+    ) {
+        self.name = name
+        self.description = description
+        self.author = author
+        self.version = version
+        self.main = main
+        self.icon = icon
+        self.permissions = permissions
+        self.apiVersion = apiVersion
+        self.kind = kind
+    }
 
     struct ScriptPermissions: Codable {
         let network: Bool?  // 是否需要网络权限
+
+        init(network: Bool? = nil) {
+            self.network = network
+        }
     }
 }
 
 // MARK: - Script Execution Result
 
-struct ScriptResult {
+enum HostAction: String, Codable, Sendable {
+    case replaceText
+    case addTag
+    case markSensitive
+    case ignore
+}
+
+struct PluginExecutionContext: Codable, Sendable {
+    enum PluginTrigger: String, Codable, Sendable {
+        case manual
+        case ai
+        case smartRule
+    }
+
+    let inputText: String
+    let itemType: String?
+    let sourceApp: String?
+    let trigger: PluginTrigger
+    let isSmartRuleRestricted: Bool
+
+    init(
+        inputText: String,
+        itemType: String? = nil,
+        sourceApp: String? = nil,
+        trigger: PluginTrigger = .manual,
+        isSmartRuleRestricted: Bool = false
+    ) {
+        self.inputText = inputText
+        self.itemType = itemType
+        self.sourceApp = sourceApp
+        self.trigger = trigger
+        self.isSmartRuleRestricted = isSmartRuleRestricted
+    }
+
+    var javascriptObject: [String: Any] {
+        [
+            "inputText": inputText,
+            "itemType": itemType ?? NSNull(),
+            "sourceApp": sourceApp ?? NSNull(),
+            "trigger": trigger.rawValue,
+            "isSmartRuleRestricted": isSmartRuleRestricted
+        ]
+    }
+}
+
+struct PluginExecutionResult: Sendable {
+    let success: Bool
+    let outputText: String?
+    let analysis: [String: String]?
+    let requestedAction: HostAction?
+    let actionPayload: String?
+    let error: String?
+
+    init(
+        success: Bool,
+        outputText: String? = nil,
+        analysis: [String: String]? = nil,
+        requestedAction: HostAction? = nil,
+        actionPayload: String? = nil,
+        error: String? = nil
+    ) {
+        self.success = success
+        self.outputText = outputText
+        self.analysis = analysis
+        self.requestedAction = requestedAction
+        self.actionPayload = actionPayload
+        self.error = error
+    }
+}
+
+struct ScriptResult: Sendable {
     let success: Bool
     let output: String?
     let error: String?
@@ -188,21 +322,106 @@ final class ScriptPluginService {
         config.waitsForConnectivity = false
         return URLSession(configuration: config)
     }()
+    private static let timerQueue = DispatchQueue(label: "deck.script.timers", qos: .utility)
 
     private final class ExecutionState: @unchecked Sendable {
         private let lock = NSLock()
         private var interrupted = false
+        private var runLoop: RunLoop?
+        private var nextTimerID = 1
+        private var timers: [Int: DispatchSourceTimer] = [:]
 
         func markInterrupted() {
             lock.lock()
             interrupted = true
+            let timers = Array(self.timers.values)
+            self.timers.removeAll()
             lock.unlock()
+            for timer in timers {
+                timer.cancel()
+            }
         }
 
         func isInterrupted() -> Bool {
             lock.lock()
             defer { lock.unlock() }
             return interrupted
+        }
+
+        func attachRunLoop(_ runLoop: RunLoop) {
+            lock.lock()
+            self.runLoop = runLoop
+            lock.unlock()
+        }
+
+        func scheduleTimer(
+            delay: TimeInterval,
+            repeats: Bool = false,
+            callback: @escaping @Sendable () -> Void
+        ) -> Int {
+            let timer = DispatchSource.makeTimerSource(queue: ScriptPluginService.timerQueue)
+
+            lock.lock()
+            guard !interrupted else {
+                lock.unlock()
+                return 0
+            }
+            let timerID = nextTimerID
+            nextTimerID += 1
+            timers[timerID] = timer
+            let runLoop = self.runLoop
+            lock.unlock()
+
+            let normalizedDelay = max(0, delay)
+            if repeats {
+                timer.schedule(deadline: .now() + normalizedDelay, repeating: normalizedDelay)
+            } else {
+                timer.schedule(deadline: .now() + normalizedDelay)
+            }
+
+            timer.setEventHandler { [weak self] in
+                guard let self else { return }
+                if self.isInterrupted() {
+                    self.cancelTimer(timerID)
+                    return
+                }
+
+                let executeCallback = {
+                    guard !self.isInterrupted() else { return }
+                    callback()
+                }
+
+                if let runLoop {
+                    runLoop.perform(inModes: [.default], block: executeCallback)
+                    CFRunLoopWakeUp(runLoop.getCFRunLoop())
+                } else {
+                    executeCallback()
+                }
+
+                if !repeats {
+                    self.cancelTimer(timerID)
+                }
+            }
+
+            timer.resume()
+            return timerID
+        }
+
+        func cancelTimer(_ timerID: Int) {
+            lock.lock()
+            let timer = timers.removeValue(forKey: timerID)
+            lock.unlock()
+            timer?.cancel()
+        }
+
+        func cancelAllTimers() {
+            lock.lock()
+            let timers = Array(self.timers.values)
+            self.timers.removeAll()
+            lock.unlock()
+            for timer in timers {
+                timer.cancel()
+            }
         }
     }
 
@@ -562,6 +781,34 @@ final class ScriptPluginService {
             """
         )
 
+        createDefaultScript(
+            directoryName: "context-inspector",
+            manifest: ScriptManifest(
+                name: NSLocalizedString("上下文检查器", comment: "Default script name: context inspector"),
+                description: NSLocalizedString("展示插件 2.0 的上下文字段与分析结果", comment: "Default script description: context inspector"),
+                author: defaultPluginAuthor,
+                version: "2.0.0",
+                main: "index.js",
+                icon: "info.circle",
+                permissions: nil,
+                apiVersion: 2,
+                kind: "analyze"
+            ),
+            script: """
+            function run(context) {
+                var text = String(context && context.inputText || "");
+                return {
+                    analysis: {
+                        chars: String(text.length),
+                        itemType: String(context && context.itemType || "unknown"),
+                        sourceApp: String(context && context.sourceApp || "unknown"),
+                        trigger: String(context && context.trigger || "manual")
+                    }
+                };
+            }
+            """
+        )
+
         log.info("Created default scripts")
     }
 
@@ -881,6 +1128,8 @@ final class ScriptPluginService {
 
         let requiresNetwork = manifest.permissions?.network ?? false
         let scriptHash = requiresNetwork ? computeScriptHash(at: scriptPath) : nil
+        let apiVersion = max(1, manifest.apiVersion ?? 1)
+        let kind = PluginKind(rawValue: manifest.kind?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "transform") ?? .transform
 
         return ScriptPlugin(
             id: directory.lastPathComponent,
@@ -891,7 +1140,9 @@ final class ScriptPluginService {
             scriptPath: scriptPath,
             scriptHash: scriptHash,
             icon: manifest.icon,
-            requiresNetwork: requiresNetwork
+            requiresNetwork: requiresNetwork,
+            apiVersion: apiVersion,
+            kind: kind
         )
     }
 
@@ -941,37 +1192,40 @@ final class ScriptPluginService {
 
     private func finishTask(_ executionId: String) {
         stateLock.lock()
-        executionStates.removeValue(forKey: executionId)
+        let state = executionStates.removeValue(forKey: executionId)
         stateLock.unlock()
+        state?.cancelAllTimers()
     }
 
     private func clearExecutionStates() {
         stateLock.lock()
+        let states = Array(executionStates.values)
         executionStates.removeAll()
         stateLock.unlock()
+        for state in states {
+            state.markInterrupted()
+        }
     }
 
-    /// 执行脚本转换（带安全检查）
-    func executeTransform(pluginId: String, input: String) -> ScriptResult {
+    /// 执行插件（带安全检查）
+    func executePlugin(pluginId: String, context executionContext: PluginExecutionContext) -> PluginExecutionResult {
         if Thread.isMainThread {
-            log.warn("executeTransform called on main thread; use executeTransformAsync instead")
-            return ScriptResult(
+            log.warn("executePlugin called on main thread; use executePluginAsync instead")
+            return PluginExecutionResult(
                 success: false,
-                output: nil,
                 error: NSLocalizedString("脚本执行应使用异步 API", comment: "Script execution should use async API")
             )
         }
-        return executeTransformInternal(pluginId: pluginId, input: input)
+        return executePluginInternal(pluginId: pluginId, context: executionContext)
     }
 
-    /// 异步执行脚本转换（不会阻塞调用方线程）
-    func executeTransformAsync(pluginId: String, input: String) async -> ScriptResult {
+    /// 异步执行插件（不会阻塞调用方线程）
+    func executePluginAsync(pluginId: String, context executionContext: PluginExecutionContext) async -> PluginExecutionResult {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async { [weak self] in
-                let result = self?.executeTransformInternal(pluginId: pluginId, input: input)
-                    ?? ScriptResult(
+                let result = self?.executePluginInternal(pluginId: pluginId, context: executionContext)
+                    ?? PluginExecutionResult(
                         success: false,
-                        output: nil,
                         error: NSLocalizedString("执行失败", comment: "Script execution failed")
                     )
                 continuation.resume(returning: result)
@@ -979,26 +1233,36 @@ final class ScriptPluginService {
         }
     }
 
-    private func executeTransformInternal(pluginId: String, input: String) -> ScriptResult {
+    /// 兼容旧的 transform(input) API
+    func executeTransform(pluginId: String, input: String) -> ScriptResult {
+        let executionContext = PluginExecutionContext(inputText: input)
+        return scriptResult(from: executePlugin(pluginId: pluginId, context: executionContext))
+    }
+
+    /// 兼容旧的 transform(input) 异步 API
+    func executeTransformAsync(pluginId: String, input: String) async -> ScriptResult {
+        let executionContext = PluginExecutionContext(inputText: input)
+        let result = await executePluginAsync(pluginId: pluginId, context: executionContext)
+        return scriptResult(from: result)
+    }
+
+    private func executePluginInternal(pluginId: String, context executionContext: PluginExecutionContext) -> PluginExecutionResult {
         let plugin: ScriptPlugin? = {
             pluginsLock.lock()
             defer { pluginsLock.unlock() }
             return pluginsById[pluginId]
         }()
         guard let plugin else {
-            return ScriptResult(
+            return PluginExecutionResult(
                 success: false,
-                output: nil,
                 error: NSLocalizedString("插件不存在", comment: "Script plugin does not exist")
             )
         }
 
-        // 输入长度检查
         let maxInput = DeckUserDefaults.scriptMaxInputLength
-        guard input.count <= maxInput else {
-            return ScriptResult(
+        guard executionContext.inputText.count <= maxInput else {
+            return PluginExecutionResult(
                 success: false,
-                output: nil,
                 error: String(
                     format: NSLocalizedString("输入超过最大长度限制 (%d 字符)", comment: "Script input too long"),
                     maxInput
@@ -1006,14 +1270,11 @@ final class ScriptPluginService {
             )
         }
 
-        // 执行脚本（带超时）
-        let result = executeScriptWithTimeout(plugin: plugin, input: input)
+        let result = executeScriptWithTimeout(plugin: plugin, executionContext: executionContext)
 
-        // 输出长度检查
-        if let output = result.output, output.count > Const.scriptMaxOutputLength {
-            return ScriptResult(
+        if let output = result.outputText, output.count > Const.scriptMaxOutputLength {
+            return PluginExecutionResult(
                 success: false,
-                output: nil,
                 error: String(
                     format: NSLocalizedString("输出超过最大长度限制 (%d 字符)", comment: "Script output too long"),
                     Const.scriptMaxOutputLength
@@ -1024,9 +1285,13 @@ final class ScriptPluginService {
         return result
     }
 
+    private func scriptResult(from result: PluginExecutionResult) -> ScriptResult {
+        ScriptResult(success: result.success, output: result.outputText, error: result.error)
+    }
+
     /// 带超时的脚本执行
     /// 注意：执行超时后会中断 JS 运行，避免死循环长期占用执行队列
-    private func executeScriptWithTimeout(plugin: ScriptPlugin, input: String) -> ScriptResult {
+    private func executeScriptWithTimeout(plugin: ScriptPlugin, executionContext: PluginExecutionContext) -> PluginExecutionResult {
         let timeout = TimeInterval(DeckUserDefaults.scriptTimeout)
         let executionId = UUID().uuidString
         let executionState = markTaskRunning(executionId)
@@ -1034,16 +1299,16 @@ final class ScriptPluginService {
         // 使用线程安全的容器存储结果
         final class ResultBox: @unchecked Sendable {
             private let lock = NSLock()
-            private var _result: ScriptResult?
+            private var _result: PluginExecutionResult?
             private var _isCompleted = false
             
-            var result: ScriptResult? {
+            var result: PluginExecutionResult? {
                 lock.lock()
                 defer { lock.unlock() }
                 return _result
             }
             
-            func setResult(_ r: ScriptResult) {
+            func setResult(_ r: PluginExecutionResult) {
                 lock.lock()
                 defer { lock.unlock() }
                 if !_isCompleted {
@@ -1076,7 +1341,7 @@ final class ScriptPluginService {
             
             let result = self.executeScript(
                 plugin: plugin,
-                input: input,
+                executionContext: executionContext,
                 executionState: executionState,
                 timeout: timeout
             )
@@ -1096,9 +1361,8 @@ final class ScriptPluginService {
             
             log.warn("Script \(plugin.id) execution timed out after \(Int(timeout)) seconds.")
             
-            return ScriptResult(
+            return PluginExecutionResult(
                 success: false,
-                output: nil,
                 error: String(
                     format: NSLocalizedString("脚本执行超时（超过 %d 秒）\n注意：包含死循环的脚本可能仍在后台运行", comment: "Script execution timeout"),
                     Int(timeout)
@@ -1108,9 +1372,8 @@ final class ScriptPluginService {
 
         // 清理任务追踪
         finishTask(executionId)
-        return resultBox.result ?? ScriptResult(
+        return resultBox.result ?? PluginExecutionResult(
             success: false,
-            output: nil,
             error: NSLocalizedString("执行失败", comment: "Script execution failed")
         )
     }
@@ -1118,47 +1381,67 @@ final class ScriptPluginService {
     /// 执行脚本（内部方法，不带安全检查）
     private func executeScript(
         plugin: ScriptPlugin,
-        input: String,
+        executionContext: PluginExecutionContext,
         executionState: ExecutionState,
         timeout: TimeInterval
-    ) -> ScriptResult {
+    ) -> PluginExecutionResult {
         // 每次执行都创建新的 JSContext，确保干净的执行环境
         // 这样超时后旧的 context 会被丢弃，不影响后续执行
-        guard let context = createContext(for: plugin, executionState: executionState, timeout: timeout) else {
-            return ScriptResult(
+        executionState.attachRunLoop(.current)
+        guard let context = createContext(
+            for: plugin,
+            executionState: executionState,
+            timeout: timeout,
+            executionContext: executionContext
+        ) else {
+            return PluginExecutionResult(
                 success: false,
-                output: nil,
                 error: NSLocalizedString("无法创建 JavaScript 环境", comment: "Cannot create JavaScript context")
             )
         }
 
-        // 调用 transform 函数
-        guard let transformFunc = context.objectForKeyedSubscript("transform"),
-              !transformFunc.isUndefined else {
-            return ScriptResult(
-                success: false,
-                output: nil,
-                error: NSLocalizedString("脚本中未定义 transform 函数", comment: "transform function not defined in script")
-            )
+        let runFunc = context.objectForKeyedSubscript("run")
+        let transformFunc = context.objectForKeyedSubscript("transform")
+        let hasRun = runFunc?.isUndefined == false
+        let hasTransform = transformFunc?.isUndefined == false
+        let prefersRun = plugin.apiVersion >= 2
+
+        if prefersRun {
+            guard hasRun else {
+                return PluginExecutionResult(
+                    success: false,
+                    error: NSLocalizedString("apiVersion 2 插件必须定义 run(context) 函数", comment: "Script run function required for apiVersion 2")
+                )
+            }
+        } else {
+            guard hasTransform else {
+                return PluginExecutionResult(
+                    success: false,
+                    error: NSLocalizedString("旧版插件必须定义 transform(input) 函数", comment: "Script transform function required for legacy plugins")
+                )
+            }
         }
         
         // 检查是否已被中断
         if executionState.isInterrupted() {
-            return ScriptResult(
+            return PluginExecutionResult(
                 success: false,
-                output: nil,
                 error: NSLocalizedString("脚本已被中断", comment: "Script interrupted")
             )
         }
 
-        // 执行转换
-        let result = transformFunc.call(withArguments: [input])
+        let result: JSValue?
+        if prefersRun, let runFunc {
+            let runContext = context.objectForKeyedSubscript("__deckExecutionContext")
+            result = runFunc.call(withArguments: runContext.map { [$0] } ?? [executionContext.javascriptObject])
+        } else {
+            result = transformFunc?.call(withArguments: [executionContext.inputText])
+        }
         
         // 再次检查中断状态
         if executionState.isInterrupted() {
-            return ScriptResult(
+            return PluginExecutionResult(
                 success: false,
-                output: nil,
                 error: NSLocalizedString("脚本已被中断", comment: "Script interrupted")
             )
         }
@@ -1167,26 +1450,32 @@ final class ScriptPluginService {
         if let exception = context.exception {
             let errorMessage = exception.toString() ?? NSLocalizedString("未知错误", comment: "Unknown script error")
             context.exception = nil  // 清除异常
-            return ScriptResult(success: false, output: nil, error: errorMessage)
+            return PluginExecutionResult(success: false, error: errorMessage)
         }
 
-        // 获取结果
-        guard let outputString = result?.toString() else {
-            return ScriptResult(
-                success: false,
-                output: nil,
-                error: NSLocalizedString("转换结果无效", comment: "Invalid transformed result")
-            )
+        if let promiseResolution = resolveThenableResult(
+            result,
+            in: context,
+            executionState: executionState,
+            timeout: timeout
+        ) {
+            switch promiseResolution {
+            case .resolved(let resolvedValue):
+                return parseExecutionResult(from: resolvedValue)
+            case .rejected(let error):
+                return PluginExecutionResult(success: false, error: error)
+            }
         }
 
-        return ScriptResult(success: true, output: outputString, error: nil)
+        return parseExecutionResult(from: result)
     }
 
     /// 创建 JSContext
     private func createContext(
         for plugin: ScriptPlugin,
         executionState: ExecutionState,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        executionContext: PluginExecutionContext
     ) -> JSContext? {
         let vm = JSVirtualMachine()
         guard let context = JSContext(virtualMachine: vm) else { return nil }
@@ -1207,6 +1496,11 @@ final class ScriptPluginService {
 
         // 初始化中断标记
         context.setObject(false, forKeyedSubscript: "__deckInterrupted" as NSString)
+        if let executionContextValue = JSValue(object: executionContext.javascriptObject, in: context) {
+            context.setObject(executionContextValue, forKeyedSubscript: "__deckExecutionContext" as NSString)
+        } else {
+            context.setObject([String: Any](), forKeyedSubscript: "__deckExecutionContext" as NSString)
+        }
         
         // 添加中断检查函数 - 脚本可以在循环中调用此函数检查是否应该中断
         let checkInterrupt: @convention(block) () -> Bool = { [weak context] in
@@ -1237,6 +1531,44 @@ final class ScriptPluginService {
         }
         context.setObject(consoleLog, forKeyedSubscript: "log" as NSString)
 
+        let setTimeout: @convention(block) (JSValue, Double) -> Int = { callback, delayMs in
+            guard callback.isObject, !callback.isUndefined, !callback.isNull else {
+                return 0
+            }
+            return executionState.scheduleTimer(delay: max(0, delayMs) / 1000.0) { [weak context] in
+                _ = callback.call(withArguments: [])
+                if let context, let exception = context.exception {
+                    let error = exception.toString() ?? "Unknown timer callback error"
+                    log.error("JS timer callback exception in \(plugin.id): \(error)")
+                    context.exception = nil
+                }
+            }
+        }
+        context.setObject(setTimeout, forKeyedSubscript: "setTimeout" as NSString)
+
+        let clearTimeout: @convention(block) (Int) -> Void = { timerID in
+            guard timerID > 0 else { return }
+            executionState.cancelTimer(timerID)
+        }
+        context.setObject(clearTimeout, forKeyedSubscript: "clearTimeout" as NSString)
+
+        let setInterval: @convention(block) (JSValue, Double) -> Int = { callback, delayMs in
+            guard callback.isObject, !callback.isUndefined, !callback.isNull else {
+                return 0
+            }
+            let normalizedDelay = max(0.001, max(0, delayMs) / 1000.0)
+            return executionState.scheduleTimer(delay: normalizedDelay, repeats: true) { [weak context] in
+                _ = callback.call(withArguments: [])
+                if let context, let exception = context.exception {
+                    let error = exception.toString() ?? "Unknown interval callback error"
+                    log.error("JS interval callback exception in \(plugin.id): \(error)")
+                    context.exception = nil
+                }
+            }
+        }
+        context.setObject(setInterval, forKeyedSubscript: "setInterval" as NSString)
+        context.setObject(clearTimeout, forKeyedSubscript: "clearInterval" as NSString)
+
         // 创建 console 对象和中断检查辅助函数
         context.evaluateScript("""
             var console = {
@@ -1244,6 +1576,8 @@ final class ScriptPluginService {
                 warn: function() { log('WARN: ' + Array.prototype.slice.call(arguments).join(' ')); },
                 error: function() { log('ERROR: ' + Array.prototype.slice.call(arguments).join(' ')); }
             };
+
+            var __deckContext = (typeof __deckExecutionContext === 'object' && __deckExecutionContext) ? __deckExecutionContext : {};
             
             // 辅助函数：在循环中检查是否应该中断
             // 使用方式: while(condition && !Deck.shouldStop()) { ... }
@@ -1255,7 +1589,18 @@ final class ScriptPluginService {
                     }
                 },
                 detectURLs: function(text) { return __deckDetectURLs(String(text || "")); },
-                detectEmails: function(text) { return __deckDetectEmails(String(text || "")); }
+                detectEmails: function(text) { return __deckDetectEmails(String(text || "")); },
+                context: __deckContext,
+                inputText: String(__deckContext.inputText || ""),
+                itemType: __deckContext.itemType == null ? null : String(__deckContext.itemType),
+                sourceApp: __deckContext.sourceApp == null ? null : String(__deckContext.sourceApp),
+                triggerKind: String(__deckContext.trigger || "manual"),
+                isSmartRuleRestricted: !!__deckContext.isSmartRuleRestricted,
+                sleep: function(ms) {
+                    return new Promise(function(resolve) {
+                        setTimeout(resolve, Number(ms) || 0);
+                    });
+                }
             };
         """)
 
@@ -1304,6 +1649,240 @@ final class ScriptPluginService {
         return context
     }
 
+    private func parseExecutionResult(from result: JSValue?) -> PluginExecutionResult {
+        guard let result, !result.isUndefined, !result.isNull else {
+            return PluginExecutionResult(
+                success: false,
+                error: NSLocalizedString("插件返回结果无效", comment: "Invalid plugin result")
+            )
+        }
+
+        if let structured = parseStructuredExecutionResult(from: result) {
+            return structured
+        }
+
+        if result.isObject, !result.isArray, result.toDictionary() != nil {
+            return PluginExecutionResult(
+                success: false,
+                error: NSLocalizedString("插件返回结果无效", comment: "Invalid plugin result")
+            )
+        }
+
+        guard let outputString = result.toString() else {
+            return PluginExecutionResult(
+                success: false,
+                error: NSLocalizedString("转换结果无效", comment: "Invalid transformed result")
+            )
+        }
+
+        return PluginExecutionResult(success: true, outputText: outputString)
+    }
+
+    private func parseStructuredExecutionResult(from result: JSValue) -> PluginExecutionResult? {
+        let outputValue = result.forProperty("outputText")
+        let analysisValue = result.forProperty("analysis")
+        let actionValue = result.forProperty("requestedAction")
+        let payloadValue = result.forProperty("actionPayload")
+        let errorValue = result.forProperty("error")
+        let successValue = result.forProperty("success")
+
+        let hasStructuredField = [outputValue, analysisValue, actionValue, payloadValue, errorValue, successValue]
+            .contains { value in
+                guard let value else { return false }
+                return !value.isUndefined && !value.isNull
+            }
+        guard hasStructuredField else { return nil }
+
+        let outputText = jsString(from: outputValue)
+        let analysis = analysisDictionary(from: analysisValue)
+        let requestedActionRaw = jsString(from: actionValue, trimWhitespace: true)
+        let actionPayload = jsString(from: payloadValue)
+        let errorText = jsString(from: errorValue, trimWhitespace: true, allowEmpty: false)
+        let explicitSuccess = jsBool(from: successValue)
+
+        let requestedAction: HostAction?
+        if let requestedActionRaw {
+            guard let action = HostAction(rawValue: requestedActionRaw) else {
+                return PluginExecutionResult(
+                    success: false,
+                    error: String(
+                        format: NSLocalizedString("插件返回了未知宿主动作：%@", comment: "Unknown host action"),
+                        requestedActionRaw
+                    )
+                )
+            }
+            requestedAction = action
+        } else {
+            requestedAction = nil
+        }
+
+        if let errorText {
+            return PluginExecutionResult(
+                success: false,
+                outputText: outputText,
+                analysis: analysis,
+                requestedAction: requestedAction,
+                actionPayload: actionPayload,
+                error: errorText
+            )
+        }
+
+        let hasPayload = outputText != nil || analysis != nil || requestedAction != nil
+        if !hasPayload {
+            if explicitSuccess == false {
+                return PluginExecutionResult(
+                    success: false,
+                    error: NSLocalizedString("插件执行失败", comment: "Plugin execution failed")
+                )
+            }
+            return PluginExecutionResult(
+                success: false,
+                error: NSLocalizedString("插件返回结果无效", comment: "Invalid plugin result")
+            )
+        }
+
+        return PluginExecutionResult(
+            success: explicitSuccess ?? true,
+            outputText: outputText,
+            analysis: analysis,
+            requestedAction: requestedAction,
+            actionPayload: actionPayload
+        )
+    }
+
+    private func analysisDictionary(from value: JSValue?) -> [String: String]? {
+        guard let value, !value.isUndefined, !value.isNull,
+              value.isObject, !value.isArray,
+              let dictionary = value.toDictionary() else {
+            return nil
+        }
+
+        let normalized = dictionary.reduce(into: [String: String]()) { result, entry in
+            let key = String(describing: entry.key).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else { return }
+            result[key] = String(describing: entry.value)
+        }
+        return normalized.isEmpty ? nil : normalized
+    }
+
+    private func jsString(
+        from value: JSValue?,
+        trimWhitespace: Bool = false,
+        allowEmpty: Bool = true
+    ) -> String? {
+        guard let value, !value.isUndefined, !value.isNull,
+              var string = value.toString() else {
+            return nil
+        }
+        if trimWhitespace {
+            string = string.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if !allowEmpty && string.isEmpty {
+            return nil
+        }
+        return string
+    }
+
+    private func jsBool(from value: JSValue?) -> Bool? {
+        guard let value, !value.isUndefined, !value.isNull else { return nil }
+        return value.toBool()
+    }
+
+    private enum ThenableResolution {
+        case resolved(JSValue?)
+        case rejected(String)
+    }
+
+    private func resolveThenableResult(
+        _ value: JSValue?,
+        in context: JSContext,
+        executionState: ExecutionState,
+        timeout: TimeInterval
+    ) -> ThenableResolution? {
+        guard let value, isThenable(value) else { return nil }
+
+        final class PromiseBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private(set) var completed = false
+            private(set) var resolvedValue: JSValue?
+            private(set) var rejectionMessage: String?
+
+            func resolve(_ value: JSValue?) {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !completed else { return }
+                completed = true
+                resolvedValue = value
+            }
+
+            func reject(_ message: String) {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !completed else { return }
+                completed = true
+                rejectionMessage = message
+            }
+        }
+
+        let box = PromiseBox()
+        let onFulfilled: @convention(block) (JSValue?) -> Void = { resolved in
+            box.resolve(resolved)
+        }
+        let onRejected: @convention(block) (JSValue?) -> Void = { rejected in
+            box.reject(self.promiseRejectionMessage(from: rejected))
+        }
+
+        context.setObject(value, forKeyedSubscript: "__deckThenableTarget" as NSString)
+        context.setObject(onFulfilled, forKeyedSubscript: "__deckThenableResolve" as NSString)
+        context.setObject(onRejected, forKeyedSubscript: "__deckThenableReject" as NSString)
+        context.evaluateScript("""
+            (function() {
+                __deckThenableTarget.then(__deckThenableResolve, __deckThenableReject);
+            })();
+        """)
+
+        if let exception = context.exception {
+            let errorMessage = promiseRejectionMessage(from: exception)
+            context.exception = nil
+            return .rejected(errorMessage)
+        }
+
+        let deadline = Date().addingTimeInterval(max(0.1, timeout))
+        while !box.completed {
+            if executionState.isInterrupted() {
+                return .rejected(NSLocalizedString("脚本已被中断", comment: "Script interrupted"))
+            }
+            if Date() >= deadline {
+                return .rejected(NSLocalizedString("等待异步脚本结果超时", comment: "Async script resolution timed out"))
+            }
+            _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01))
+        }
+
+        if let rejectionMessage = box.rejectionMessage {
+            return .rejected(rejectionMessage)
+        }
+        return .resolved(box.resolvedValue)
+    }
+
+    private func isThenable(_ value: JSValue) -> Bool {
+        guard let thenValue = value.forProperty("then") else { return false }
+        return !thenValue.isUndefined && !thenValue.isNull
+    }
+
+    private func promiseRejectionMessage(from value: JSValue?) -> String {
+        if let message = jsString(
+            from: value?.forProperty("message"),
+            trimWhitespace: true,
+            allowEmpty: false
+        ) {
+            return message
+        }
+        if let direct = jsString(from: value, trimWhitespace: true, allowEmpty: false) {
+            return direct
+        }
+        return NSLocalizedString("异步脚本执行失败", comment: "Async script execution failed")
+    }
+
     /// 设置网络 API (fetch)
     private func setupNetworkAPI(context: JSContext, pluginId: String, executionState: ExecutionState) {
         // 同步 fetch 实现（因为 JSContext 不支持原生 Promise）
@@ -1339,15 +1918,32 @@ final class ScriptPluginService {
                 }
 
                 if let headers = opts.forProperty("headers"), !headers.isUndefined {
-                    if let headerDict = headers.toDictionary() as? [String: String] {
+                    if let headerDict = headers.toDictionary() {
                         for (key, value) in headerDict {
-                            request.setValue(value, forHTTPHeaderField: key)
+                            request.setValue(
+                                String(describing: value),
+                                forHTTPHeaderField: String(describing: key)
+                            )
                         }
                     }
                 }
 
                 if let body = opts.forProperty("body"), !body.isUndefined, !body.isNull {
-                    if let bodyString = body.toString() {
+                    if let bodyObject = body.toDictionary(),
+                       JSONSerialization.isValidJSONObject(bodyObject),
+                       let bodyData = try? JSONSerialization.data(withJSONObject: bodyObject) {
+                        request.httpBody = bodyData
+                        if request.value(forHTTPHeaderField: "Content-Type") == nil {
+                            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                        }
+                    } else if let bodyArray = body.toArray(),
+                              JSONSerialization.isValidJSONObject(bodyArray),
+                              let bodyData = try? JSONSerialization.data(withJSONObject: bodyArray) {
+                        request.httpBody = bodyData
+                        if request.value(forHTTPHeaderField: "Content-Type") == nil {
+                            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                        }
+                    } else if let bodyString = body.toString() {
                         request.httpBody = bodyString.data(using: .utf8)
                     }
                 }
@@ -1414,7 +2010,9 @@ final class ScriptPluginService {
                 context: jsContext,
                 data: responseData,
                 status: httpResponse?.statusCode ?? 0,
-                statusText: HTTPURLResponse.localizedString(forStatusCode: httpResponse?.statusCode ?? 0)
+                statusText: HTTPURLResponse.localizedString(forStatusCode: httpResponse?.statusCode ?? 0),
+                url: httpResponse?.url?.absoluteString ?? url.absoluteString,
+                headers: httpResponse?.allHeaderFields
             )
         }
 
@@ -1423,25 +2021,42 @@ final class ScriptPluginService {
         // 创建同步 thenable 的 fetch 包装器（避免返回原生 Promise）
         context.evaluateScript("""
             var fetch = function(url, options) {
-                var response = __deckFetchSync(url, options);
+                var rawResponse = __deckFetchSync(url, options);
+                var resolvedResponse = null;
 
-                response.then = function(onFulfilled, onRejected) {
-                    if (response && response.error) {
-                        if (onRejected) { return onRejected(new Error(response.error)); }
-                        throw new Error(response.error);
+                function materializeResponse() {
+                    if (resolvedResponse) { return resolvedResponse; }
+                    if (!rawResponse || rawResponse.error) { return rawResponse; }
+                    resolvedResponse = {
+                        status: rawResponse.status,
+                        statusText: rawResponse.statusText,
+                        ok: rawResponse.ok,
+                        url: rawResponse.url,
+                        headers: rawResponse.headers,
+                        text: rawResponse.text,
+                        json: rawResponse.json
+                    };
+                    return resolvedResponse;
+                }
+
+                rawResponse.then = function(onFulfilled, onRejected) {
+                    if (rawResponse && rawResponse.error) {
+                        if (onRejected) { return onRejected(new Error(rawResponse.error)); }
+                        throw new Error(rawResponse.error);
                     }
+                    var response = materializeResponse();
                     return onFulfilled ? onFulfilled(response) : response;
                 };
 
-                response.catch = function(onRejected) {
-                    if (response && response.error) {
-                        if (onRejected) { return onRejected(new Error(response.error)); }
-                        throw new Error(response.error);
+                rawResponse.catch = function(onRejected) {
+                    if (rawResponse && rawResponse.error) {
+                        if (onRejected) { return onRejected(new Error(rawResponse.error)); }
+                        throw new Error(rawResponse.error);
                     }
-                    return response;
+                    return materializeResponse();
                 };
 
-                return response;
+                return rawResponse;
             };
         """)
 
@@ -1458,13 +2073,55 @@ final class ScriptPluginService {
     }
 
     /// 创建 fetch 成功响应
-    private static func createFetchResponse(context: JSContext, data: Data?, status: Int, statusText: String) -> JSValue {
+    private static func createFetchResponse(
+        context: JSContext,
+        data: Data?,
+        status: Int,
+        statusText: String,
+        url: String,
+        headers: [AnyHashable: Any]?
+    ) -> JSValue {
         guard let response = JSValue(newObjectIn: context) else {
             return JSValue(nullIn: context)
         }
         response.setValue(status, forProperty: "status")
         response.setValue(statusText, forProperty: "statusText")
         response.setValue(status >= 200 && status < 300, forProperty: "ok")
+        response.setValue(url, forProperty: "url")
+
+        let normalizedHeaders = (headers ?? [:]).reduce(into: [String: String]()) { result, entry in
+            let key = String(describing: entry.key).lowercased()
+            guard !key.isEmpty else { return }
+            result[key] = String(describing: entry.value)
+        }
+        let sortedHeaderPairs = normalizedHeaders.keys.sorted().map { key in
+            (key, normalizedHeaders[key] ?? "")
+        }
+
+        if let headersObject = JSValue(newObjectIn: context) {
+            let getHeader: @convention(block) (String) -> String? = { name in
+                normalizedHeaders[name.lowercased()]
+            }
+            let hasHeader: @convention(block) (String) -> Bool = { name in
+                normalizedHeaders[name.lowercased()] != nil
+            }
+            let keysFunc: @convention(block) () -> [String] = {
+                sortedHeaderPairs.map(\.0)
+            }
+            let valuesFunc: @convention(block) () -> [String] = {
+                sortedHeaderPairs.map(\.1)
+            }
+            let entriesFunc: @convention(block) () -> [[String]] = {
+                sortedHeaderPairs.map { [$0.0, $0.1] }
+            }
+            headersObject.setValue(JSValue(object: getHeader, in: context), forProperty: "get")
+            headersObject.setValue(JSValue(object: hasHeader, in: context), forProperty: "has")
+            headersObject.setValue(JSValue(object: keysFunc, in: context), forProperty: "keys")
+            headersObject.setValue(JSValue(object: valuesFunc, in: context), forProperty: "values")
+            headersObject.setValue(JSValue(object: entriesFunc, in: context), forProperty: "entries")
+            headersObject.setValue(normalizedHeaders, forProperty: "all")
+            response.setValue(headersObject, forProperty: "headers")
+        }
 
         // text() 方法
         let textFunc: @convention(block) () -> String = {
