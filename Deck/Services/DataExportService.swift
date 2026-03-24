@@ -91,6 +91,8 @@ final class DataExportService {
         let contentLength: Int
         let tagId: Int
         let isTemporary: Bool?
+        /// 本机局域网共享接收（可选，旧导出文件无此字段时按 false）
+        let receivedFromLAN: Bool?
         // 标记是否为大图（用于导入时重建 blob）
         let isLargeBlob: Bool?
     }
@@ -288,6 +290,7 @@ final class DataExportService {
                     contentLength: item.contentLength,
                     tagId: item.tagId,
                     isTemporary: item.isTemporary,
+                    receivedFromLAN: item.receivedFromLAN,
                     isLargeBlob: isLargeBlob
                 )
                 let encodedData = try encoder.encode(exportItem)
@@ -554,6 +557,7 @@ final class DataExportService {
             contentLength: exportItem.contentLength,
             tagId: exportItem.tagId,
             isTemporary: exportItem.isTemporary ?? false,
+            receivedFromLAN: exportItem.receivedFromLAN ?? false,
             uniqueId: exportItem.uniqueId
         )
     }

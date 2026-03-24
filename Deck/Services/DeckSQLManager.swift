@@ -231,6 +231,7 @@ enum Col {
     static let blobPath = Expression<String?>("blob_path")
     static let isTemporary = Expression<Bool>("is_temporary")
     static let isEncrypted = Expression<Bool>("is_encrypted")
+    static let receivedFromLan = Expression<Bool>("received_from_lan")
 }
 
 // MARK: - Maintenance helpers (storage cleanup / rollback snapshot)
@@ -426,8 +427,22 @@ extension DeckSQLManager {
 
                 let total = (try db.scalar("SELECT COUNT(*) FROM snap.ClipboardHistory") as? Int64) ?? 0
 
-                let cols = "id, unique_id, type, item_type, data, preview_data, timestamp, app_path, app_name, custom_title, source_anchor, search_text, content_length, tag_id, blob_path, is_temporary, is_encrypted"
-                try db.execute("INSERT OR IGNORE INTO ClipboardHistory (\(cols)) SELECT \(cols) FROM snap.ClipboardHistory")
+                var snapHasReceivedFromLan = false
+                let infoStmt = try db.prepare("PRAGMA snap.table_info(ClipboardHistory)")
+                while let infoRow = try infoStmt.failableNext() {
+                    if let name = infoRow[1] as? String, name == "received_from_lan" {
+                        snapHasReceivedFromLan = true
+                        break
+                    }
+                }
+
+                if snapHasReceivedFromLan {
+                    let cols = "id, unique_id, type, item_type, data, preview_data, timestamp, app_path, app_name, custom_title, source_anchor, search_text, content_length, tag_id, blob_path, is_temporary, is_encrypted, received_from_lan"
+                    try db.execute("INSERT OR IGNORE INTO ClipboardHistory (\(cols)) SELECT \(cols) FROM snap.ClipboardHistory")
+                } else {
+                    let cols = "id, unique_id, type, item_type, data, preview_data, timestamp, app_path, app_name, custom_title, source_anchor, search_text, content_length, tag_id, blob_path, is_temporary, is_encrypted"
+                    try db.execute("INSERT OR IGNORE INTO ClipboardHistory (\(cols)) SELECT \(cols) FROM snap.ClipboardHistory")
+                }
 
                 // Embeddings are best-effort.
                 try? db.execute("INSERT OR IGNORE INTO ClipboardHistory_embedding (id, text_hash, embedding) SELECT id, text_hash, embedding FROM snap.ClipboardHistory_embedding")
@@ -2626,6 +2641,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                     t.column(Col.blobPath)
                     t.column(Col.isTemporary, defaultValue: false)
                     t.column(Col.isEncrypted, defaultValue: false)
+                    t.column(Col.receivedFromLan, defaultValue: false)
                 })
 
                 try db.run(tab.createIndex(Col.ts, ifNotExists: true))
@@ -2879,7 +2895,8 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     /// - 4: 添加 source_anchor 列（IDE 溯源元数据）
     /// - 5: 添加 is_encrypted 列（逐行加密状态）
     /// - 6: 添加 custom_title 列（自定义标题）
-    private static let currentSchemaVersion: Int32 = 6
+    /// - 7: 添加 received_from_lan 列（局域网共享接收标记，供 type:lan 过滤）
+    private static let currentSchemaVersion: Int32 = 7
     private static let fileSearchTextBackfillTargetVersion = 1
 
     private func getSchemaVersion() -> Int32 {
@@ -2922,11 +2939,18 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         let needsSourceAnchorMigration = currentVersion < 4
         let needsEncryptionStateMigration = currentVersion < 5
         let needsCustomTitleMigration = currentVersion < 6
+        let needsReceivedFromLanMigration = currentVersion < 7
 
         let applyCustomTitleMigrationIfNeeded = { [weak self] in
             guard let self, needsCustomTitleMigration else { return }
             self.addCustomTitleColumnIfNeeded()
             self.rebuildFTSForCustomTitleMigration()
+        }
+
+        let applyReceivedFromLanMigrationIfNeeded = { [weak self] in
+            guard let self, needsReceivedFromLanMigration else { return }
+            self.addReceivedFromLanColumnIfNeeded()
+            self.backfillReceivedFromLanFlagsIfNeeded()
         }
 
         // Migration 0 -> 1: 添加 blob_path 列
@@ -2960,6 +2984,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 addEncryptionStateColumnIfNeeded()
             }
             applyCustomTitleMigrationIfNeeded()
+            applyReceivedFromLanMigrationIfNeeded()
 
             // 执行大图迁移，完成后再进行语义缓存回填
             let postMigration: (() async -> Void)?
@@ -2990,11 +3015,12 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 addEncryptionStateColumnIfNeeded()
             }
             applyCustomTitleMigrationIfNeeded()
+            applyReceivedFromLanMigrationIfNeeded()
             backfillSemanticEmbeddingsIfNeeded(targetVersion: Self.currentSchemaVersion)
             return migrationStoresLookHealthy()
         }
 
-        if needsTemporaryMigration || needsSourceAnchorMigration || needsEncryptionStateMigration || needsCustomTitleMigration {
+        if needsTemporaryMigration || needsSourceAnchorMigration || needsEncryptionStateMigration || needsCustomTitleMigration || needsReceivedFromLanMigration {
             if needsTemporaryMigration {
                 addTemporaryColumnIfNeeded()
             }
@@ -3005,11 +3031,54 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 addEncryptionStateColumnIfNeeded()
             }
             applyCustomTitleMigrationIfNeeded()
+            applyReceivedFromLanMigrationIfNeeded()
             setSchemaVersion(Self.currentSchemaVersion)
         }
 
         // 未来的迁移可以继续添加:
         return migrationStoresLookHealthy()
+    }
+
+    private func addReceivedFromLanColumnIfNeeded() {
+        withDB {
+            guard let db = self.db else { return }
+            let stmt = try db.prepare("PRAGMA table_info(ClipboardHistory)")
+            var columns: [String] = []
+            while let row = try stmt.failableNext() {
+                if let name = row[1] as? String {
+                    columns.append(name)
+                }
+            }
+            guard !columns.contains("received_from_lan") else { return }
+            try db.run("ALTER TABLE ClipboardHistory ADD COLUMN received_from_lan INTEGER NOT NULL DEFAULT 0")
+            log.info("Added received_from_lan column for LAN-received clipboard markers")
+        }
+    }
+
+    /// 将历史记录中可可靠识别的局域网接收条目标为 `received_from_lan`（明文路径含 `/LANReceived/`）。
+    private func backfillReceivedFromLanFlagsIfNeeded() {
+        withDB {
+            guard let db = self.db else { return }
+            let marker = "/" + LANReceivedCleanup.folderComponent + "/"
+            let escaped = marker.replacingOccurrences(of: "'", with: "''")
+            // 仅处理未加密行，避免对密文做 LIKE；小 payload 的 data 可能为 file:// 列表。
+            let sql = """
+            UPDATE ClipboardHistory SET received_from_lan = 1
+            WHERE is_encrypted = 0
+              AND received_from_lan = 0
+              AND (
+                search_text LIKE '%\(escaped)%'
+                OR IFNULL(blob_path, '') LIKE '%\(escaped)%'
+                OR (length(data) <= 1048576 AND CAST(data AS TEXT) LIKE '%\(escaped)%')
+              )
+            """
+            do {
+                try db.run(sql)
+                log.info("Backfill received_from_lan (historical LANReceived paths) executed")
+            } catch {
+                log.error("Backfill received_from_lan failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     private func addTemporaryColumnIfNeeded() {
@@ -3848,6 +3917,11 @@ extension DeckSQLManager {
         return existing
     }
 
+    /// Preserve LAN-received marker when a duplicate `unique_id` upsert supplies `false` (e.g. local re-copy).
+    private static func mergedReceivedFromLAN(incoming: Bool, existing: Bool?) -> Bool {
+        incoming || (existing ?? false)
+    }
+
     var totalCount: Int {
         return withDB {
             guard let db = self.db, let table = self.table else { return 0 }
@@ -3872,6 +3946,7 @@ extension DeckSQLManager {
         let blobPath: String?
         let isTemporary: Bool
         let isEncrypted: Bool
+        let receivedFromLAN: Bool
         let searchTextPlain: String
     }
 
@@ -3967,6 +4042,7 @@ extension DeckSQLManager {
             blobPath: blobPath,
             isTemporary: item.isTemporary,
             isEncrypted: isSecurityMode,
+            receivedFromLAN: item.receivedFromLAN,
             searchTextPlain: item.searchText
         )
     }
@@ -4101,8 +4177,9 @@ extension DeckSQLManager {
                     tag_id,
                     blob_path,
                     is_temporary,
-                    is_encrypted
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    is_encrypted,
+                    received_from_lan
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(unique_id) WHERE unique_id <> '' DO UPDATE SET
                     type = excluded.type,
                     item_type = excluded.item_type,
@@ -4122,7 +4199,8 @@ extension DeckSQLManager {
                     END,
                     blob_path = excluded.blob_path,
                     is_temporary = excluded.is_temporary,
-                    is_encrypted = excluded.is_encrypted
+                    is_encrypted = excluded.is_encrypted,
+                    received_from_lan = MAX(ClipboardHistory.received_from_lan, excluded.received_from_lan)
                 RETURNING id
                 """
 
@@ -4144,7 +4222,8 @@ extension DeckSQLManager {
                     payload.tagId,
                     payload.blobPath,
                     payload.isTemporary,
-                    payload.isEncrypted
+                    payload.isEncrypted,
+                    payload.receivedFromLAN
                 )
 
                 if let row = try stmt.failableNext(), let rowId = row[0] as? Int64 {
@@ -4160,8 +4239,18 @@ extension DeckSQLManager {
         }
 
         let deleteQuery = table.filter(Col.uniqueId == payload.uniqueId)
-        let existingTagId = try db.pluck(deleteQuery.select(Col.tagId))?.get(Col.tagId)
+        let existingRow = try db.pluck(deleteQuery.select(Col.tagId, Col.receivedFromLan))
+        let existingTagId: Int?
+        let existingReceivedFromLAN: Bool?
+        if let row = existingRow {
+            existingTagId = try row.get(Col.tagId)
+            existingReceivedFromLAN = try row.get(Col.receivedFromLan)
+        } else {
+            existingTagId = nil
+            existingReceivedFromLAN = nil
+        }
         let mergedTagId = Self.mergedTagId(incoming: payload.tagId, existing: existingTagId)
+        let mergedReceivedFromLAN = Self.mergedReceivedFromLAN(incoming: payload.receivedFromLAN, existing: existingReceivedFromLAN)
         _ = try db.run(deleteQuery.delete())
 
         let insert = table.insert(
@@ -4180,7 +4269,8 @@ extension DeckSQLManager {
             Col.tagId <- mergedTagId,
             Col.blobPath <- payload.blobPath,
             Col.isTemporary <- payload.isTemporary,
-            Col.isEncrypted <- payload.isEncrypted
+            Col.isEncrypted <- payload.isEncrypted,
+            Col.receivedFromLan <- mergedReceivedFromLAN
         )
 
         return (try db.run(insert), false)
@@ -4452,7 +4542,8 @@ extension DeckSQLManager {
                 Col.tagId <- item.tagId,
                 Col.blobPath <- blobPathToStore,
                 Col.isTemporary <- item.isTemporary,
-                Col.isEncrypted <- isSecurityMode
+                Col.isEncrypted <- isSecurityMode,
+                Col.receivedFromLan <- item.receivedFromLAN
             )
             let count = try db.run(update)
             if count > 0, let old = oldBlobPath, old != blobPathToStore {
@@ -4617,7 +4708,8 @@ extension DeckSQLManager {
             Col.tagId,
             Col.blobPath,
             Col.isTemporary,
-            Col.isEncrypted
+            Col.isEncrypted,
+            Col.receivedFromLan
         )
     }
 
@@ -5281,6 +5373,7 @@ extension DeckSQLManager {
             }
             let storedItemType = try row.get(Col.itemType)
             let rawIsTemporary = (try? row.get(Col.isTemporary)) ?? false
+            let receivedFromLAN = (try? row.get(Col.receivedFromLan)) ?? false
             let storedIsEncrypted = try? row.get(Col.isEncrypted)
             let isTemporary = tagId == DeckTag.importantTagId ? false : rawIsTemporary
             if tagId == DeckTag.importantTagId && rawIsTemporary {
@@ -5376,6 +5469,7 @@ extension DeckSQLManager {
                 contentLength: length,
                 tagId: tagId,
                 isTemporary: isTemporary,
+                receivedFromLAN: receivedFromLAN,
                 id: id,
                 uniqueId: resolvedUniqueId,
                 blobPath: blobPath,

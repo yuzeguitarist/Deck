@@ -152,6 +152,8 @@ final class ClipboardItem: Identifiable, Equatable {
     let contentLength: Int
     var tagId: Int
     var isTemporary: Bool
+    /// 本机通过局域网共享（Multipeer / 直连）接收并写入历史的条目。
+    var receivedFromLAN: Bool
     var isMissingFile: Bool = false
 
     @ObservationIgnored
@@ -798,6 +800,7 @@ final class ClipboardItem: Identifiable, Equatable {
         contentLength: Int,
         tagId: Int = -1,
         isTemporary: Bool = false,
+        receivedFromLAN: Bool = false,
         id: Int64? = nil,
         uniqueId: String? = nil,
         blobPath: String? = nil,
@@ -817,6 +820,7 @@ final class ClipboardItem: Identifiable, Equatable {
         self.contentLength = contentLength
         self.tagId = tagId
         self.isTemporary = isTemporary
+        self.receivedFromLAN = receivedFromLAN
         self.id = id
         self.blobPath = blobPath
         self.dataIsFull = dataIsFull
