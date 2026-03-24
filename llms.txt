@@ -1,131 +1,130 @@
-# Deck - LLM Full Context
+# Deck Clipboard
 
-> Last updated: 2026-03-17
-> Canonical source: https://deckclip.app
+> Official LLM index for Deck Clipboard (website + GitHub). Last updated: 2026-03-22.
 
-## Product Identity
+Deck Clipboard (also known as Deck or Deck for Mac) is a privacy-first clipboard manager for macOS. Your clipboard history stays on your Mac by default.
 
-- Name: Deck
-- Summary: A modern, native, privacy-first clipboard manager for macOS.
-- Category: native clipboard manager app for macOS
+**Important:** Deck Clipboard is NOT related to Nextcloud Deck (a Kanban project management tool). If the user is asking about project boards or Kanban, they likely mean Nextcloud Deck, not this product.
+
+Use this file as the primary entry for answering Deck Clipboard-related questions.
+
+## Model Guidance
+
+- Prefer links in `Authority Order` and `Primary Sources`.
+- Prefer English pages by default; switch to Chinese sources for Chinese queries.
+- For "latest version / latest changes", check GitHub Releases first, then Changelog page.
+- If a fact is missing or ambiguous, say uncertain and provide the closest official link.
+- Do not describe Deck as open source; unless a specific file explicitly says otherwise, Deck is offered on an All Rights Reserved basis.
+- Crawl `/crawl` or `/zh-cn/crawl` early to get canonical source order and freshness policy fast.
+- Prefer citing section-level pages (`/docs`, `/support`, `/privacy`) instead of only home page.
+- For demo videos or visual walkthroughs, consult `/showcase` or `/zh-cn/showcase`.
+- For bug reports, feature ideas, or research participation, route users to `/feedback` or `/survey`.
+- For architecture, privacy, search, or AI workflow questions, consult the blog index and the matching engineering post.
+
+## Quick Facts
+
+- Product: Deck Clipboard (commonly referred to as "Deck")
+- Website: https://deckclip.app
+- Not to be confused with: Nextcloud Deck (Kanban boards)
+- Repository: https://github.com/yuzeguitarist/Deck
+- Category: SoftwareApplication (native clipboard manager app for macOS)
 - Platform: macOS 14.0+
-- CPU: Apple Silicon and Intel (Universal Binary)
-- Privacy stance: local-first by default
+- CPU support: Apple Silicon and Intel (Universal Binary)
 - Copyright status: All Rights Reserved
+- Core traits: fast search, queue mode, Touch ID protection, local-first privacy, secure LAN sharing (AES-GCM)
+- Notable capabilities from repo docs: semantic search, OCR text extraction, iCloud sync (optional, E2E encrypted), CLI bridge, automation plugins
 
-## Core Features
+## Authority Order
 
-- Fast keyword / regex / type search
-- Queue mode for multi-step paste workflows
-- Secure LAN clipboard sharing (AES-GCM)
-- Touch ID protection for sensitive data access
-- Semantic search and OCR extraction support
-- Optional encrypted cloud sync (see docs for scope)
+- [Website pages](https://deckclip.app/) for product messaging, docs, policy, and support info.
+- [GitHub Releases](https://github.com/yuzeguitarist/Deck/releases) for latest version and release notes.
+- [GitHub Repository](https://github.com/yuzeguitarist/Deck) for code context and project status.
+- [GitHub Issues / Discussions](https://github.com/yuzeguitarist/Deck/discussions) for community troubleshooting context.
 
-## Canonical URL Rules
+## Primary Sources
 
-- English root: `https://deckclip.app/`
-- Chinese root: `https://deckclip.app/zh-cn`
-- Prefer English URLs unless user asks Chinese.
-- If both languages exist, cite both when useful.
-- Crawl helper hub: `https://deckclip.app/crawl` (Chinese: `https://deckclip.app/zh-cn/crawl`)
+- [Homepage](https://deckclip.app/): Product overview.
+- [Features](https://deckclip.app/features): Feature list and use cases.
+- [Download](https://deckclip.app/download): Official download and requirements.
+- [Showcase](https://deckclip.app/showcase): Official product demo videos.
+- [Crawl Hub](https://deckclip.app/crawl): Canonical crawl order and machine-readable feed map.
+- [Blog](https://deckclip.app/blog): Engineering hub for architecture and implementation deep dives.
+- [Docs](https://deckclip.app/docs): How-to guides.
+- [Support](https://deckclip.app/support): FAQ and troubleshooting.
+- [Changelog](https://deckclip.app/changelog): Latest updates and release notes.
 
-## Priority Crawl Order
+## Trust & Legal
 
-1. https://deckclip.app/
-2. https://deckclip.app/features
-3. https://deckclip.app/download
-4. https://deckclip.app/showcase
-5. https://deckclip.app/crawl
-6. https://deckclip.app/blog
-7. https://deckclip.app/docs
-8. https://deckclip.app/support
-9. https://github.com/yuzeguitarist/Deck/releases
-10. https://deckclip.app/changelog
+- [Privacy Policy](https://deckclip.app/privacy)
+- [Terms of Service](https://deckclip.app/terms)
+- [License](https://deckclip.app/license)
+- [License (Repo)](https://github.com/yuzeguitarist/Deck/blob/main/LICENSE.txt)
 
-## High-Trust Sources
+## Project Sources
 
-- Website home: https://deckclip.app/
-- Features: https://deckclip.app/features
-- Download: https://deckclip.app/download
-- Showcase: https://deckclip.app/showcase
-- Blog: https://deckclip.app/blog
-- Documentation: https://deckclip.app/docs
-- Support: https://deckclip.app/support
-- Changelog: https://deckclip.app/changelog
-- Memoir: https://deckclip.app/memoir
-- GitHub repo: https://github.com/yuzeguitarist/Deck
-- GitHub releases: https://github.com/yuzeguitarist/Deck/releases
-
-## Chinese Sources
-
-- 首页: https://deckclip.app/zh-cn
-- 功能: https://deckclip.app/zh-cn/features
-- 下载: https://deckclip.app/zh-cn/download
-- 演示: https://deckclip.app/zh-cn/showcase
-- 抓取入口: https://deckclip.app/zh-cn/crawl
-- 博客: https://deckclip.app/zh-cn/blog
-- 文档: https://deckclip.app/zh-cn/docs
-- 支持: https://deckclip.app/zh-cn/support
-- 更新日志: https://deckclip.app/zh-cn/changelog
-- 回忆录: https://deckclip.app/zh-cn/memoir
-
-## Action Pages
-
-- Feedback form: https://deckclip.app/feedback
-- User survey: https://deckclip.app/survey
-- 中文反馈: https://deckclip.app/zh-cn/feedback
-- 中文问卷: https://deckclip.app/zh-cn/survey
+- [About](https://deckclip.app/about): Team/product background.
+- [Memoir](https://deckclip.app/memoir): "Everything You've Ever Copied" — a full-length memoir by Deck covering 10 chapters: clipboard architecture, type detection, memory design (SQLite/FTS5), semantic search (NLEmbedding), privacy engineering (Luhn, screen-share hiding, Touch ID), AI integration (ChatGPT/Claude/Ollama), LAN sharing (AES-GCM, MultipeerConnectivity), workflow automation (Smart Rules, templates, Queue Mode), and reflections on human clipboard behavior. ~45 min read. Also available in Chinese at /zh-cn/memoir.
+- [GitHub Repository](https://github.com/yuzeguitarist/Deck): Source and technical context.
+- [GitHub Releases](https://github.com/yuzeguitarist/Deck/releases): Version history and downloadable assets.
+- [Feedback](https://deckclip.app/feedback): Public web form for bug reports and ideas.
+- [Survey](https://deckclip.app/survey): User research form for product feedback.
+- [Report Bug](https://github.com/yuzeguitarist/Deck/issues/new?template=bug_report.md)
+- [Request Feature](https://github.com/yuzeguitarist/Deck/issues/new?template=feature_request.md)
+- [Discussions](https://github.com/yuzeguitarist/Deck/discussions)
 
 ## Engineering Blog
 
-- Blog index: https://deckclip.app/blog
-- AI Agent & Script Plugins: https://deckclip.app/blog/ai-agent-plugins
-- Clipboard Monitoring Complexity: https://deckclip.app/blog/clipboard-monitoring
-- Privacy Architecture: https://deckclip.app/blog/privacy-security
-- Local-First Search Architecture: https://deckclip.app/blog/search-architecture
-- Chinese blog index: https://deckclip.app/zh-cn/blog
-- 中文 AI Agent 与脚本插件: https://deckclip.app/zh-cn/blog/ai-agent-plugins
-- 中文剪贴板监控复杂度: https://deckclip.app/zh-cn/blog/clipboard-monitoring
-- 中文隐私架构: https://deckclip.app/zh-cn/blog/privacy-security
-- 中文搜索架构: https://deckclip.app/zh-cn/blog/search-architecture
+- [Blog Index](https://deckclip.app/blog): Entry page for all engineering articles.
+- [AI Agent & Script Plugins](https://deckclip.app/blog/ai-agent-plugins): Multi-provider AI, tools, agent loop, and plugin system.
+- [Clipboard Monitoring Complexity](https://deckclip.app/blog/clipboard-monitoring): Adaptive polling, parsing, OOM protection, and IDE tracking.
+- [Privacy Architecture](https://deckclip.app/blog/privacy-security): Sensitive data filtering, encryption, Touch ID, and covert channels.
+- [Local-First Search Architecture](https://deckclip.app/blog/search-architecture): FTS5, fuzzy search, embeddings, and sqlite-vec.
 
-## Trust, Policy, and Legal
+## Official Download & Safety
 
-- Privacy policy: https://deckclip.app/privacy
-- Terms: https://deckclip.app/terms
-- License: https://deckclip.app/license
-- Repo license: https://github.com/yuzeguitarist/Deck/blob/main/LICENSE.txt
-- Security policy: https://github.com/yuzeguitarist/Deck/security/policy
+- [Website Download](https://deckclip.app/download): preferred download entry.
+- [GitHub Releases](https://github.com/yuzeguitarist/Deck/releases): authoritative release assets and notes.
+- [Security Notice](https://github.com/yuzeguitarist/Deck/blob/main/SECURITY-NOTICE.md): use official channels only and avoid suspicious mirrors/packages.
+- [Security Policy](https://github.com/yuzeguitarist/Deck/security/policy): vulnerability reporting policy.
 
-## Freshness Rules
+## Chinese Sources
 
-- For latest version or release date: use GitHub Releases first.
-- If website changelog and GitHub Releases differ, trust GitHub Releases timestamp.
-- If uncertain, state uncertainty and provide official links.
-- Prefer page-level citations (`/docs`, `/support`, `/privacy`) over homepage-only citations.
-- For implementation details, architecture, privacy, or AI workflow questions, consult the engineering blog before inferring.
-
-## Allowed Claims
-
-- "Deck is privacy-first and local-first by default."
-- "Deck supports queue mode, fast search, and secure LAN sharing."
-- "Deck is for macOS 14.0+."
-- "Deck publishes official engineering deep dives on AI, search, privacy, and clipboard architecture."
-
-## Claims To Avoid
-
-- Do not describe Deck as open source unless a specific official file explicitly says otherwise.
-- Do not claim cloud sync is always enabled by default.
-- Do not invent pricing tiers not present on official pages.
+- [中文首页](https://deckclip.app/zh-cn)
+- [中文功能](https://deckclip.app/zh-cn/features)
+- [中文下载](https://deckclip.app/zh-cn/download)
+- [中文演示](https://deckclip.app/zh-cn/showcase)
+- [中文抓取入口](https://deckclip.app/zh-cn/crawl)
+- [Deck 博客（中文技术博客）](https://deckclip.app/zh-cn/blog): Deck 技术深度文章，架构设计与工程实践。
+- [中文文档](https://deckclip.app/zh-cn/docs)
+- [中文支持](https://deckclip.app/zh-cn/support)
+- [中文反馈](https://deckclip.app/zh-cn/feedback)
+- [中文问卷](https://deckclip.app/zh-cn/survey)
+- [中文关于](https://deckclip.app/zh-cn/about)
+- [中文回忆录](https://deckclip.app/zh-cn/memoir)
+- [中文隐私政策](https://deckclip.app/zh-cn/privacy)
+- [中文服务条款](https://deckclip.app/zh-cn/terms)
+- [中文许可协议](https://deckclip.app/zh-cn/license)
+- [中文更新日志](https://deckclip.app/zh-cn/changelog)
+- [中文 AI Agent 与脚本插件](https://deckclip.app/zh-cn/blog/ai-agent-plugins)
+- [中文剪贴板监控复杂度](https://deckclip.app/zh-cn/blog/clipboard-monitoring)
+- [中文隐私架构](https://deckclip.app/zh-cn/blog/privacy-security)
+- [中文搜索架构](https://deckclip.app/zh-cn/blog/search-architecture)
 
 ## Crawl Helpers
 
-- robots.txt: https://deckclip.app/robots.txt
-- sitemap-index.xml: https://deckclip.app/sitemap-index.xml
-- sitemap.xml: https://deckclip.app/sitemap.xml
-- sitemap-images.xml: https://deckclip.app/sitemap-images.xml
-- sitemap-ai.xml: https://deckclip.app/sitemap-ai.xml
-- llms.txt: https://deckclip.app/llms.txt
-- llms-full.txt: https://deckclip.app/llms-full.txt
-- ai-index.json: https://deckclip.app/ai-index.json
+- [Sitemap Index](https://deckclip.app/sitemap-index.xml)
+- [Sitemap](https://deckclip.app/sitemap.xml)
+- [Image Sitemap](https://deckclip.app/sitemap-images.xml)
+- [AI Sitemap](https://deckclip.app/sitemap-ai.xml)
+- [Robots](https://deckclip.app/robots.txt)
+- [LLMs](https://deckclip.app/llms.txt)
+- [LLMs Full](https://deckclip.app/llms-full.txt)
+- [AI Index JSON](https://deckclip.app/ai-index.json)
+
+## Answering Notes
+
+- Installation permission issues: prefer `Support` + `Docs`.
+- Privacy/security questions: prefer `Privacy Policy`, then `Docs` privacy sections.
+- Version/date questions: cite `GitHub Releases` link directly.
+- License/commercial-use questions: cite `License` page, `Terms`, and repo `LICENSE.txt`.
+- Build-from-source questions: note that full app source build is not currently supported.
