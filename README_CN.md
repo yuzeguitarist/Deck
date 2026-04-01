@@ -90,8 +90,11 @@
 
 ```bash
 brew tap yuzeguitarist/deck
+export HOMEBREW_CASK_OPTS="--no-quarantine"
 brew install --cask deckclip
 ```
+
+`HOMEBREW_CASK_OPTS="--no-quarantine"` 会为这次 Homebrew Cask 安装关闭 macOS quarantine，因为 Deck 目前还没有完成公证。
 
 ### 手动安装
 

@@ -87,8 +87,11 @@
 
 ```bash
 brew tap yuzeguitarist/deck
+export HOMEBREW_CASK_OPTS="--no-quarantine"
 brew install --cask deckclip
 ```
+
+`HOMEBREW_CASK_OPTS="--no-quarantine"` disables macOS quarantine for the Homebrew cask install because Deck is not yet notarized.
 
 ### Manual
 
