@@ -4,6 +4,141 @@ This file is auto-generated from GitHub Releases by [release-changelog-bot](.git
 
 <!-- release-changelog-bot:auto -->
 
+<!-- release-changelog-bot:tag:v1.3.9 -->
+## v1.3.9 — v1.3.9 | artum
+
+- **Tag:** `v1.3.9`
+- **Published:** 2026-04-02T11:41:12Z
+
+### Release notes
+
+<p align="center">
+  <a href="https://deckclip.app/download" rel="noopener noreferrer" target="_blank">
+    <img width="1525" height="896" alt="Deck" src="https://github.com/yuzeguitarist/Deck/raw/main/photos/Deck.webp" style="max-width: 100%; height: auto;" />
+  </a>
+</p>
+
+---
+
+## Release Notes v1.3.9
+
+### TL;DR
+-   Deck now automatically compacts older conversation context when an AI chat approaches the context limit, allowing long sessions to continue without manually starting over.
+
+-   While compaction is running, `Compacting...` appears beside the AI dot; once complete, the transcript shows a minimal divider that marks where earlier context was compacted.
+
+-   Deck AI now carries forward the current task direction, key outcomes, and essential tool context after compaction, reducing long-session context breaks.
+
+-   In the expanded AI chat panel, Deck now shows a restrained context usage indicator with a small ring and percentage so you can quickly gauge how close the current session is to the context limit.
+
+-   Deck now batches independent read-only AI lookups within the same turn to reduce waiting time.
+
+-   Clipboard search, plugin listing/reading, skill detail lookup, and web search/fetch can now work together so the AI can gather context faster.
+
+-   Write, delete, plugin-edit, and other approval-sensitive actions remain sequential, so this optimization does not loosen the approval flow.
+
+-   Deck AI is now more reliable during multi-step tasks: it diagnoses issues before changing strategy, reports tool outcomes more accurately, and applies better judgment about action risk levels.
+
+-   When the AI creates or modifies a JavaScript script plugin, Deck now runs a native JSON/JavaScript preflight before showing approval, catching manifest errors, syntax issues, and common runtime incompatibilities earlier.
+
+-   You can now ask Deck AI to generate Smart Rules directly. The AI structures the conditions, actions, and enabled state into a real rule, then saves it through the existing approval flow.
+
+-   When Deck AI is searching the clipboard, reading a plugin, saving memory, or handling other tool steps, the left-side status area now shows the current action more clearly, making waits feel more transparent and polished.
+
+-   Streaming AI replies now render in the final message slot from the start, so finishing a reply no longer causes downward flashes, rebound snaps, or sudden upward jumps of the whole text block.
+
+-   Reduced repeated focus grabs in the AI chat composer, lowering noisy system input-method warnings during window activation or Chinese IME switching and making text entry feel more stable.
+
+-   The AI composer now hides its placeholder promptly during Chinese IME composition and fixes cases where confirming a candidate could insert a number instead, making Chinese text entry cleaner and more stable.
+
+-   The send button aligns to the bottom when the composer grows with multiple lines; it stays vertically centered with the single-line field when empty, keeping the default look consistent.
+
+-   Onboarding and Settings → Storage can import CliperX history read-only (including common UsePasteAgain layouts) alongside other sources; rows use bundled brand artwork with continuous corner masking so each source is easy to recognize.
+
+### Added
+-   When an AI conversation approaches the context limit, Deck automatically condenses earlier context into a summary so long-running chats can continue.
+
+-   Deck AI now includes a `generate_smart_rule` tool, allowing automation intents to be turned directly into Smart Rules instead of only generating Script Plugins.
+
+-   While compaction is in progress, Deck shows `Compacting...`, then inserts a minimal “Conversation context compressed” divider into the transcript once the process completes.
+
+-   Deck adds a lightweight context usage display for AI chat, using a small ring and percentage in the expanded panel to show the session's approximate context pressure.
+
+-   Adds read-only scan/import for CliperX (including common UsePasteAgain `History.sqlite` + `Payloads` layouts), using the same authentication and batched write path as other migration adapters.
+
+### Improvements
+-   Compacted context now preserves the current task direction, key outcomes, and essential tool hints, reducing the feeling that the AI has lost the thread in longer chats.
+
+-   Deck only shows the context usage indicator after you send a message or expand the chat panel, keeping the information useful without cluttering the default compact popup state.
+
+-   When the composer grows with line breaks, the send button stays pinned to the bottom of the input area instead of floating in the middle; when the field is empty, it remains vertically centered with the single-line composer for a consistent default layout.
+
+-   Deck AI now handles tool-heavy lookup flows more efficiently, especially when a request needs clipboard, plugin, and web context together.
+
+-   While the AI is performing tool calls, the chat panel now makes the current step more visible on the left side — such as searching, reading a plugin, reading a skill, or saving memory — so the flow is easier to follow.
+
+-   Independent read-only tool calls can now be issued together in the same turn, reducing unnecessary back-and-forth.
+
+-   Legacy template-library migration and repair flows have been consolidated, making maintenance more direct and reducing the chance of drift in historical data recovery.
+
+-   When a tool call fails or search results come back empty, the AI now analyzes the cause before adjusting its approach, rather than retrying blindly or giving up immediately.
+
+-   The AI now has clearer risk-tiered awareness across its tools — acting more decisively on read-only operations and more cautiously on irreversible ones.
+
+-   The AI no longer fabricates success when a tool fails, nor hedges unnecessarily when things go well — reporting is now more faithful to actual outcomes.
+
+-   `generate_script_plugin` and `modify_script_plugin` now run native preflight checks on drafts or temporary patched copies first; when something fails, Deck returns structured file, severity, code, message, and line/column diagnostics so the model can repair and retry automatically.
+
+-   The AI approval bubble in chat now recognizes Smart Rule creation requests and shows a minimal preview of the rule name, trigger logic, and short summary while preserving the original visual style.
+
+-   Welcome “migrate clipboard” and Settings → Storage migration rows now use bundled brand PNGs under `MigrationSourceIcons`, masked with macOS continuous corners, instead of generic SF Symbols alone; loose PNGs ship in the app resource bundle and load via `Bundle` file URLs to avoid “missing in asset catalog” warnings; minor listing tweaks are omitted here. The repo also includes `scripts/normalize_migration_source_icons.py` to normalize icon canvases when updating artwork.
+
+### Changes
+-   Compaction only affects the runtime context sent to the AI; local conversation history remains fully preserved, and older messages do not disappear from the transcript.
+
+-   This behavior triggers silently as the context approaches its limit, with no manual button or extra cleanup step required.
+
+-   CliperX and related migrations are offered from onboarding and Settings → Storage only, not from JSON export/import flows, so the entry point stays consistent.
+
+### Fixes
+-   Local save paths for LAN pairing secrets, AI Memory keys, and shared keys have been tightened; when a relevant secret already exists, Deck now tries to update it in place first, reducing the risk of losing existing values during rare write failures.
+
+-   If compaction cannot complete, Deck retries quietly once and then continues with the current request normally, avoiding hard interruptions when compaction fails.
+
+-   Fixed the layout handoff between streaming and finalized AI messages; in short replies, compact windows, and bottom-pinned reading, finishing a reply no longer pushes the whole content upward at the last moment.
+
+-   Fixed repeated first-responder requests in the AI chat composer when the window becomes active again. This reduces system-level warning noise during composed-input flows such as Chinese IMEs and keeps input focus behavior more stable.
+
+-   Fixed issues where the AI composer placeholder could briefly overlap IME composition text and, in some cases, confirming a Chinese IME candidate could insert a number instead; sending or clearing the composer now also handles in-progress composition more reliably.
+
+-   Fixed an issue where the context usage indicator could keep showing stale values after switching chats or starting a new conversation. Empty chats, different sessions, and restored chat states now recalculate and refresh correctly.
+
+-   Fixed an issue where overly long Smart Rule approval content could inflate the AI chat panel to an extreme height and even trigger a constraints update loop; approval summaries are now kept restrained.
+
+-   Fixed `modify_script_plugin` preflight creating a temporary directory before `copyItem`; `FileManager.copyItem` requires the destination not to exist, so the copy step always failed and surfaced as a misleading directory-creation error (often under `/var/folders/...`). The staging path is now created only as part of the copy into a unique temp URL.
+
+### Compatibility & Behavior Notes
+-   Deck prefers to keep the most recent turns verbatim and fold earlier context into a summary, so compacted sessions stay anchored in the latest exchange.
+
+-   This applies only to independent read-only tool calls in the same turn; anything that writes data, requires approval, or depends on a prior result still runs sequentially.
+
+-   Batching happens when the AI determines that multiple lookups are independent; tasks that require step-by-step reasoning or confirmation may still remain serial.
+
+-   This check has no separate button or settings surface. It runs automatically inside the AI plugin generation pipeline, and Deck only proceeds to plugin add/modify approval once preflight passes.
+
+### Upgrade Notes
+-   Upgrade to v1.3.9 if you often keep Deck AI on longer tasks, follow up repeatedly, or continue pushing the same goal across many turns.
+
+-   Upgrade to v1.3.9 if you often ask Deck AI to inspect clipboard history, script plugins, skill details, and web content in the same request.
+
+-   If you used CliperX or similar tools and want history brought into Deck, start a read-only migration from onboarding or Settings → Storage after upgrading.
+
+---
+
+### Assets
+
+- [`Deck.dmg`](https://github.com/yuzeguitarist/Deck/releases/download/v1.3.9/Deck.dmg)
+
 <!-- release-changelog-bot:tag:v1.3.8 -->
 ## v1.3.8 — v1.3.8 | lūcidulus
 

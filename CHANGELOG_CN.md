@@ -4,6 +4,193 @@
 
 <!-- release-changelog-bot:auto -->
 
+<!-- release-changelog-bot:tag:v1.3.9 -->
+## v1.3.9 — v1.3.9 | artum
+
+- **Tag:** `v1.3.9`
+- **Published:** 2026-04-02T11:41:12Z
+
+### Release notes
+
+<p align="center">
+  <a href="https://deckclip.app/download" rel="noopener noreferrer" target="_blank">
+    <img width="1525" height="896" alt="Deck" src="https://github.com/yuzeguitarist/Deck/raw/main/photos/Deck.webp" style="max-width: 100%; height: auto;" />
+  </a>
+</p>
+
+---
+
+## 更新说明 v1.3.9
+
+### TL;DR
+- **长会话自动压缩 / Automatic Long-Session Compaction**  
+  当 AI 对话接近上下文上限时，Deck 现在会自动压缩较早的对话内容，让长会话可以继续推进而不必手动重开。  
+
+- **压缩状态可见 / Visible Compaction Feedback**  
+  压缩进行时，AI 圆点右侧会显示 `Compacting...`；压缩完成后，聊天记录里会出现一条克制的分割线来标记上下文已被压缩。  
+
+- **压缩后状态续接 / Better Post-Compact Continuity**  
+  Deck AI 现在会在压缩后继续带着当前任务方向、关键结果与必要工具线索往下走，减少长会话里的上下文断裂感。  
+
+- **上下文占用指示器 / Context Usage Indicator**  
+  在展开后的 AI 聊天面板中，Deck 现在会显示一个克制的上下文占用指示器，用小环和百分比帮助你快速判断当前会话离上下文上限还有多远。  
+
+- **只读批处理 / Read-Only Batching**  
+  当一次 AI 请求里包含多个彼此独立的只读查询时，Deck 现在会把它们作为同一批次执行，减少等待时间。  
+
+- **更完整的查找覆盖 / Broader Lookup Coverage**  
+  剪贴板搜索、脚本插件列表与读取、技能详情读取，以及网页搜索与抓取现在可以协同运行，帮助 AI 更快收集上下文。  
+
+- **安全边界保持不变 / Safety Boundaries Preserved**  
+  写入、删除、插件修改和其他需要审批的操作仍保持顺序执行，不会因为这次优化而放宽授权流程。  
+
+- **AI 智能体行为增强 / Smarter AI Agent Behavior**  
+  Deck AI 现在在处理多步骤任务时表现更可靠：遇到问题时会先诊断原因再调整策略，对工具结果的汇报更准确，对操作风险的判断更有层次感。  
+
+- **脚本插件原生预检 / Native Script Plugin Preflight**  
+  当 AI 创建或修改 JavaScript 脚本插件时，Deck 现在会在弹出审批前先运行一轮原生 JSON / JavaScript 预检，提前拦截 manifest 错误、语法问题和常见运行时不兼容写法。  
+
+- **AI 可直接生成智能规则 / AI Can Create Smart Rules Directly**  
+  你现在可以直接让 Deck AI 生成 Smart Rule。AI 会把条件、动作和启用状态整理成结构化规则，并走现有的审批流程后再保存。  
+
+- **AI 状态提示更贴手 / More Comfortable AI Status Feedback**  
+  当 Deck AI 正在搜索剪贴板、读取插件、保存记忆或执行其他工具步骤时，左侧状态区现在会显示当前动作提示，让等待过程更直观，整体体感也更顺。  
+
+- **AI 回复收尾更稳 / Smoother AI Reply Handoff**  
+  AI 流式回复现在会从生成开始就占据最终消息的位置，回复完成时不再出现内容往下闪一下、再回弹，或整段文本突然上移的跳动。  
+
+- **AI 输入焦点更稳 / More Stable AI Composer Focus**  
+  收敛 AI 聊天输入框的重复抢焦点行为，减少窗口激活或中文输入法切换时出现的系统输入法告警噪音，让输入体验更稳定。  
+
+- **中文输入法输入更干净 / Cleaner Chinese IME Input**  
+  AI 输入框现在会在中文输入法候选阶段及时隐藏提示文案，并修复个别情况下确认候选时误输入数字的问题，让中文输入过程更干净、更稳定。  
+
+- **AI 输入区发送按钮对齐 / AI Composer Send Button Alignment**  
+  多行输入时发送按钮贴底对齐；无正文时仍与单行输入区垂直居中，保持空输入时的观感一致。  
+
+- **CliperX 迁移与更清晰的迁移列表 / CliperX Migration & Clearer Migration List**  
+  首次引导与设置 → 存储均可从 CliperX（含常见 UsePasteAgain 数据布局）只读迁移历史，并与其它来源并列；列表使用内置品牌图与连续圆角，来源一目了然。  
+
+### 新增
+- **长会话自动压缩 / Automatic Long-Session Compaction**  
+  当 AI 对话接近上下文上限时，Deck 会自动将较早的上下文整理为摘要，让超长会话依然能继续进行。  
+
+- **AI 智能规则生成工具 / AI Smart Rule Generation Tool**  
+  Deck AI 现在新增 `generate_smart_rule` 工具，可以把用户的自动化意图直接落成 Smart Rule，而不再只能生成 Script Plugin。  
+
+- **压缩状态提示与分割线 / Compaction Status and Divider**  
+  压缩进行时会显示 `Compacting...`，完成后会在消息流中插入“已压缩对话上下文”的极简分割线，让用户知道上下文已经被整理。  
+
+- **AI 上下文占用指示器 / AI Context Usage Indicator**  
+  Deck 为 AI 聊天新增了一个轻量的上下文占用显示，在展开面板中会以小环和百分比提示当前会话的大致上下文压力。  
+
+- **CliperX 剪贴板迁移 / CliperX Clipboard Migration**  
+  新增对 CliperX（含常见 UsePasteAgain / `History.sqlite` + `Payloads` 布局）的只读扫描与导入，走与 Maccy 等相同的身份验证与分批写入流程。  
+
+### 优化
+- **长会话续接更自然 / Smoother Long-Session Continuation**  
+  压缩后的上下文会保留当前任务方向、关键结果与必要工具线索，减少 AI 在长对话中“忘了前文”的感觉。  
+
+- **AI 上下文状态更直观 / Clearer AI Context State**  
+  只有在发送消息后或展开聊天面板时，Deck 才会显示上下文占用指示器，让信息更有用，同时保持默认唤出状态的极简观感。  
+
+- **AI 输入区发送按钮对齐 / AI Composer Send Button Alignment**  
+  当输入框因换行而变高时，发送按钮固定在输入区域底部，不再悬停在中间；无正文时仍与单行输入区垂直居中，与空输入时的布局一致。  
+
+- **AI 多查询更快 / Faster Multi-Lookup AI Runs**  
+  对“先查剪贴板、再看插件、再读网页”这类工具密集型请求，Deck AI 现在能更高效地完成前置检索步骤。  
+
+- **AI 当前动作更可见 / Clearer Live AI Action Hints**  
+  当 AI 正在执行工具调用时，聊天面板左侧现在会更明确地提示当前步骤，例如搜索、读取插件、读取技能或保存记忆，让整个过程更容易跟上。  
+
+- **同轮收集上下文 / Same-Turn Context Gathering**  
+  独立的只读工具调用现在可以在同一轮里一起发起，减少不必要的往返。  
+
+- **旧数据维护路径更一致 / More Consistent Legacy Data Handling**  
+  模板库旧数据迁移与修复路径已做收敛，后续维护更直接，也更不容易出现历史数据恢复逻辑分叉。  
+
+- **AI 故障诊断更主动 / More Proactive AI Troubleshooting**  
+  当工具调用失败或搜索结果为空时，AI 现在会先分析失败原因再调整方案，而不是盲目重试或直接放弃。  
+
+- **AI 操作风险分层 / Risk-Aware AI Execution**  
+  AI 对不同工具的操作风险有了更清晰的分层意识，只读操作更果断，不可逆操作更谨慎。  
+
+- **AI 结果汇报更准确 / More Accurate AI Reporting**  
+  AI 不再在工具出错时假装成功，也不会在成功时过度谦虚，汇报更贴合实际。  
+
+- **AI 插件修复闭环 / Better AI Plugin Repair Loop**  
+  `generate_script_plugin` 与 `modify_script_plugin` 现在会先在草稿或临时副本上执行原生预检；若失败，Deck 会把文件名、错误级别、错误码、消息以及行列信息结构化回传给模型，便于它自动修复后重试。  
+
+- **AI 权限弹窗支持智能规则 / AI Approval UI Now Understands Smart Rules**  
+  AI 聊天里的审批弹窗现在可以识别 Smart Rule 创建请求，并用与原有风格一致的极简预览展示规则名、触发逻辑和简短摘要。  
+
+- **迁移列表视觉与资源 / Migration List Presentation & Assets**  
+  欢迎页「迁移剪贴板」与「设置 → 存储」中的迁移入口统一使用打包进 App 的品牌 PNG（`MigrationSourceIcons`），并以 macOS 连续圆角裁剪展示，替代仅靠 SF Symbol 的占位；散图从工程根目录收入资源目录，运行时按 Bundle 文件加载以避免仅认 Asset Catalog 的告警；列表里各来源展示略有取舍，此处不赘述。附带 `scripts/normalize_migration_source_icons.py`，便于后续统一替换或规范化图标素材画布。  
+
+### 变更
+- **完整历史仍会保留 / Full History Still Preserved**  
+  压缩只影响发送给 AI 的运行时上下文；本地会话记录仍保留完整历史，旧消息不会因为压缩而从聊天记录中消失。  
+
+- **仅自动触发 / Automatic Trigger Only**  
+  这项能力会在上下文接近上限时静默触发，不需要手动按钮或额外整理步骤。  
+
+- **剪贴板迁移入口统一到引导与存储 / Clipboard Migration Entry Points**  
+  CliperX 等迁移仅从首次引导与「设置 → 存储」发起，不再误挂到 JSON 导出/导入类流程，避免用户找错入口。  
+
+### 修复
+- **更稳的本地密钥更新 / Safer Local Secret Updates**  
+  对局域网直连配对信息、AI Memory 密钥和共享密钥的本地保存路径做了整理；若本地已存在相关密钥，Deck 现在会优先尝试原位更新，降低极少数写入失败时丢失旧值的风险。  
+
+- **压缩失败时不中断当前请求 / Graceful Fallback on Compaction Failure**  
+  如果压缩未能完成，Deck 会安静地再尝试一次；如果仍失败，会继续正常发送当前请求，避免因为压缩失败直接打断对话。  
+
+- **AI 回复完成瞬间不再跳动 / No More End-of-Reply Jump in AI Chat**  
+  修复 AI 回复从流式状态切换到正式消息时的布局重排；在短回复、窄窗口和贴底查看的场景下，完成瞬间不再把整段内容突然往上顶。  
+
+- **AI 输入框焦点抖动收敛 / Reduced AI Composer Focus Churn**  
+  修复 AI 聊天输入框在窗口激活或恢复时重复请求第一响应者的问题；这会减少中文输入法等组合输入场景下的系统级告警噪音，并让输入焦点表现更稳定。  
+
+- **中文输入法候选与清空更稳定 / More Reliable Chinese IME Composition and Clearing**  
+  修复 AI 输入框在中文输入法候选阶段提示文案可能与组合文字短暂重叠、以及少数情况下确认候选时误写入数字的问题；同时也收敛了发送或清空输入框时的候选态残留。  
+
+- **上下文占用刷新更准确 / More Accurate Context Usage Refresh**  
+  修复了切换聊天或新建对话后上下文占用指示器可能沿用旧值的问题；空对话、不同会话以及恢复后的聊天状态现在都会重新估算并正确更新。  
+
+- **智能规则审批摘要不再撑爆窗口 / Smart Rule Approval Summary No Longer Blows Up the Window**  
+  修复 Smart Rule 审批内容过长时可能把 AI 聊天面板撑到异常高度、甚至触发约束更新死循环的问题；现在规则审批摘要会保持克制。  
+
+- **脚本插件修改预检不再误报目录创建失败 / Script Plugin Modify Preflight No Longer Falsely Fails on Temp Directory**  
+  修复 `modify_script_plugin` 预检阶段先创建临时目录再 `copyItem` 的问题：`FileManager.copyItem` 要求目标路径事先不存在，因而复制会稳定失败并被误报为「创建插件目录失败」（路径常落在 `/var/folders/...`）。现已改为由复制步骤在唯一临时路径上创建目录。  
+
+### 兼容性与行为说明
+- **优先保留最近对话原文 / Recent Turns Stay Verbatim**  
+  Deck 会优先保留最近几轮原始消息，并把更早内容折叠为摘要，因此压缩后的上下文会偏向“保留最近、压缩更早”。  
+
+- **仅限独立只读调用 / Independent Read-Only Calls Only**  
+  这项优化只适用于同一轮里的独立只读工具调用；如果某一步会写入数据、触发审批或依赖前一步结果，仍会按顺序执行。  
+
+- **是否触发取决于请求形态 / Trigger Depends on Request Shape**  
+  当 AI 判断多个查询彼此独立时会进行批处理；如果任务本身需要逐步推理或逐步确认，仍可能保持串行。  
+
+- **插件预检无独立界面 / No Separate UI for Plugin Preflight**  
+  这套检查不提供单独按钮或设置界面，而是作为 AI 插件生成链路的底层步骤自动执行；只有预检通过后，Deck 才会继续进入插件添加或修改的审批流程。  
+
+### 升级建议
+- **推荐给长会话 AI 用户 / Recommended for Long AI Sessions**  
+  如果你经常让 Deck AI 持续处理长任务、连着追问或连续推进同一目标，建议升级到 v1.3.9。  
+
+- **推荐给重度 AI 检索用户 / Recommended for Lookup-Heavy AI Workflows**  
+  如果你经常让 Deck AI 同时查剪贴板、脚本插件、技能信息和网页内容，建议升级到 v1.3.9。  
+
+- **推荐给 CliperX / Recommended for CliperX**  
+  若你此前使用 CliperX 或同类工具并希望把历史迁入 Deck，可在升级后从欢迎流程或「设置 → 存储」发起只读迁移。  
+
+---
+
+### Assets
+
+- [`Deck.dmg`](https://github.com/yuzeguitarist/Deck/releases/download/v1.3.9/Deck.dmg)
+
 <!-- release-changelog-bot:tag:v1.3.8 -->
 ## v1.3.8 — v1.3.8 | lūcidulus
 
