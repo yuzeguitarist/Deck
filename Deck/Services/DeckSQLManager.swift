@@ -4,204 +4,97 @@
 //  DeckSQLManager.swift
 //  Deck
 //
-//  Deck Clipboard Manager - SQLite Database Management
+//  Deck 剪贴板历史 — SQLite 持久化与检索（单例 `DeckSQLManager.shared`）
 //
 //  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  职责边界 (Responsibility Boundaries)
 //  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
-//  DeckSQLManager 是 Deck 应用的核心数据持久化层，负责：
+//  DeckSQLManager 是 Deck 的核心数据层，负责：
 //
-//  1. **数据库生命周期管理**
-//     - 数据库初始化、连接管理、完整性检查
-//     - 自动备份/恢复机制（24小时周期）
-//     - Schema 迁移和版本控制
-//     - 数据库文件损坏时的自动恢复
+//  1. **数据库生命周期**
+//     - 打开/关闭连接、`PRAGMA` 调优（含 `mmap_size` 128MB）
+//     - 启动时节流完整性检查（默认 24h 间隔，见 `integrityCheckInterval`）
+//     - 自动备份与从 `.bak` 恢复、损坏时的恢复流程
+//     - `PRAGMA user_version` 驱动的 Schema 迁移（与 static `currentSchemaVersion` 对齐）
 //
-//  2. **剪贴板数据 CRUD**
-//     - 插入、查询、更新、删除剪贴板历史记录
-//     - 支持文本、图片、文件、URL、颜色等多种类型
-//     - 大数据（>512KB）自动分离存储到 BlobStorage
+//  2. **剪贴板 CRUD**
+//     - 历史条目的插入、更新、删除、分页列表与单条查询
+//     - 多类型负载（文本、图片、文件等）；超过 `Const.largeBlobThreshold`（512KB）走 Blob 外置 + `blob_path`
+//     - 支持 `unique_id` UPSERT（SQLite 能力不足时降级为 delete+insert）
 //
-//  3. **多维度搜索引擎**
-//     - FTS5 全文搜索（支持 trigram 分词）
-//     - 正则表达式搜索（安全模式下内存解密后匹配）
-//     - 语义向量搜索（基于 sqlite-vec 扩展）
-//     - 应用名、标签、类型等结构化过滤
+//  3. **搜索与索引**
+//     - FTS5（可选 trigram，小查询长度有下限）；结构化过滤（类型、标签等）
+//     - 语义向量：sqlite-vec，表名带维度后缀；安全模式下关闭 vec 索引
+//     - 安全模式或无 FTS 兜底：`searchWithLike` / `searchWithRegexInMemory` 等内存路径（keyset 分批，每批 500 行）
 //
-//  4. **安全模式集成**
-//     - 敏感数据加密存储（data、search_text、app_name、embedding）
-//     - 安全模式下禁用向量索引（防止明文泄露）
-//     - 搜索时自动解密并缓存（NSCache 限制 300 条）
+//  4. **安全模式（`DeckUserDefaults.securityModeEnabled`）**
+//     - 敏感列加密存储/解密读取：`data`、`search_text`、`app_name`、`custom_title`、`embedding`
+//     - 加密状态下 FTS5 与向量相似度不可用，走上述内存搜索降级
+//     - `searchTextCache`（`NSCache`，最多 300 条）降低重复解密；安全模式下应用/会话失焦时清空（见 `handleSensitiveCacheInvalidation`）
 //
-//  5. **性能优化**
-//     - 搜索缓存（避免重复解密）
-//     - 正则表达式缓存（RegexCache）
-//     - 分批流式处理（backfill、迁移）
-//     - mmap 优化（128MB）
+//  5. **性能与其它**
+//     - 列表模式通过 SQL 投影避免大 `data` blob 物化到 Swift
+//     - 大批量维护任务走 `withDBAsyncBackground`（`dbBackgroundQueue`，`.utility`），减轻与 UI 同 QoS 争抢
+//     - 文件级：`Maintenance helpers` 扩展中的按批删除、blob 路径查询、页信息统计等
 //
 //  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  线程模型 (Threading Model)
 //  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
-//  **核心原则：SQLite 连接非线程安全，所有数据库操作必须在 dbQueue 上串行执行**
+//  **原则：单个 SQLite `Connection` 非线程安全，所有触碰它的代码必须串行化。**
 //
-//  1. **dbQueue (DispatchQueue)**
-//     - Label: "com.deck.sqlite.queue"
-//     - QoS: .userInitiated
-//     - 所有读写操作必须通过 `withDB` / `withDBAsync` / `syncOnDBQueue` / `asyncOnDBQueue`
+//  1. **三层队列，同一串行目标**
+//     - `dbSerialQueue` — `com.deck.sqlite.queue.serial`，`.userInitiated`：实际串行执行点
+//     - `dbQueue` — `com.deck.sqlite.queue.interactive`，target 为 `dbSerialQueue`：默认交互路径（`withDB` / `withDBAsync`）
+//     - `dbBackgroundQueue` — `com.deck.sqlite.queue.background`，`.utility`，target 同上：迁移、VACUUM、大批量回填等（`withDBAsyncBackground`）
+//     - `dbQueueKey` 同时标在以上三者上，`syncOnDBQueue` 等在任一条「DB 队列」上可检测并重入，避免死锁
 //
-//  2. **函数线程约束**
+//  2. **入口惯例**
+//     - 业务与大部分 API：`withDB` / `withDBAsync`（经 `dbQueue`）
+//     - 重负载后台：`withDBAsyncBackground`（经 `dbBackgroundQueue`）
+//     - 内部需直接调度时：`syncOnDBQueue`、`asyncOnDBQueue`、`syncOnDBBackgroundQueue`、`asyncOnDBBackgroundQueue`
 //
-//     **必须在 dbQueue 上调用（内部不切队列）：**
-//     - `createTable()`, `createFTS5Table()`, `createEmbeddingTable()`
-//     - `registerCustomFunctions()` - 注册 REGEXP 函数
-//     - `performIntegrityCheck()` - 完整性检查
-//     - `ensureVecTable(dimension:)` - 创建向量表
-//     - `cleanupLegacyVecTableIfNeeded()` - 清理旧表
+//  3. **embeddingQueue** — `com.deck.semantic.embedding`（`.utility`）：向量编码等 CPU 工作，与 DB 队列分离
 //
-//     **内部自动切到 dbQueue（可从任意线程调用）：**
-//     - `insert(_:)`, `update(_:)`, `delete(_:)` - CRUD 操作
-//     - `search(...)`, `searchWithRegex(...)` - 搜索接口
-//     - `getRecentItems(...)`, `getItemById(...)` - 查询接口
-//     - `storeSemanticEmbedding(...)`, `updateVecIndex(...)` - 向量索引
-//     - `backupDatabaseIfNeeded(...)` - 备份操作
-//
-//     **异步后台任务（Task.priority: .background）：**
-//     - `backfillVecIndexIfNeeded()` - 向量索引回填
-//     - `performSemanticEmbeddingBackfill()` - 语义嵌入回填
-//     - `performLargeImageMigration()` - 大图迁移
-//     - `backfillFileSearchTextIfNeeded()` - 文件搜索文本回填
-//
-//  3. **队列检测机制**
-//     - `dbQueueKey: DispatchSpecificKey<Void>` - 检测当前是否在 dbQueue
-//     - `syncOnDBQueue` / `asyncOnDBQueue` - 避免重复 dispatch 导致死锁
-//
-//  4. **embeddingQueue (DispatchQueue)**
-//     - Label: "com.deck.semantic.embedding"
-//     - QoS: .utility
-//     - 用于语义向量计算（与 dbQueue 解耦，避免阻塞数据库操作）
+//  4. **errorStateQueue** — `com.deck.sqlite.error.state`：错误计数、通知标志等状态的原子更新
 //
 //  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//  安全模式语义 (Security Mode Semantics)
+//  安全模式：内存搜索上限 (Security mode scan caps)
 //  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
-//  **触发条件：** `DeckUserDefaults.securityModeEnabled == true`
-//
-//  1. **加密列（存储时加密，读取时解密）**
-//     - `data` (Col.data) - 剪贴板内容主体
-//     - `search_text` (Col.searchText) - 用于全文搜索的文本
-//     - `app_name` (Col.appName) - 来源应用名称
-//     - `custom_title` (Col.customTitle) - 用户自定义标题
-//     - `embedding` (ClipboardHistory_embedding.embedding) - 语义向量
-//
-//  2. **不可检索列（FTS5 / 向量索引失效）**
-//     - **FTS5 全文搜索：** 加密后的 search_text 无法被 FTS5 索引
-//       - Fallback: `searchWithRegexInMemory()` - 分批解密后内存匹配
-//       - 限制：最多扫描 5000 条，返回前 N 条匹配
-//
-//     - **向量索引：** 完全禁用（`vecIndexEnabled = false`）
-//       - 原因：加密后的向量无法进行相似度计算
-//       - Fallback: 语义搜索降级为普通文本搜索
-//
-//  3. **搜索缓存策略**
-//     - `searchTextCache: NSCache<NSNumber, SearchCacheEntry>`
-//       - Key: row.id
-//       - Value: 解密后的 searchText + appName + customTitle（已 lowercased）
-//       - Limit: 300 条（降低常驻内存）
-//     - 缓存失效：`reinitialize()` / `invalidateSearchCache()`
-//
-//  4. **性能权衡**
-//     - 安全模式下搜索性能显著下降（需解密）
-//     - 向量索引回填限制：300 条（非安全模式 1000 条）
-//     - 正则搜索扫描限制：5000 条（分批 500 条）
+//  以下为 **近似上界** ，实现细节以代码为准：
+//  - `searchWithRegexInMemory`：`maxScan = min(5000, max(limit * 50, 1000))`，`batchSize = 500`
+//  - `searchWithLike`（安全模式）：`maxScan = min(max(5000, limit * 200), 20000)`；非安全模式可扫全表
+//  - 向量回填批量：安全模式 300 条 / 批，非安全模式 1000 条 / 批
 //
 //  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-//  存储策略 (Storage Strategy)
+//  存储与 Schema（PRAGMA user_version）
 //  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
-//  1. **存储路径**
-//     - 默认路径：`~/Library/Application Support/Deck/Deck.sqlite3`
-//     - 自定义路径：支持用户选择（需 security-scoped bookmark）
-//     - 备份路径：`Deck.sqlite3.bak`（同目录）
+//  1. **路径**
+//     - 默认：`~/Library/Application Support/Deck/Deck.sqlite3`；备份：`Deck.sqlite3.bak`
+//     - 可自定义目录（security-scoped bookmark）；`currentDBPath` 缓存避免热路径反复解析
 //
-//  2. **大数据分离存储（blobPath 机制）**
-//     - **触发条件：** `data.count > Const.largeBlobThreshold` (512KB)
-//     - **存储流程：**
-//       1. 调用 `BlobStorage.shared.storeAsync(data, uniqueId)` 存储到文件系统
-//       2. 数据库 `data` 列存储 `previewData`（缩略图/前 N 字节）
-//       3. `blob_path` 列存储文件路径（相对路径）
-//     - **读取流程：**
-//       1. 检查 `blob_path` 是否为 nil
-//       2. 若非 nil，调用 `BlobStorage.shared.loadAsync(path)` 加载完整数据
-//       3. 若 nil，直接使用 `data` 列
-//     - **迁移：** `performLargeImageMigration()` - 分批迁移历史大图
+//  2. **Blob**
+//     - 超大 payload：`BlobStorage` + `blob_path`；`migrateLargeImagesIfNeeded` 等在低 QoS 下分批迁移历史数据
 //
-//  3. **备份与恢复**
-//     - **自动备份：**
-//       - 触发：`backupDatabaseIfNeeded()` - 启动时 + 24 小时周期
-//       - 方法：`FileManager.copyItem()` - 文件级拷贝
-//       - 条件：距上次备份超过 `backupInterval` (24h)
+//  3. **版本历史（与代码内注释一致；当前 `currentSchemaVersion == 7`）**
+//     - 0：初始
+//     - 1：`blob_path` + 大图迁移流程
+//     - 2：语义向量缓存表 `ClipboardHistory_embedding`
+//     - 3：`is_temporary`
+//     - 4：`source_anchor`（IDE 溯源）
+//     - 5：`is_encrypted`（逐行加密标记）
+//     - 6：`custom_title`（自定义标题，伴随 FTS 重建）
+//     - 7：`received_from_lan`（局域网接收标记，供过滤）
 //
-//     - **自动恢复：**
-//       - 触发时机：
-//         1. 启动时主数据库不存在但备份存在
-//         2. 完整性检查失败（`performIntegrityCheck()` 返回 false）
-//       - 方法：`restoreDatabaseFromBackup()` - 删除损坏文件，拷贝备份
+//  4. **向量表（sqlite-vec）**
+//     - 命名：`ClipboardHistory_embedding_vec_{dimension}`；按需 `ensureVecTable`；级联删除触发器；`cleanupLegacyVecTableIfNeeded` 清理无后缀旧表；
+//       活跃表映射可持久化（`vecActiveTablesDefaultsKey`），支持维度变更后的恢复路径
 //
-//  4. **迁移顺序约束（Schema Migration）**
-//     - **版本控制：** `getSchemaVersion()` / `setSchemaVersion()`
-//     - **迁移顺序（必须严格按序执行）：**
-//
-//       ```
-//       Version 1 → 2: 添加 tagId 列
-//       Version 2 → 3: 添加 blobPath 列
-//       Version 3 → 4: 创建 FTS5 表
-//       Version 4 → 5: 创建 Embedding 表
-//       Version 5 → 6: 大图迁移（异步后台）
-//       Version 6 → 7: 语义嵌入回填（异步后台）
-//       ```
-//
-//     - **异步迁移处理：**
-//       - Version 5 → 6: `migrateLargeImagesIfNeeded()` - 后台任务
-//       - Version 6 → 7: `backfillSemanticEmbeddingsIfNeeded()` - 后台任务
-//       - 迁移完成后才更新 schema_version（防止中断导致重复迁移）
-//
-//     - **迁移失败处理：**
-//       - 完整性检查失败 → 尝试从备份恢复
-//       - 备份恢复失败 → 发送 `.databaseError` 通知
-//       - 连续 3 次错误 → 触发 `attemptDBRecovery()`
-//
-//  5. **向量索引表（sqlite-vec）**
-//     - **表命名规则：** `ClipboardHistory_embedding_vec_{dimension}`
-//       - 示例：`ClipboardHistory_embedding_vec_384`（MiniLM）
-//       - 示例：`ClipboardHistory_embedding_vec_1024`（Nomic Embed）
-//
-//     - **动态创建：** `ensureVecTable(dimension:)` - 按需创建
-//     - **触发器：** `ClipboardHistory_embedding_vec_ad_{dimension}` - 级联删除
-//     - **回填：** `backfillVecIndexIfNeeded()` - 启动时后台回填
-//     - **清理：** `cleanupLegacyVecTableIfNeeded()` - 删除旧版无维度后缀的表
-//
-//  6. **错误恢复机制**
-//     - **错误追踪：**
-//       - `consecutiveErrorCount` - 连续错误计数
-//       - `errorThreshold = 3` - 触发通知阈值
-//       - `hasNotifiedUser` - 防止重复通知
-//
-//     - **关键错误码（触发自动恢复）：**
-//       - `SQLITE_IOERR` - 磁盘 I/O 错误
-//       - `SQLITE_CORRUPT` - 数据库损坏
-//       - `SQLITE_NOTADB` - 文件不是数据库
-//       - `SQLITE_READONLY` - 只读错误
-//       - `SQLITE_CANTOPEN` - 无法打开
-//       - `SQLITE_FULL` - 磁盘已满
-//
-//     - **恢复流程：**
-//       1. `handleDBError()` - 检测错误类型
-//       2. `attemptDBRecovery()` - 触发恢复
-//       3. `reinitialize()` - 重新初始化数据库
-//       4. 从备份恢复（如果可用）
-//       5. 发送 `.databaseError` 通知给 UI
+//  5. **错误与恢复**
+//     - `consecutiveErrorCount` ≥ `errorThreshold`（3）等逻辑可触发用户通知；严重 I/O 或损坏类错误走恢复与 `reinitialize`
 //
 //  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
