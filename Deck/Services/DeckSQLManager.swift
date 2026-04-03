@@ -107,24 +107,25 @@ import Darwin
 import Accelerate
 
 enum Col {
-    static let id = Expression<Int64>("id")
-    static let uniqueId = Expression<String>("unique_id")
-    static let type = Expression<String>("type")
-    static let itemType = Expression<String>("item_type")
-    static let data = Expression<Data>("data")
-    static let previewData = Expression<Data?>("preview_data")
-    static let ts = Expression<Int64>("timestamp")
-    static let appPath = Expression<String>("app_path")
-    static let appName = Expression<String>("app_name")
-    static let customTitle = Expression<String?>("custom_title")
-    static let sourceAnchor = Expression<String?>("source_anchor")
-    static let searchText = Expression<String>("search_text")
-    static let length = Expression<Int>("content_length")
-    static let tagId = Expression<Int>("tag_id")
-    static let blobPath = Expression<String?>("blob_path")
-    static let isTemporary = Expression<Bool>("is_temporary")
-    static let isEncrypted = Expression<Bool>("is_encrypted")
-    static let receivedFromLan = Expression<Bool>("received_from_lan")
+    // SQL 列描述本身是不可变常量；显式放开隔离，避免默认 MainActor 卡住后台 DB 路径。
+    nonisolated(unsafe) static let id = Expression<Int64>("id")
+    nonisolated(unsafe) static let uniqueId = Expression<String>("unique_id")
+    nonisolated(unsafe) static let type = Expression<String>("type")
+    nonisolated(unsafe) static let itemType = Expression<String>("item_type")
+    nonisolated(unsafe) static let data = Expression<Data>("data")
+    nonisolated(unsafe) static let previewData = Expression<Data?>("preview_data")
+    nonisolated(unsafe) static let ts = Expression<Int64>("timestamp")
+    nonisolated(unsafe) static let appPath = Expression<String>("app_path")
+    nonisolated(unsafe) static let appName = Expression<String>("app_name")
+    nonisolated(unsafe) static let customTitle = Expression<String?>("custom_title")
+    nonisolated(unsafe) static let sourceAnchor = Expression<String?>("source_anchor")
+    nonisolated(unsafe) static let searchText = Expression<String>("search_text")
+    nonisolated(unsafe) static let length = Expression<Int>("content_length")
+    nonisolated(unsafe) static let tagId = Expression<Int>("tag_id")
+    nonisolated(unsafe) static let blobPath = Expression<String?>("blob_path")
+    nonisolated(unsafe) static let isTemporary = Expression<Bool>("is_temporary")
+    nonisolated(unsafe) static let isEncrypted = Expression<Bool>("is_encrypted")
+    nonisolated(unsafe) static let receivedFromLan = Expression<Bool>("received_from_lan")
 }
 
 // MARK: - Maintenance helpers (storage cleanup / rollback snapshot)
@@ -456,9 +457,9 @@ private extension Array {
 }
 
 enum EmbeddingCol {
-    static let id = Expression<Int64>("id")
-    static let textHash = Expression<String>("text_hash")
-    static let embedding = Expression<Data>("embedding")
+    nonisolated(unsafe) static let id = Expression<Int64>("id")
+    nonisolated(unsafe) static let textHash = Expression<String>("text_hash")
+    nonisolated(unsafe) static let embedding = Expression<Data>("embedding")
 }
 
 // MARK: - Search Cache Entry
@@ -477,7 +478,7 @@ private final class SearchCacheEntry: NSObject {
 }
 
 final class DeckSQLManager: NSObject, @unchecked Sendable {
-    static let shared = DeckSQLManager()
+    nonisolated static let shared = DeckSQLManager()
     private static var isInitialized = false
     private nonisolated static let initLock = NSLock()
 
@@ -4611,7 +4612,7 @@ extension DeckSQLManager {
         let id: Int64
     }
 
-    func cursor(from row: Row?) -> RowCursor? {
+    nonisolated func cursor(from row: Row?) -> RowCursor? {
         guard let row else { return nil }
         guard let ts = try? row.get(Col.ts), let id = try? row.get(Col.id) else { return nil }
         return RowCursor(timestamp: ts, id: id)
