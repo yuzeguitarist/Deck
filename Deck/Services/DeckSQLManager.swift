@@ -550,7 +550,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         Expression<Data>(literal: """
             CASE
                 WHEN blob_path IS NOT NULL THEN X''
-                WHEN item_type = 'image' AND preview_data IS NOT NULL AND length(preview_data) > 0 THEN X''
+                WHEN item_type = 'image' AND type != '\(PasteboardType.fileURL.rawValue)' AND preview_data IS NOT NULL AND length(preview_data) > 0 THEN X''
                 WHEN item_type = 'file' AND content_length > \(Self.listInlineBytesForFile) THEN X''
                 WHEN item_type != 'file' AND item_type != 'image' AND content_length > \(Self.listInlineBytesForNonImage) THEN X''
                 WHEN item_type = 'image' AND (preview_data IS NULL OR length(preview_data) = 0) AND content_length > \(Self.listInlineBytesForImageWithoutPreview) THEN X''
@@ -5328,15 +5328,27 @@ extension DeckSQLManager {
                 // List-mode query projected `data` to an empty blob to avoid loading large payloads.
                 // Keep preview for images; otherwise keep empty and rely on lazy-load when needed.
                 if itemType == .image, let preview = previewData, !preview.isEmpty {
-                    inlineData = preview
+                    if PasteboardType(type) == .fileURL {
+                        // `public.file-url` 的 data 必须是 URL 字符串；不能用缩略图顶替，否则 filePaths 解析失败（面板空白、无法粘贴）。
+                        inlineData = decryptData(rawData, force: shouldDecrypt)
+                        dataIsFull = !rawData.isEmpty
+                    } else {
+                        inlineData = preview
+                        dataIsFull = false
+                    }
                 } else {
                     inlineData = Data()
+                    dataIsFull = false
                 }
-                dataIsFull = false
             } else if itemType == .image, let preview = previewData, !preview.isEmpty {
-                // Image list mode: keep only thumbnail inline.
-                inlineData = preview
-                dataIsFull = false
+                // Image list mode: keep only thumbnail inline，但 fileURL 仍以路径字符串为 data，缩略图仅走 previewData。
+                if PasteboardType(type) == .fileURL {
+                    inlineData = decryptData(rawData, force: shouldDecrypt)
+                    dataIsFull = true
+                } else {
+                    inlineData = preview
+                    dataIsFull = false
+                }
             } else {
                 // Non-image list mode: inline only very small payloads; otherwise lazy-load.
                 let maxInlineBytes = (itemType == .file) ? maxInlineBytesForFile : maxInlineBytesForNonImage
