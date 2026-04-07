@@ -128,7 +128,7 @@ struct HistoryListView: View {
 
     private var quickPasteOverlayMap: [ClipboardItem.ID: Int] {
         guard isQuickPasteModifierHeld else { return [:] }
-        return quickPasteNumbers(in: displayItems)
+        return DeckQuickPasteResolver.quickPasteNumbers(in: displayItems, selectedItemId: selectedId)
     }
 
     private var shouldShowInitialLoadingState: Bool {
@@ -1019,39 +1019,8 @@ struct HistoryListView: View {
         guard let offset = quickPasteIndex(for: keyCode) else {
             return nil
         }
-
-        let targetIndex = quickPasteAnchorIndex(in: items) + offset
-
-        guard items.indices.contains(targetIndex) else {
-            return nil
-        }
-
-        return items[targetIndex]
-    }
-
-    private func quickPasteAnchorIndex(in items: [ClipboardItem]) -> Int {
-        guard PasteQueueService.shared.isQueueMode,
-              DeckUserDefaults.queueQuickSelectAnchor == .focused else {
-            return 0
-        }
-
-        return selectedId.flatMap { id in
-            items.firstIndex { $0.id == id }
-        } ?? 0
-    }
-
-    private func quickPasteNumbers(in items: [ClipboardItem]) -> [ClipboardItem.ID: Int] {
-        let anchorIndex = quickPasteAnchorIndex(in: items)
-        guard items.indices.contains(anchorIndex) else {
-            return [:]
-        }
-
-        let upperBound = min(anchorIndex + 9, items.count)
-        var result: [ClipboardItem.ID: Int] = [:]
-        for index in anchorIndex..<upperBound {
-            result[items[index].id] = index - anchorIndex + 1
-        }
-        return result
+        let number = offset + 1
+        return DeckQuickPasteResolver.itemForQuickPasteNumber(number, displayItems: items, selectedItemId: selectedId)
     }
 
     private func quickPasteModifierFlags() -> NSEvent.ModifierFlags {

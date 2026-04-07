@@ -137,6 +137,16 @@ def filter_release_notes_body(body: str, locale: Literal["en", "zh"]) -> str:
                 i += 1
             continue
 
+        # 折叠块（GitHub Release 内 <details>）：整块原样写入，避免块内表格/标题被按行拆中英
+        if st.startswith("<details"):
+            while i < n:
+                emit(lines[i])
+                if "</details>" in lines[i]:
+                    i += 1
+                    break
+                i += 1
+            continue
+
         if st.startswith("<") and ">" in st:
             emit(line)
             i += 1
