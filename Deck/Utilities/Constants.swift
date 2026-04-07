@@ -239,6 +239,13 @@ enum Const {
     )
 }
 
+/// 编译期功能开关（与 UserDefaults 无关；用于上架前彻底关闭尚未就绪的能力）。
+enum DeckBuildFlags {
+    /// `false` 时完全不执行 iCloud CloudKit 同步（不访问 `CKContainer`、不派发同步 Task）。
+    /// 准备启用 iCloud 上架时改为 `true`，并配合 Capabilities / entitlements。
+    static let isCloudSyncCompiledIn = false
+}
+
 // MARK: - Support & outbound links
 
 enum DeckSupportLinks {
