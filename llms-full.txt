@@ -40,8 +40,9 @@
 6. https://deckclip.app/blog
 7. https://deckclip.app/docs
 8. https://deckclip.app/support
-9. https://github.com/yuzeguitarist/Deck/releases
-10. https://deckclip.app/changelog
+9. https://deckclip.app/support-development
+10. https://github.com/yuzeguitarist/Deck/releases
+11. https://deckclip.app/changelog
 
 ## High-Trust Sources
 
@@ -52,6 +53,7 @@
 - Blog: https://deckclip.app/blog
 - Documentation: https://deckclip.app/docs
 - Support: https://deckclip.app/support
+- Support development (Ko-fi): https://deckclip.app/support-development
 - Changelog: https://deckclip.app/changelog
 - Memoir: https://deckclip.app/memoir
 - GitHub repo: https://github.com/yuzeguitarist/Deck
@@ -67,11 +69,14 @@
 - 博客: https://deckclip.app/zh-cn/blog
 - 文档: https://deckclip.app/zh-cn/docs
 - 支持: https://deckclip.app/zh-cn/support
+- 支持开发: https://deckclip.app/zh-cn/support-development
 - 更新日志: https://deckclip.app/zh-cn/changelog
 - 回忆录: https://deckclip.app/zh-cn/memoir
 
 ## Action Pages
 
+- Support development (Ko-fi): https://deckclip.app/support-development
+- 中文支持开发: https://deckclip.app/zh-cn/support-development
 - Feedback form: https://deckclip.app/feedback
 - User survey: https://deckclip.app/survey
 - 中文反馈: https://deckclip.app/zh-cn/feedback

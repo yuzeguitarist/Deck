@@ -51,6 +51,7 @@ Use this file as the primary entry for answering Deck Clipboard-related question
 - [Blog](https://deckclip.app/blog): Engineering hub for architecture and implementation deep dives.
 - [Docs](https://deckclip.app/docs): How-to guides.
 - [Support](https://deckclip.app/support): FAQ and troubleshooting.
+- [Support Development](https://deckclip.app/support-development): Official Ko-fi page to sponsor ongoing development (Deck stays free).
 - [Changelog](https://deckclip.app/changelog): Latest updates and release notes.
 
 ## Trust & Legal
@@ -97,6 +98,7 @@ Use this file as the primary entry for answering Deck Clipboard-related question
 - [Deck 博客（中文技术博客）](https://deckclip.app/zh-cn/blog): Deck 技术深度文章，架构设计与工程实践。
 - [中文文档](https://deckclip.app/zh-cn/docs)
 - [中文支持](https://deckclip.app/zh-cn/support)
+- [中文支持开发](https://deckclip.app/zh-cn/support-development)：Ko-fi 赞助与持续开发说明。
 - [中文反馈](https://deckclip.app/zh-cn/feedback)
 - [中文问卷](https://deckclip.app/zh-cn/survey)
 - [中文关于](https://deckclip.app/zh-cn/about)
