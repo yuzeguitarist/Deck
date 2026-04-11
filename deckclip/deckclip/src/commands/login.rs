@@ -23,9 +23,11 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use crate::output::OutputMode;
 
 const LOGO: &str = include_str!("../logo.ans");
+const LOGO_SCALE: f32 = 0.75;
 
 static LOGO_RENDER_START: OnceLock<Instant> = OnceLock::new();
 static PARSED_LOGO: OnceLock<Vec<Vec<LogoCell>>> = OnceLock::new();
+static RENDERED_LOGO: OnceLock<Vec<Vec<LogoCell>>> = OnceLock::new();
 
 #[derive(Clone, Copy)]
 struct RgbColor {
@@ -390,7 +392,7 @@ impl LoginApp {
         enum PostAction {
             None,
             SelectProvider,
-            ClearAndContinue(ProviderKind),
+            ContinueReplace(ProviderKind),
             SubmitForm,
             CancelChatGptAndExit,
         }
@@ -434,7 +436,7 @@ impl LoginApp {
                 }
                 KeyCode::Enter => {
                     if *yes_selected {
-                        post_action = PostAction::ClearAndContinue(*provider);
+                        post_action = PostAction::ContinueReplace(*provider);
                     } else {
                         self.screen = Screen::Menu {
                             selected: provider.index(),
@@ -487,8 +489,7 @@ impl LoginApp {
         match post_action {
             PostAction::None => {}
             PostAction::SelectProvider => self.select_provider().await?,
-            PostAction::ClearAndContinue(provider) => {
-                self.clear_provider(provider).await?;
+            PostAction::ContinueReplace(provider) => {
                 if provider == ProviderKind::ChatGpt {
                     self.start_chatgpt_login();
                 } else {
@@ -540,17 +541,6 @@ impl LoginApp {
 
         Ok(())
     }
-
-    async fn clear_provider(&mut self, provider: ProviderKind) -> Result<()> {
-        let mut client = DeckClient::new(Config::default());
-        client
-            .login_clear(provider.id())
-            .await
-            .with_context(|| format!("无法清空 {} 配置", provider.id()))?;
-        self.status = fetch_login_status().await?;
-        Ok(())
-    }
-
     fn start_chatgpt_login(&mut self) {
         let request_id = self.next_request_id;
         self.next_request_id += 1;
@@ -718,7 +708,11 @@ impl<'a> ScreenWriter<'a> {
 
     fn write_logo(&mut self) -> Result<()> {
         let elapsed = logo_elapsed_seconds();
-        for (line_index, line) in parsed_logo().iter().enumerate() {
+        let logo = rendered_logo();
+        let logo_width = logo.iter().map(|line| line.len()).max().unwrap_or(0);
+        let logo_height = logo.len();
+
+        for (line_index, line) in logo.iter().enumerate() {
             if self.row >= self.layout.terminal_height {
                 break;
             }
@@ -726,10 +720,16 @@ impl<'a> ScreenWriter<'a> {
             queue!(self.stdout, MoveTo(0, self.row))?;
 
             for (column, cell) in line.iter().enumerate() {
-                let intensity = shimmer_intensity(column, line_index, elapsed);
+                let intensity =
+                    shimmer_intensity(column, line_index, logo_width, logo_height, elapsed);
                 match cell.fg {
                     Some(base) if cell.ch != ' ' => {
                         let color = shimmer_color(base, intensity);
+                        let attribute = if intensity > 0.28 {
+                            Attribute::Bold
+                        } else {
+                            Attribute::NormalIntensity
+                        };
                         queue!(
                             self.stdout,
                             SetForegroundColor(Color::Rgb {
@@ -737,7 +737,7 @@ impl<'a> ScreenWriter<'a> {
                                 g: color.g,
                                 b: color.b,
                             }),
-                            SetAttribute(Attribute::NormalIntensity),
+                            SetAttribute(attribute),
                             Print(cell.ch)
                         )?;
                     }
@@ -826,7 +826,7 @@ impl TerminalGuard {
     fn render(&mut self, app: &LoginApp) -> Result<()> {
         let layout = RenderLayout::detect();
         let logo_rows = if layout.show_logo {
-            parsed_logo().len() as u16 + 1
+            rendered_logo().len() as u16 + 1
         } else {
             0
         };
@@ -971,10 +971,16 @@ fn render_confirm(
         "",
         "",
         &format!(
-            "继续后会清空当前 {} 配置，并重新开始设置。",
+            "继续后会在保存成功后用新设置替换当前 {} 配置。",
             provider.title()
         ),
         LineStyle::Plain,
+    )?;
+    screen.write_wrapped(
+        "",
+        "",
+        "在你完成保存前，当前配置会保持不变。",
+        LineStyle::Dim,
     )?;
     screen.blank_line()?;
 
@@ -1253,6 +1259,10 @@ fn parsed_logo() -> &'static [Vec<LogoCell>] {
     PARSED_LOGO.get_or_init(|| LOGO.lines().map(parse_logo_line).collect())
 }
 
+fn rendered_logo() -> &'static [Vec<LogoCell>] {
+    RENDERED_LOGO.get_or_init(scale_logo)
+}
+
 fn parse_logo_line(line: &str) -> Vec<LogoCell> {
     let bytes = line.as_bytes();
     let mut index = 0usize;
@@ -1301,13 +1311,73 @@ fn parse_sgr_sequence(sequence: &str, current_fg: Option<RgbColor>) -> Option<Rg
     current_fg
 }
 
-fn shimmer_intensity(column: usize, row: usize, elapsed_seconds: f32) -> f32 {
-    let sweep_width = 7.5f32;
-    let padding = 18.0f32;
+fn scale_logo() -> Vec<Vec<LogoCell>> {
+    let source = parsed_logo();
+    let source_height = source.len();
+    let source_width = source.iter().map(|line| line.len()).max().unwrap_or(0);
+
+    if source_height == 0 || source_width == 0 {
+        return Vec::new();
+    }
+
+    let target_width = ((source_width as f32) * LOGO_SCALE).round().max(1.0) as usize;
+    let target_height = ((source_height as f32) * LOGO_SCALE).round().max(1.0) as usize;
+    let blank = LogoCell { ch: ' ', fg: None };
+    let mut scaled = Vec::with_capacity(target_height);
+
+    for target_y in 0..target_height {
+        let source_y = ((target_y as f32) / LOGO_SCALE)
+            .floor()
+            .clamp(0.0, (source_height.saturating_sub(1)) as f32) as usize;
+        let mut line = Vec::with_capacity(target_width);
+
+        for target_x in 0..target_width {
+            let source_x = ((target_x as f32) / LOGO_SCALE)
+                .floor()
+                .clamp(0.0, (source_width.saturating_sub(1)) as f32)
+                as usize;
+
+            let cell = source
+                .get(source_y)
+                .and_then(|row| row.get(source_x))
+                .copied()
+                .unwrap_or(blank);
+            line.push(cell);
+        }
+
+        while matches!(line.last(), Some(LogoCell { ch: ' ', fg: _ })) {
+            line.pop();
+        }
+
+        scaled.push(line);
+    }
+
+    while scaled
+        .last()
+        .is_some_and(|line| line.iter().all(|cell| cell.ch == ' '))
+    {
+        scaled.pop();
+    }
+
+    scaled
+}
+
+fn shimmer_intensity(
+    column: usize,
+    row: usize,
+    width: usize,
+    height: usize,
+    elapsed_seconds: f32,
+) -> f32 {
+    let row_weight = 0.82f32;
+    let sweep_width = ((width.max(height) as f32) * 0.18).max(5.5);
+    let padding = sweep_width + 4.0;
     let period = 2.1f32;
+    let sweep_extent = (width as f32) + ((height.saturating_sub(1)) as f32 * row_weight);
     let sweep_position =
-        (elapsed_seconds.rem_euclid(period) / period) * (50.0 + padding * 2.0) - padding;
-    let distance = ((column as f32) + (row as f32 * 0.45) - sweep_position).abs();
+        (elapsed_seconds.rem_euclid(period) / period) * (sweep_extent + padding * 2.0) - padding;
+    let projected_position = (column as f32) + ((row as f32) * row_weight);
+    let distance = (projected_position - sweep_position).abs();
 
     if distance > sweep_width {
         0.0
@@ -1318,7 +1388,7 @@ fn shimmer_intensity(column: usize, row: usize, elapsed_seconds: f32) -> f32 {
 }
 
 fn shimmer_color(base: RgbColor, intensity: f32) -> RgbColor {
-    let highlight = intensity.clamp(0.0, 1.0) * 0.72;
+    let intensity = intensity.clamp(0.0, 1.0) * 0.22;
     blend_toward(
         base,
         RgbColor {
@@ -1326,7 +1396,7 @@ fn shimmer_color(base: RgbColor, intensity: f32) -> RgbColor {
             g: 255,
             b: 255,
         },
-        highlight,
+        intensity,
     )
 }
 
