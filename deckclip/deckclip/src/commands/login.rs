@@ -61,7 +61,7 @@ impl ProviderKind {
 
     fn title(self) -> &'static str {
         match self {
-            ProviderKind::ChatGpt => "Sign in with ChatGPT (usage included with your ChatGPT Plus)",
+            ProviderKind::ChatGpt => "Sign in with ChatGPT",
             ProviderKind::OpenAI => "Provide your own OpenAI API key",
             ProviderKind::Anthropic => "Provide your own Anthropic API key",
             ProviderKind::Ollama => "Use Ollama",
@@ -72,9 +72,9 @@ impl ProviderKind {
         let mut text = match self {
             ProviderKind::ChatGpt => {
                 if let Some(account) = status.account.as_deref() {
-                    format!("使用 ChatGPT OAuth 授权。当前账号：{account}")
+                    format!("Usage included with your ChatGPT plan. Current account: {account}")
                 } else {
-                    "使用 ChatGPT OAuth 授权，在浏览器中完成登录".to_string()
+                    "Usage included with your ChatGPT plan".to_string()
                 }
             }
             ProviderKind::OpenAI => "通过 OpenAI API key 进行模型调用".to_string(),
@@ -259,7 +259,10 @@ enum Screen {
         yes_selected: bool,
     },
     Form(FormState),
-    ChatGptWaiting,
+    ChatGptWaiting {
+        auth_url: Option<String>,
+        browser_opened: bool,
+    },
     Result {
         success: bool,
         title: String,
@@ -269,6 +272,11 @@ enum Screen {
 
 #[derive(Debug)]
 enum AsyncEvent {
+    ChatGptStarted {
+        request_id: u64,
+        auth_url: Option<String>,
+        browser_opened: bool,
+    },
     ChatGptFinished {
         request_id: u64,
         result: Result<String, String>,
@@ -303,6 +311,20 @@ impl LoginApp {
     async fn drain_async_events(&mut self) -> Result<()> {
         while let Ok(event) = self.events_rx.try_recv() {
             match event {
+                AsyncEvent::ChatGptStarted {
+                    request_id,
+                    auth_url,
+                    browser_opened,
+                } => {
+                    if self.active_chatgpt_request_id != Some(request_id) {
+                        continue;
+                    }
+
+                    self.screen = Screen::ChatGptWaiting {
+                        auth_url,
+                        browser_opened,
+                    };
+                }
                 AsyncEvent::ChatGptFinished { request_id, result } => {
                     if self.active_chatgpt_request_id != Some(request_id) {
                         continue;
@@ -336,6 +358,14 @@ impl LoginApp {
     async fn handle_key_event(&mut self, key: KeyEvent) -> Result<bool> {
         if matches!(key.kind, KeyEventKind::Release) {
             return Ok(false);
+        }
+
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if matches!(self.screen, Screen::ChatGptWaiting { .. }) {
+                let _ = cancel_chatgpt_login().await;
+                self.active_chatgpt_request_id = None;
+            }
+            return Ok(true);
         }
 
         enum PostAction {
@@ -424,7 +454,7 @@ impl LoginApp {
                 }
                 _ => {}
             },
-            Screen::ChatGptWaiting => {
+            Screen::ChatGptWaiting { .. } => {
                 if key.code == KeyCode::Esc {
                     post_action = PostAction::CancelChatGptAndExit;
                 }
@@ -511,14 +541,31 @@ impl LoginApp {
         tokio::spawn(async move {
             let mut client = DeckClient::new(Config::default());
             let result = match client.login_chatgpt_start().await {
-                Ok(response) => Ok(response_detail_message(&response)
-                    .unwrap_or_else(|| "浏览器授权已完成，Deck 已切换到 ChatGPT。".to_string())),
+                Ok(response) => {
+                    let _ = tx.send(AsyncEvent::ChatGptStarted {
+                        request_id,
+                        auth_url: response_auth_url(&response),
+                        browser_opened: response_browser_opened(&response),
+                    });
+
+                    match client.login_chatgpt_wait().await {
+                        Ok(response) => {
+                            Ok(response_detail_message(&response).unwrap_or_else(|| {
+                                "浏览器授权已完成，Deck 已切换到 ChatGPT。".to_string()
+                            }))
+                        }
+                        Err(error) => Err(error.to_string()),
+                    }
+                }
                 Err(error) => Err(error.to_string()),
             };
             let _ = tx.send(AsyncEvent::ChatGptFinished { request_id, result });
         });
 
-        self.screen = Screen::ChatGptWaiting;
+        self.screen = Screen::ChatGptWaiting {
+            auth_url: None,
+            browser_opened: true,
+        };
     }
 
     async fn submit_form(&mut self) -> Result<()> {
@@ -721,7 +768,10 @@ impl TerminalGuard {
                 yes_selected,
             } => render_confirm(&mut screen, *provider, *yes_selected)?,
             Screen::Form(form) => render_form(&mut screen, form)?,
-            Screen::ChatGptWaiting => render_chatgpt_waiting(&mut screen)?,
+            Screen::ChatGptWaiting {
+                auth_url,
+                browser_opened,
+            } => render_chatgpt_waiting(&mut screen, auth_url.as_deref(), *browser_opened)?,
             Screen::Result {
                 success,
                 title,
@@ -747,7 +797,7 @@ fn render_menu(
     selected: usize,
     info: Option<&str>,
 ) -> Result<()> {
-    screen.write_wrapped("", "", "DeckClip Login", LineStyle::Bold)?;
+    screen.write_wrapped("", "", "配置 Deck AI 提供商", LineStyle::Bold)?;
     screen.write_wrapped(
         "",
         "",
@@ -901,15 +951,44 @@ fn render_form(screen: &mut ScreenWriter<'_>, form: &FormState) -> Result<()> {
     Ok(())
 }
 
-fn render_chatgpt_waiting(screen: &mut ScreenWriter<'_>) -> Result<()> {
+fn render_chatgpt_waiting(
+    screen: &mut ScreenWriter<'_>,
+    auth_url: Option<&str>,
+    browser_opened: bool,
+) -> Result<()> {
     screen.write_wrapped("", "", "Sign in with ChatGPT", LineStyle::Bold)?;
-    screen.write_wrapped("", "", "正在等待浏览器完成授权。", LineStyle::Plain)?;
+    screen.write_wrapped(
+        "",
+        "",
+        "Finish signing in via your browser.",
+        LineStyle::Plain,
+    )?;
     screen.write_wrapped(
         "",
         "",
         "完成后 Deck 会自动切换到 ChatGPT。",
         LineStyle::Plain,
     )?;
+    if let Some(auth_url) = auth_url.filter(|value| !value.trim().is_empty()) {
+        screen.blank_line();
+        screen.write_wrapped(
+            "  ",
+            "  ",
+            "If the link doesn't open automatically, open the following link to authenticate:",
+            LineStyle::Plain,
+        )?;
+        screen.blank_line();
+        screen.write_wrapped("  ", "  ", auth_url, LineStyle::CyanUnderline)?;
+    }
+    if !browser_opened {
+        screen.blank_line();
+        screen.write_wrapped(
+            "  ",
+            "  ",
+            "Unable to open the browser automatically. Copy the link above to continue.",
+            LineStyle::Dim,
+        )?;
+    }
     screen.blank_line();
     screen.write_wrapped("", "", "Press ESC to cancel and exit", LineStyle::Dim)?;
     Ok(())
@@ -953,6 +1032,7 @@ enum LineStyle {
     Bold,
     Dim,
     Cyan,
+    CyanUnderline,
     CyanDim,
     Red,
     RedBold,
@@ -965,6 +1045,7 @@ fn apply_line_style(style: LineStyle, line: &str) -> String {
         LineStyle::Bold => format!("{}", line.bold()),
         LineStyle::Dim => format!("{}", line.dimmed()),
         LineStyle::Cyan => format!("{}", line.cyan()),
+        LineStyle::CyanUnderline => format!("{}", line.cyan().underline()),
         LineStyle::CyanDim => format!("{}", line.cyan().dimmed()),
         LineStyle::Red => format!("{}", line.red()),
         LineStyle::RedBold => format!("{}", line.red().bold()),
@@ -1033,4 +1114,22 @@ fn response_detail_message(response: &deckclip_protocol::Response) -> Option<Str
         return Some(format!("当前提供商：{provider}"));
     }
     None
+}
+
+fn response_auth_url(response: &deckclip_protocol::Response) -> Option<String> {
+    response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("auth_url"))
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string())
+}
+
+fn response_browser_opened(response: &deckclip_protocol::Response) -> bool {
+    response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("browser_opened"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true)
 }

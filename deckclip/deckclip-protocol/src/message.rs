@@ -81,6 +81,7 @@ pub mod cmd {
     pub const LOGIN_STATUS: &str = "login.status";
     pub const LOGIN_CLEAR: &str = "login.clear";
     pub const LOGIN_CHATGPT_START: &str = "login.chatgpt.start";
+    pub const LOGIN_CHATGPT_WAIT: &str = "login.chatgpt.wait";
     pub const LOGIN_CHATGPT_CANCEL: &str = "login.chatgpt.cancel";
     pub const LOGIN_OPENAI_CONFIGURE: &str = "login.openai.configure";
     pub const LOGIN_ANTHROPIC_CONFIGURE: &str = "login.anthropic.configure";

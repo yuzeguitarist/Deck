@@ -271,6 +271,11 @@ impl DeckClient {
             .await
     }
 
+    pub async fn login_chatgpt_wait(&mut self) -> Result<Response, DeckError> {
+        self.execute(deckclip_protocol::cmd::LOGIN_CHATGPT_WAIT, json!({}), 0)
+            .await
+    }
+
     pub async fn login_chatgpt_cancel(&mut self) -> Result<Response, DeckError> {
         self.execute(deckclip_protocol::cmd::LOGIN_CHATGPT_CANCEL, json!({}), 0)
             .await
