@@ -20,7 +20,7 @@ use serde::Deserialize;
 use textwrap::Options;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
-use crate::output::OutputMode;
+use crate::{i18n, output::OutputMode};
 
 const LOGO: &str = include_str!("../logo.ans");
 const LOGO_SCALE: f32 = 0.75;
@@ -81,32 +81,18 @@ impl ProviderKind {
     }
 
     fn title(self) -> &'static str {
-        match self {
-            ProviderKind::ChatGpt => "Sign in with ChatGPT (usage included with your ChatGPT Plan)",
-            ProviderKind::OpenAI => "Provide your own OpenAI API key",
-            ProviderKind::Anthropic => "Provide your own Anthropic API key",
-            ProviderKind::Ollama => "Use Ollama",
-        }
+        provider_title(self)
     }
 
     fn description(self, status: &ProviderStatus) -> String {
-        let mut text = match self {
-            ProviderKind::ChatGpt => {
-                if let Some(account) = status.account.as_deref() {
-                    format!("使用 ChatGPT OAuth 授权。当前账号：{account}")
-                } else {
-                    "使用 ChatGPT OAuth 授权，在浏览器中完成登录".to_string()
-                }
-            }
-            ProviderKind::OpenAI => "通过 OpenAI API key 进行模型调用".to_string(),
-            ProviderKind::Anthropic => "通过 Anthropic API key 进行模型调用".to_string(),
-            ProviderKind::Ollama => "使用本地模型".to_string(),
-        };
+        let mut text = provider_description(self, status);
 
         if status.selected {
-            text.push_str("  [当前使用]");
+            text.push_str("  ");
+            text.push_str(login_text(LoginText::StatusCurrent));
         } else if status.configured {
-            text.push_str("  [已配置]");
+            text.push_str("  ");
+            text.push_str(login_text(LoginText::StatusConfigured));
         }
 
         text
@@ -131,12 +117,7 @@ impl ProviderKind {
     }
 
     fn success_title(self) -> &'static str {
-        match self {
-            ProviderKind::ChatGpt => "ChatGPT 登录成功",
-            ProviderKind::OpenAI => "OpenAI API 已配置",
-            ProviderKind::Anthropic => "Anthropic API 已配置",
-            ProviderKind::Ollama => "Ollama 已配置",
-        }
+        provider_success_title(self)
     }
 }
 
@@ -206,19 +187,19 @@ impl FormState {
         let fields = match provider {
             ProviderKind::OpenAI | ProviderKind::Anthropic => vec![
                 InputField {
-                    label: "Base URL",
+                    label: login_text(LoginText::FieldBaseUrl),
                     placeholder: provider.base_url_placeholder().unwrap_or_default(),
                     value: base_url,
                     secret: false,
                 },
                 InputField {
-                    label: "API Key",
-                    placeholder: "在这里输入 API Key",
+                    label: login_text(LoginText::FieldApiKey),
+                    placeholder: login_text(LoginText::PlaceholderApiKey),
                     value: String::new(),
                     secret: true,
                 },
                 InputField {
-                    label: "Model",
+                    label: login_text(LoginText::FieldModel),
                     placeholder: provider.model_placeholder().unwrap_or_default(),
                     value: model,
                     secret: false,
@@ -226,13 +207,13 @@ impl FormState {
             ],
             ProviderKind::Ollama => vec![
                 InputField {
-                    label: "Base URL",
+                    label: login_text(LoginText::FieldBaseUrl),
                     placeholder: provider.base_url_placeholder().unwrap_or_default(),
                     value: base_url,
                     secret: false,
                 },
                 InputField {
-                    label: "Model",
+                    label: login_text(LoginText::FieldModel),
                     placeholder: provider.model_placeholder().unwrap_or_default(),
                     value: model,
                     secret: false,
@@ -364,7 +345,7 @@ impl LoginApp {
                         Err(error) => {
                             self.screen = Screen::Result {
                                 success: false,
-                                title: "ChatGPT 登录失败".to_string(),
+                                title: login_text(LoginText::ErrorChatGptFailed).to_string(),
                                 detail: Some(error),
                             };
                         }
@@ -560,7 +541,7 @@ impl LoginApp {
                     match client.login_chatgpt_wait().await {
                         Ok(response) => {
                             Ok(response_detail_message(&response).unwrap_or_else(|| {
-                                "浏览器授权已完成，Deck 已切换到 ChatGPT。".to_string()
+                                login_text(LoginText::ChatGptCompleted).to_string()
                             }))
                         }
                         Err(error) => Err(error.to_string()),
@@ -587,20 +568,20 @@ impl LoginApp {
         let validation_error = match provider {
             ProviderKind::OpenAI | ProviderKind::Anthropic => {
                 if values.get(0).is_none_or(|value| value.is_empty()) {
-                    Some("Base URL 不能为空".to_string())
+                    Some(login_text(LoginText::ErrorBaseUrlRequired).to_string())
                 } else if values.get(1).is_none_or(|value| value.is_empty()) {
-                    Some("API Key 不能为空".to_string())
+                    Some(login_text(LoginText::ErrorApiKeyRequired).to_string())
                 } else if values.get(2).is_none_or(|value| value.is_empty()) {
-                    Some("Model 不能为空".to_string())
+                    Some(login_text(LoginText::ErrorModelRequired).to_string())
                 } else {
                     None
                 }
             }
             ProviderKind::Ollama => {
                 if values.get(0).is_none_or(|value| value.is_empty()) {
-                    Some("Base URL 不能为空".to_string())
+                    Some(login_text(LoginText::ErrorBaseUrlRequired).to_string())
                 } else if values.get(1).is_none_or(|value| value.is_empty()) {
-                    Some("Model 不能为空".to_string())
+                    Some(login_text(LoginText::ErrorModelRequired).to_string())
                 } else {
                     None
                 }
@@ -811,9 +792,10 @@ impl<'a> ScreenWriter<'a> {
 
 impl TerminalGuard {
     fn enter() -> Result<Self> {
-        enable_raw_mode().context("无法进入终端 raw mode")?;
+        enable_raw_mode().context(login_text(LoginText::ErrorRawMode))?;
         let mut stdout = stdout();
-        execute!(stdout, EnterAlternateScreen, Hide).context("无法进入终端登录界面")?;
+        execute!(stdout, EnterAlternateScreen, Hide)
+            .context(login_text(LoginText::ErrorEnterScreen))?;
         Ok(Self {
             stdout,
             last_content_signature: None,
@@ -910,8 +892,13 @@ fn render_menu(
     selected: usize,
     info: Option<&str>,
 ) -> Result<()> {
-    screen.write_wrapped("", "", "配置 Deck AI 提供商", LineStyle::Bold)?;
-    screen.write_wrapped("", "", "为 Deck 选择并配置 AI 提供商。", LineStyle::Plain)?;
+    screen.write_wrapped("", "", login_text(LoginText::MenuTitle), LineStyle::Bold)?;
+    screen.write_wrapped(
+        "",
+        "",
+        login_text(LoginText::MenuSubtitle),
+        LineStyle::Plain,
+    )?;
     screen.blank_line()?;
 
     for (index, provider) in ProviderKind::ALL.iter().enumerate() {
@@ -951,7 +938,7 @@ fn render_menu(
     screen.write_wrapped(
         "",
         "",
-        "Press Enter to continue, or ESC to exit",
+        login_text(LoginText::ContinueOrExit),
         LineStyle::Dim,
     )?;
     if let Some(info) = info {
@@ -966,33 +953,44 @@ fn render_confirm(
     provider: ProviderKind,
     yes_selected: bool,
 ) -> Result<()> {
-    screen.write_wrapped("", "", "检测到已有配置，请问是否要继续？", LineStyle::Bold)?;
+    screen.write_wrapped("", "", login_text(LoginText::ConfirmTitle), LineStyle::Bold)?;
     screen.write_wrapped(
         "",
         "",
-        &format!(
-            "继续后会在保存成功后用新设置替换当前 {} 配置。",
-            provider.title()
+        &replace_placeholder(
+            login_text(LoginText::ConfirmReplaceAfterSave),
+            "provider",
+            provider.title(),
         ),
         LineStyle::Plain,
     )?;
     screen.write_wrapped(
         "",
         "",
-        "在你完成保存前，当前配置会保持不变。",
+        login_text(LoginText::ConfirmKeepCurrent),
         LineStyle::Dim,
     )?;
     screen.blank_line()?;
 
     let no_button = if yes_selected {
-        "[ No ]".to_string()
+        format!("[ {} ]", login_text(LoginText::ButtonNo))
     } else {
-        format!("{}", "[ No ]".cyan().bold())
+        format!(
+            "{}",
+            format!("[ {} ]", login_text(LoginText::ButtonNo))
+                .cyan()
+                .bold()
+        )
     };
     let yes_button = if yes_selected {
-        format!("{}", "[ Yes ]".cyan().bold())
+        format!(
+            "{}",
+            format!("[ {} ]", login_text(LoginText::ButtonYes))
+                .cyan()
+                .bold()
+        )
     } else {
-        "[ Yes ]".to_string()
+        format!("[ {} ]", login_text(LoginText::ButtonYes))
     };
 
     screen.write_padded_line(&format!("  {no_button}  {yes_button}"))?;
@@ -1000,7 +998,7 @@ fn render_confirm(
     screen.write_wrapped(
         "",
         "",
-        "Press Enter to continue, or ESC to exit",
+        login_text(LoginText::ContinueOrExit),
         LineStyle::Dim,
     )?;
     Ok(())
@@ -1011,7 +1009,7 @@ fn render_form(screen: &mut ScreenWriter<'_>, form: &FormState) -> Result<()> {
     screen.write_wrapped(
         "",
         "",
-        "填写下列信息后，Deck 会立即切换到对应提供商。",
+        login_text(LoginText::FormSubtitle),
         LineStyle::Plain,
     )?;
     screen.blank_line()?;
@@ -1052,12 +1050,7 @@ fn render_form(screen: &mut ScreenWriter<'_>, form: &FormState) -> Result<()> {
         screen.blank_line()?;
     }
 
-    screen.write_wrapped(
-        "",
-        "",
-        "Press Tab to switch fields, Enter to save, or ESC to exit",
-        LineStyle::Dim,
-    )?;
+    screen.write_wrapped("", "", login_text(LoginText::SaveOrExit), LineStyle::Dim)?;
     if let Some(error) = &form.error {
         screen.blank_line()?;
         screen.write_wrapped("", "", error, LineStyle::Red)?;
@@ -1070,17 +1063,12 @@ fn render_chatgpt_waiting(
     auth_url: Option<&str>,
     browser_opened: bool,
 ) -> Result<()> {
-    screen.write_wrapped("", "", "Sign in with ChatGPT", LineStyle::Bold)?;
+    screen.write_wrapped("", "", login_text(LoginText::WaitTitle), LineStyle::Bold)?;
+    screen.write_wrapped("", "", login_text(LoginText::WaitBrowser), LineStyle::Plain)?;
     screen.write_wrapped(
         "",
         "",
-        "Finish signing in via your browser.",
-        LineStyle::Plain,
-    )?;
-    screen.write_wrapped(
-        "",
-        "",
-        "完成后 Deck 会自动切换 Deck AI 到 ChatGPT 方案。",
+        login_text(LoginText::WaitSwitchToChatGpt),
         LineStyle::Plain,
     )?;
     if let Some(auth_url) = auth_url.filter(|value| !value.trim().is_empty()) {
@@ -1088,7 +1076,7 @@ fn render_chatgpt_waiting(
         screen.write_wrapped(
             "  ",
             "  ",
-            "If the link doesn't open automatically, open the following link to authenticate:",
+            login_text(LoginText::WaitOpenLink),
             LineStyle::Plain,
         )?;
         screen.blank_line()?;
@@ -1099,12 +1087,17 @@ fn render_chatgpt_waiting(
         screen.write_wrapped(
             "  ",
             "  ",
-            "Unable to open the browser automatically. Copy the link above to continue.",
+            login_text(LoginText::WaitBrowserFailed),
             LineStyle::Dim,
         )?;
     }
     screen.blank_line()?;
-    screen.write_wrapped("", "", "Press ESC to cancel and exit", LineStyle::Dim)?;
+    screen.write_wrapped(
+        "",
+        "",
+        login_text(LoginText::WaitCancelOrExit),
+        LineStyle::Dim,
+    )?;
     Ok(())
 }
 
@@ -1134,7 +1127,7 @@ fn render_result(
     screen.write_wrapped(
         "",
         "",
-        "Press Enter to continue, or ESC to exit",
+        login_text(LoginText::ContinueOrExit),
         LineStyle::Dim,
     )?;
     Ok(())
@@ -1169,11 +1162,11 @@ fn apply_line_style(style: LineStyle, line: &str) -> String {
 
 pub async fn run(output: OutputMode) -> Result<()> {
     if matches!(output, OutputMode::Json) {
-        bail!("`deckclip login` 暂不支持 --json")
+        bail!(login_text(LoginText::ErrorJsonUnsupported))
     }
 
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        bail!("`deckclip login` 需要交互式终端")
+        bail!(login_text(LoginText::ErrorInteractiveTerminal))
     }
 
     let status = fetch_login_status().await?;
@@ -1184,8 +1177,10 @@ pub async fn run(output: OutputMode) -> Result<()> {
         app.drain_async_events().await?;
         terminal.render(&app)?;
 
-        if event::poll(Duration::from_millis(50)).context("读取按键事件失败")? {
-            match event::read().context("读取终端事件失败")? {
+        if event::poll(Duration::from_millis(50))
+            .context(login_text(LoginText::ErrorReadKeyPoll))?
+        {
+            match event::read().context(login_text(LoginText::ErrorReadEvent))? {
                 Event::Key(key) => {
                     if app.handle_key_event(key).await? {
                         break;
@@ -1206,8 +1201,8 @@ async fn fetch_login_status() -> Result<LoginStatusData> {
     let response = client.login_status().await?;
     let data = response
         .data
-        .ok_or_else(|| anyhow!("登录状态响应缺少 data 字段"))?;
-    serde_json::from_value(data).context("无法解析登录状态响应")
+        .ok_or_else(|| anyhow!(login_text(LoginText::ErrorStatusDataMissing)))?;
+    serde_json::from_value(data).context(login_text(LoginText::ErrorStatusParse))
 }
 
 async fn cancel_chatgpt_login() -> Result<()> {
@@ -1222,10 +1217,18 @@ fn response_detail_message(response: &deckclip_protocol::Response) -> Option<Str
         return Some(message.to_string());
     }
     if let Some(account) = data.get("account").and_then(|value| value.as_str()) {
-        return Some(format!("当前账号：{account}"));
+        return Some(replace_placeholder(
+            login_text(LoginText::DetailAccount),
+            "account",
+            account,
+        ));
     }
     if let Some(provider) = data.get("provider").and_then(|value| value.as_str()) {
-        return Some(format!("当前提供商：{provider}"));
+        return Some(replace_placeholder(
+            login_text(LoginText::DetailProvider),
+            "provider",
+            provider,
+        ));
     }
     None
 }
@@ -1246,6 +1249,460 @@ fn response_browser_opened(response: &deckclip_protocol::Response) -> bool {
         .and_then(|data| data.get("browser_opened"))
         .and_then(|value| value.as_bool())
         .unwrap_or(true)
+}
+
+#[derive(Clone, Copy)]
+enum LoginText {
+    StatusCurrent,
+    StatusConfigured,
+    FieldBaseUrl,
+    FieldApiKey,
+    FieldModel,
+    PlaceholderApiKey,
+    MenuTitle,
+    MenuSubtitle,
+    ContinueOrExit,
+    ConfirmTitle,
+    ConfirmReplaceAfterSave,
+    ConfirmKeepCurrent,
+    ButtonNo,
+    ButtonYes,
+    FormSubtitle,
+    SaveOrExit,
+    WaitTitle,
+    WaitBrowser,
+    WaitSwitchToChatGpt,
+    WaitOpenLink,
+    WaitBrowserFailed,
+    WaitCancelOrExit,
+    ErrorJsonUnsupported,
+    ErrorInteractiveTerminal,
+    ErrorRawMode,
+    ErrorEnterScreen,
+    ErrorReadKeyPoll,
+    ErrorReadEvent,
+    ErrorStatusDataMissing,
+    ErrorStatusParse,
+    ErrorBaseUrlRequired,
+    ErrorApiKeyRequired,
+    ErrorModelRequired,
+    ErrorChatGptFailed,
+    ChatGptCompleted,
+    DetailAccount,
+    DetailProvider,
+}
+
+fn login_text(key: LoginText) -> &'static str {
+    match (i18n::locale(), key) {
+        ("en", LoginText::StatusCurrent) => "[Current]",
+        ("de", LoginText::StatusCurrent) => "[Aktiv]",
+        ("fr", LoginText::StatusCurrent) => "[Actuel]",
+        ("ja", LoginText::StatusCurrent) => "[現在使用中]",
+        ("ko", LoginText::StatusCurrent) => "[현재 사용 중]",
+        ("zh-Hant", LoginText::StatusCurrent) => "[目前使用]",
+        (_, LoginText::StatusCurrent) => "[当前使用]",
+
+        ("en", LoginText::StatusConfigured) => "[Configured]",
+        ("de", LoginText::StatusConfigured) => "[Konfiguriert]",
+        ("fr", LoginText::StatusConfigured) => "[Configuré]",
+        ("ja", LoginText::StatusConfigured) => "[設定済み]",
+        ("ko", LoginText::StatusConfigured) => "[구성됨]",
+        ("zh-Hant", LoginText::StatusConfigured) => "[已設定]",
+        (_, LoginText::StatusConfigured) => "[已配置]",
+
+        ("de", LoginText::FieldBaseUrl) => "Basis-URL",
+        ("fr", LoginText::FieldBaseUrl) => "URL de base",
+        (_, LoginText::FieldBaseUrl) => "Base URL",
+
+        (_, LoginText::FieldApiKey) => "API Key",
+        (_, LoginText::FieldModel) => "Model",
+
+        ("en", LoginText::PlaceholderApiKey) => "Enter your API key here",
+        ("de", LoginText::PlaceholderApiKey) => "API-Schlüssel hier eingeben",
+        ("fr", LoginText::PlaceholderApiKey) => "Saisissez votre clé API ici",
+        ("ja", LoginText::PlaceholderApiKey) => "ここに API Key を入力",
+        ("ko", LoginText::PlaceholderApiKey) => "여기에 API Key 입력",
+        ("zh-Hant", LoginText::PlaceholderApiKey) => "在此輸入 API Key",
+        (_, LoginText::PlaceholderApiKey) => "在这里输入 API Key",
+
+        ("en", LoginText::MenuTitle) => "Configure Deck AI providers",
+        ("de", LoginText::MenuTitle) => "Deck-AI-Anbieter konfigurieren",
+        ("fr", LoginText::MenuTitle) => "Configurer les fournisseurs IA de Deck",
+        ("ja", LoginText::MenuTitle) => "Deck AI プロバイダーを設定",
+        ("ko", LoginText::MenuTitle) => "Deck AI 제공자 설정",
+        ("zh-Hant", LoginText::MenuTitle) => "設定 Deck AI 提供商",
+        (_, LoginText::MenuTitle) => "配置 Deck AI 提供商",
+
+        ("en", LoginText::MenuSubtitle) => "Choose and configure an AI provider for Deck.",
+        ("de", LoginText::MenuSubtitle) => "Wählen und konfigurieren Sie einen KI-Anbieter für Deck.",
+        ("fr", LoginText::MenuSubtitle) => "Choisissez et configurez un fournisseur d'IA pour Deck.",
+        ("ja", LoginText::MenuSubtitle) => "Deck 用の AI プロバイダーを選んで設定します。",
+        ("ko", LoginText::MenuSubtitle) => "Deck용 AI 제공자를 선택하고 설정합니다.",
+        ("zh-Hant", LoginText::MenuSubtitle) => "為 Deck 選擇並設定 AI 提供商。",
+        (_, LoginText::MenuSubtitle) => "为 Deck 选择并配置 AI 提供商。",
+
+        ("en", LoginText::ContinueOrExit) => "Press Enter to continue, or ESC to exit",
+        ("de", LoginText::ContinueOrExit) => "Drücken Sie Enter, um fortzufahren, oder ESC zum Beenden",
+        ("fr", LoginText::ContinueOrExit) => "Appuyez sur Entrée pour continuer, ou sur Échap pour quitter",
+        ("ja", LoginText::ContinueOrExit) => "Enter で続行、ESC で終了",
+        ("ko", LoginText::ContinueOrExit) => "Enter를 눌러 계속하거나 ESC로 종료",
+        ("zh-Hant", LoginText::ContinueOrExit) => "按 Enter 繼續，或按 ESC 離開",
+        (_, LoginText::ContinueOrExit) => "按 Enter 继续，或按 ESC 退出",
+
+        ("en", LoginText::ConfirmTitle) => "Existing configuration detected. Continue?",
+        ("de", LoginText::ConfirmTitle) => "Vorhandene Konfiguration erkannt. Fortfahren?",
+        ("fr", LoginText::ConfirmTitle) => "Configuration existante détectée. Continuer ?",
+        ("ja", LoginText::ConfirmTitle) => "既存の設定が見つかりました。続行しますか？",
+        ("ko", LoginText::ConfirmTitle) => "기존 구성이 감지되었습니다. 계속하시겠습니까?",
+        ("zh-Hant", LoginText::ConfirmTitle) => "偵測到既有設定，是否繼續？",
+        (_, LoginText::ConfirmTitle) => "检测到已有配置，请问是否要继续？",
+
+        ("en", LoginText::ConfirmReplaceAfterSave) => "The current {provider} configuration will be replaced after the new settings are saved.",
+        ("de", LoginText::ConfirmReplaceAfterSave) => "Die aktuelle {provider}-Konfiguration wird ersetzt, sobald die neuen Einstellungen gespeichert sind.",
+        ("fr", LoginText::ConfirmReplaceAfterSave) => "La configuration actuelle de {provider} sera remplacée une fois les nouveaux réglages enregistrés.",
+        ("ja", LoginText::ConfirmReplaceAfterSave) => "新しい設定を保存すると、現在の {provider} 設定が置き換えられます。",
+        ("ko", LoginText::ConfirmReplaceAfterSave) => "새 설정이 저장되면 현재 {provider} 구성이 교체됩니다.",
+        ("zh-Hant", LoginText::ConfirmReplaceAfterSave) => "新設定儲存成功後，會取代目前的 {provider} 設定。",
+        (_, LoginText::ConfirmReplaceAfterSave) => "继续后会在保存成功后用新设置替换当前 {provider} 配置。",
+
+        ("en", LoginText::ConfirmKeepCurrent) => "Your current configuration stays unchanged until saving completes.",
+        ("de", LoginText::ConfirmKeepCurrent) => "Ihre aktuelle Konfiguration bleibt unverändert, bis das Speichern abgeschlossen ist.",
+        ("fr", LoginText::ConfirmKeepCurrent) => "Votre configuration actuelle reste inchangée jusqu'à la fin de l'enregistrement.",
+        ("ja", LoginText::ConfirmKeepCurrent) => "保存が完了するまで、現在の設定は変更されません。",
+        ("ko", LoginText::ConfirmKeepCurrent) => "저장이 완료될 때까지 현재 구성은 변경되지 않습니다.",
+        ("zh-Hant", LoginText::ConfirmKeepCurrent) => "在儲存完成前，目前設定會保持不變。",
+        (_, LoginText::ConfirmKeepCurrent) => "在你完成保存前，当前配置会保持不变。",
+
+        ("ja", LoginText::ButtonNo) => "いいえ",
+        ("ko", LoginText::ButtonNo) => "아니요",
+        ("zh-Hant", LoginText::ButtonNo) => "否",
+        (_, LoginText::ButtonNo) if i18n::locale() == "zh-Hans" => "否",
+        (_, LoginText::ButtonNo) => "No",
+
+        ("ja", LoginText::ButtonYes) => "はい",
+        ("ko", LoginText::ButtonYes) => "예",
+        ("zh-Hant", LoginText::ButtonYes) => "是",
+        (_, LoginText::ButtonYes) if i18n::locale() == "zh-Hans" => "是",
+        (_, LoginText::ButtonYes) => "Yes",
+
+        ("en", LoginText::FormSubtitle) => "Fill in the fields below and Deck will switch to that provider immediately.",
+        ("de", LoginText::FormSubtitle) => "Füllen Sie die folgenden Felder aus und Deck wechselt sofort zu diesem Anbieter.",
+        ("fr", LoginText::FormSubtitle) => "Renseignez les champs ci-dessous et Deck basculera immédiatement vers ce fournisseur.",
+        ("ja", LoginText::FormSubtitle) => "以下の項目を入力すると、Deck はすぐにそのプロバイダーへ切り替わります。",
+        ("ko", LoginText::FormSubtitle) => "아래 항목을 입력하면 Deck가 즉시 해당 제공자로 전환됩니다.",
+        ("zh-Hant", LoginText::FormSubtitle) => "填寫下列資訊後，Deck 會立即切換到對應提供商。",
+        (_, LoginText::FormSubtitle) => "填写下列信息后，Deck 会立即切换到对应提供商。",
+
+        ("en", LoginText::SaveOrExit) => "Press Tab to switch fields, Enter to save, or ESC to exit",
+        ("de", LoginText::SaveOrExit) => "Drücken Sie Tab zum Wechseln, Enter zum Speichern oder ESC zum Beenden",
+        ("fr", LoginText::SaveOrExit) => "Appuyez sur Tab pour changer de champ, Entrée pour enregistrer, ou Échap pour quitter",
+        ("ja", LoginText::SaveOrExit) => "Tab で項目を切り替え、Enter で保存、ESC で終了",
+        ("ko", LoginText::SaveOrExit) => "Tab으로 필드 전환, Enter로 저장, ESC로 종료",
+        ("zh-Hant", LoginText::SaveOrExit) => "按 Tab 切換欄位，按 Enter 儲存，或按 ESC 離開",
+        (_, LoginText::SaveOrExit) => "按 Tab 切换字段，按 Enter 保存，或按 ESC 退出",
+
+        ("en", LoginText::WaitTitle) => "Sign in with ChatGPT",
+        ("de", LoginText::WaitTitle) => "Mit ChatGPT anmelden",
+        ("fr", LoginText::WaitTitle) => "Se connecter avec ChatGPT",
+        ("ja", LoginText::WaitTitle) => "ChatGPT にサインイン",
+        ("ko", LoginText::WaitTitle) => "ChatGPT로 로그인",
+        ("zh-Hant", LoginText::WaitTitle) => "登入 ChatGPT",
+        (_, LoginText::WaitTitle) => "登录 ChatGPT",
+
+        ("en", LoginText::WaitBrowser) => "Finish signing in via your browser.",
+        ("de", LoginText::WaitBrowser) => "Schließen Sie die Anmeldung in Ihrem Browser ab.",
+        ("fr", LoginText::WaitBrowser) => "Terminez la connexion dans votre navigateur.",
+        ("ja", LoginText::WaitBrowser) => "ブラウザでサインインを完了してください。",
+        ("ko", LoginText::WaitBrowser) => "브라우저에서 로그인을 완료하세요.",
+        ("zh-Hant", LoginText::WaitBrowser) => "請在瀏覽器中完成登入。",
+        (_, LoginText::WaitBrowser) => "请在浏览器中完成登录。",
+
+        ("en", LoginText::WaitSwitchToChatGpt) => "When it finishes, Deck will automatically switch Deck AI to ChatGPT.",
+        ("de", LoginText::WaitSwitchToChatGpt) => "Nach Abschluss wechselt Deck Deck AI automatisch zu ChatGPT.",
+        ("fr", LoginText::WaitSwitchToChatGpt) => "Une fois terminé, Deck basculera automatiquement Deck AI sur ChatGPT.",
+        ("ja", LoginText::WaitSwitchToChatGpt) => "完了すると、Deck は Deck AI を自動的に ChatGPT に切り替えます。",
+        ("ko", LoginText::WaitSwitchToChatGpt) => "완료되면 Deck가 Deck AI를 자동으로 ChatGPT로 전환합니다.",
+        ("zh-Hant", LoginText::WaitSwitchToChatGpt) => "完成後，Deck 會自動將 Deck AI 切換到 ChatGPT 方案。",
+        (_, LoginText::WaitSwitchToChatGpt) => "完成后 Deck 会自动切换 Deck AI 到 ChatGPT 方案。",
+
+        ("en", LoginText::WaitOpenLink) => "If the link doesn't open automatically, open the following link to authenticate:",
+        ("de", LoginText::WaitOpenLink) => "Wenn sich der Link nicht automatisch öffnet, verwenden Sie zur Anmeldung den folgenden Link:",
+        ("fr", LoginText::WaitOpenLink) => "Si le lien ne s'ouvre pas automatiquement, ouvrez le lien suivant pour vous authentifier :",
+        ("ja", LoginText::WaitOpenLink) => "リンクが自動で開かない場合は、次のリンクを開いて認証してください。",
+        ("ko", LoginText::WaitOpenLink) => "링크가 자동으로 열리지 않으면 아래 링크를 열어 인증을 진행하세요.",
+        ("zh-Hant", LoginText::WaitOpenLink) => "如果連結沒有自動打開，請開啟以下連結完成驗證：",
+        (_, LoginText::WaitOpenLink) => "如果链接没有自动打开，请打开下面的链接完成验证：",
+
+        ("en", LoginText::WaitBrowserFailed) => "Unable to open the browser automatically. Copy the link above to continue.",
+        ("de", LoginText::WaitBrowserFailed) => "Der Browser konnte nicht automatisch geöffnet werden. Kopieren Sie den obigen Link, um fortzufahren.",
+        ("fr", LoginText::WaitBrowserFailed) => "Impossible d'ouvrir automatiquement le navigateur. Copiez le lien ci-dessus pour continuer.",
+        ("ja", LoginText::WaitBrowserFailed) => "ブラウザを自動で開けませんでした。上のリンクをコピーして続行してください。",
+        ("ko", LoginText::WaitBrowserFailed) => "브라우저를 자동으로 열 수 없습니다. 위 링크를 복사해 계속하세요.",
+        ("zh-Hant", LoginText::WaitBrowserFailed) => "無法自動開啟瀏覽器。請複製上方連結繼續。",
+        (_, LoginText::WaitBrowserFailed) => "无法自动打开浏览器。请复制上方链接继续。",
+
+        ("en", LoginText::WaitCancelOrExit) => "Press ESC to cancel and exit",
+        ("de", LoginText::WaitCancelOrExit) => "Drücken Sie ESC, um abzubrechen und zu beenden",
+        ("fr", LoginText::WaitCancelOrExit) => "Appuyez sur Échap pour annuler et quitter",
+        ("ja", LoginText::WaitCancelOrExit) => "ESC でキャンセルして終了",
+        ("ko", LoginText::WaitCancelOrExit) => "ESC를 눌러 취소하고 종료",
+        ("zh-Hant", LoginText::WaitCancelOrExit) => "按 ESC 取消並離開",
+        (_, LoginText::WaitCancelOrExit) => "按 ESC 取消并退出",
+
+        ("en", LoginText::ErrorJsonUnsupported) => "deckclip login does not support --json yet",
+        ("de", LoginText::ErrorJsonUnsupported) => "deckclip login unterstützt --json derzeit nicht",
+        ("fr", LoginText::ErrorJsonUnsupported) => "deckclip login ne prend pas encore en charge --json",
+        ("ja", LoginText::ErrorJsonUnsupported) => "deckclip login はまだ --json をサポートしていません",
+        ("ko", LoginText::ErrorJsonUnsupported) => "deckclip login은 아직 --json을 지원하지 않습니다",
+        ("zh-Hant", LoginText::ErrorJsonUnsupported) => "deckclip login 暫不支援 --json",
+        (_, LoginText::ErrorJsonUnsupported) => "deckclip login 暂不支持 --json",
+
+        ("en", LoginText::ErrorInteractiveTerminal) => "deckclip login requires an interactive terminal",
+        ("de", LoginText::ErrorInteractiveTerminal) => "deckclip login benötigt ein interaktives Terminal",
+        ("fr", LoginText::ErrorInteractiveTerminal) => "deckclip login nécessite un terminal interactif",
+        ("ja", LoginText::ErrorInteractiveTerminal) => "deckclip login には対話型ターミナルが必要です",
+        ("ko", LoginText::ErrorInteractiveTerminal) => "deckclip login에는 대화형 터미널이 필요합니다",
+        ("zh-Hant", LoginText::ErrorInteractiveTerminal) => "deckclip login 需要互動式終端機",
+        (_, LoginText::ErrorInteractiveTerminal) => "deckclip login 需要交互式终端",
+
+        ("en", LoginText::ErrorRawMode) => "Failed to enter terminal raw mode",
+        ("de", LoginText::ErrorRawMode) => "Terminal-Raw-Mode konnte nicht aktiviert werden",
+        ("fr", LoginText::ErrorRawMode) => "Impossible d'activer le mode brut du terminal",
+        ("ja", LoginText::ErrorRawMode) => "ターミナルの raw mode に入れませんでした",
+        ("ko", LoginText::ErrorRawMode) => "터미널 raw mode로 전환하지 못했습니다",
+        ("zh-Hant", LoginText::ErrorRawMode) => "無法進入終端 raw mode",
+        (_, LoginText::ErrorRawMode) => "无法进入终端 raw mode",
+
+        ("en", LoginText::ErrorEnterScreen) => "Failed to enter the terminal login screen",
+        ("de", LoginText::ErrorEnterScreen) => "Die Terminal-Anmeldemaske konnte nicht geöffnet werden",
+        ("fr", LoginText::ErrorEnterScreen) => "Impossible d'ouvrir l'écran de connexion du terminal",
+        ("ja", LoginText::ErrorEnterScreen) => "ターミナルのログイン画面に入れませんでした",
+        ("ko", LoginText::ErrorEnterScreen) => "터미널 로그인 화면으로 진입하지 못했습니다",
+        ("zh-Hant", LoginText::ErrorEnterScreen) => "無法進入終端登入畫面",
+        (_, LoginText::ErrorEnterScreen) => "无法进入终端登录界面",
+
+        ("en", LoginText::ErrorReadKeyPoll) => "Failed to poll key events",
+        ("de", LoginText::ErrorReadKeyPoll) => "Tastenereignisse konnten nicht abgefragt werden",
+        ("fr", LoginText::ErrorReadKeyPoll) => "Impossible d'interroger les événements clavier",
+        ("ja", LoginText::ErrorReadKeyPoll) => "キーイベントのポーリングに失敗しました",
+        ("ko", LoginText::ErrorReadKeyPoll) => "키 이벤트를 확인하지 못했습니다",
+        ("zh-Hant", LoginText::ErrorReadKeyPoll) => "讀取按鍵事件失敗",
+        (_, LoginText::ErrorReadKeyPoll) => "读取按键事件失败",
+
+        ("en", LoginText::ErrorReadEvent) => "Failed to read terminal event",
+        ("de", LoginText::ErrorReadEvent) => "Terminal-Ereignis konnte nicht gelesen werden",
+        ("fr", LoginText::ErrorReadEvent) => "Impossible de lire l'événement du terminal",
+        ("ja", LoginText::ErrorReadEvent) => "ターミナルイベントの読み取りに失敗しました",
+        ("ko", LoginText::ErrorReadEvent) => "터미널 이벤트를 읽지 못했습니다",
+        ("zh-Hant", LoginText::ErrorReadEvent) => "讀取終端事件失敗",
+        (_, LoginText::ErrorReadEvent) => "读取终端事件失败",
+
+        ("en", LoginText::ErrorStatusDataMissing) => "Login status response is missing the data field",
+        ("de", LoginText::ErrorStatusDataMissing) => "In der Antwort zum Anmeldestatus fehlt das Datenfeld",
+        ("fr", LoginText::ErrorStatusDataMissing) => "La réponse d'état de connexion ne contient pas le champ data",
+        ("ja", LoginText::ErrorStatusDataMissing) => "ログイン状態の応答に data フィールドがありません",
+        ("ko", LoginText::ErrorStatusDataMissing) => "로그인 상태 응답에 data 필드가 없습니다",
+        ("zh-Hant", LoginText::ErrorStatusDataMissing) => "登入狀態回應缺少 data 欄位",
+        (_, LoginText::ErrorStatusDataMissing) => "登录状态响应缺少 data 字段",
+
+        ("en", LoginText::ErrorStatusParse) => "Failed to parse the login status response",
+        ("de", LoginText::ErrorStatusParse) => "Die Antwort zum Anmeldestatus konnte nicht verarbeitet werden",
+        ("fr", LoginText::ErrorStatusParse) => "Impossible d'analyser la réponse d'état de connexion",
+        ("ja", LoginText::ErrorStatusParse) => "ログイン状態の応答を解析できませんでした",
+        ("ko", LoginText::ErrorStatusParse) => "로그인 상태 응답을 해석하지 못했습니다",
+        ("zh-Hant", LoginText::ErrorStatusParse) => "無法解析登入狀態回應",
+        (_, LoginText::ErrorStatusParse) => "无法解析登录状态响应",
+
+        ("en", LoginText::ErrorBaseUrlRequired) => "Base URL cannot be empty",
+        ("de", LoginText::ErrorBaseUrlRequired) => "Die Basis-URL darf nicht leer sein",
+        ("fr", LoginText::ErrorBaseUrlRequired) => "L'URL de base ne peut pas être vide",
+        ("ja", LoginText::ErrorBaseUrlRequired) => "Base URL は空にできません",
+        ("ko", LoginText::ErrorBaseUrlRequired) => "Base URL은 비워둘 수 없습니다",
+        ("zh-Hant", LoginText::ErrorBaseUrlRequired) => "Base URL 不能為空",
+        (_, LoginText::ErrorBaseUrlRequired) => "Base URL 不能为空",
+
+        ("en", LoginText::ErrorApiKeyRequired) => "API Key cannot be empty",
+        ("de", LoginText::ErrorApiKeyRequired) => "Der API-Schlüssel darf nicht leer sein",
+        ("fr", LoginText::ErrorApiKeyRequired) => "La clé API ne peut pas être vide",
+        ("ja", LoginText::ErrorApiKeyRequired) => "API Key は空にできません",
+        ("ko", LoginText::ErrorApiKeyRequired) => "API Key는 비워둘 수 없습니다",
+        ("zh-Hant", LoginText::ErrorApiKeyRequired) => "API Key 不能為空",
+        (_, LoginText::ErrorApiKeyRequired) => "API Key 不能为空",
+
+        ("en", LoginText::ErrorModelRequired) => "Model cannot be empty",
+        ("de", LoginText::ErrorModelRequired) => "Das Modell darf nicht leer sein",
+        ("fr", LoginText::ErrorModelRequired) => "Le modèle ne peut pas être vide",
+        ("ja", LoginText::ErrorModelRequired) => "Model は空にできません",
+        ("ko", LoginText::ErrorModelRequired) => "Model은 비워둘 수 없습니다",
+        ("zh-Hant", LoginText::ErrorModelRequired) => "Model 不能為空",
+        (_, LoginText::ErrorModelRequired) => "Model 不能为空",
+
+        ("en", LoginText::ErrorChatGptFailed) => "ChatGPT sign-in failed",
+        ("de", LoginText::ErrorChatGptFailed) => "ChatGPT-Anmeldung fehlgeschlagen",
+        ("fr", LoginText::ErrorChatGptFailed) => "Échec de la connexion ChatGPT",
+        ("ja", LoginText::ErrorChatGptFailed) => "ChatGPT へのサインインに失敗しました",
+        ("ko", LoginText::ErrorChatGptFailed) => "ChatGPT 로그인 실패",
+        ("zh-Hant", LoginText::ErrorChatGptFailed) => "ChatGPT 登入失敗",
+        (_, LoginText::ErrorChatGptFailed) => "ChatGPT 登录失败",
+
+        ("en", LoginText::ChatGptCompleted) => "Browser authorization completed. Deck has switched to ChatGPT.",
+        ("de", LoginText::ChatGptCompleted) => "Die Browser-Autorisierung ist abgeschlossen. Deck wurde zu ChatGPT gewechselt.",
+        ("fr", LoginText::ChatGptCompleted) => "L'autorisation dans le navigateur est terminée. Deck est passé à ChatGPT.",
+        ("ja", LoginText::ChatGptCompleted) => "ブラウザでの認証が完了し、Deck は ChatGPT に切り替わりました。",
+        ("ko", LoginText::ChatGptCompleted) => "브라우저 인증이 완료되어 Deck가 ChatGPT로 전환되었습니다.",
+        ("zh-Hant", LoginText::ChatGptCompleted) => "瀏覽器授權已完成，Deck 已切換到 ChatGPT。",
+        (_, LoginText::ChatGptCompleted) => "浏览器授权已完成，Deck 已切换到 ChatGPT。",
+
+        ("en", LoginText::DetailAccount) => "Current account: {account}",
+        ("de", LoginText::DetailAccount) => "Aktuelles Konto: {account}",
+        ("fr", LoginText::DetailAccount) => "Compte actuel : {account}",
+        ("ja", LoginText::DetailAccount) => "現在のアカウント: {account}",
+        ("ko", LoginText::DetailAccount) => "현재 계정: {account}",
+        ("zh-Hant", LoginText::DetailAccount) => "目前帳號：{account}",
+        (_, LoginText::DetailAccount) => "当前账号：{account}",
+
+        ("en", LoginText::DetailProvider) => "Current provider: {provider}",
+        ("de", LoginText::DetailProvider) => "Aktueller Anbieter: {provider}",
+        ("fr", LoginText::DetailProvider) => "Fournisseur actuel : {provider}",
+        ("ja", LoginText::DetailProvider) => "現在のプロバイダー: {provider}",
+        ("ko", LoginText::DetailProvider) => "현재 제공자: {provider}",
+        ("zh-Hant", LoginText::DetailProvider) => "目前提供商：{provider}",
+        (_, LoginText::DetailProvider) => "当前提供商：{provider}",
+    }
+}
+
+fn provider_title(provider: ProviderKind) -> &'static str {
+    match (i18n::locale(), provider) {
+        ("en", ProviderKind::ChatGpt) => {
+            "Sign in with ChatGPT (usage included with your ChatGPT plan)"
+        }
+        ("de", ProviderKind::ChatGpt) => {
+            "Mit ChatGPT anmelden (Nutzung in Ihrem ChatGPT-Tarif enthalten)"
+        }
+        ("fr", ProviderKind::ChatGpt) => {
+            "Se connecter avec ChatGPT (utilisation incluse dans votre formule ChatGPT)"
+        }
+        ("ja", ProviderKind::ChatGpt) => {
+            "ChatGPT でサインイン（利用量は ChatGPT プランに含まれます）"
+        }
+        ("ko", ProviderKind::ChatGpt) => "ChatGPT로 로그인(사용량은 ChatGPT 요금제에 포함됨)",
+        ("zh-Hant", ProviderKind::ChatGpt) => {
+            "使用 ChatGPT 登入（用量已包含於你的 ChatGPT 方案中）"
+        }
+        (_, ProviderKind::ChatGpt) => "登录 ChatGPT（用量包含在你的 ChatGPT 方案中）",
+
+        ("en", ProviderKind::OpenAI) => "Provide your own OpenAI API key",
+        ("de", ProviderKind::OpenAI) => "Eigenen OpenAI API-Schlüssel verwenden",
+        ("fr", ProviderKind::OpenAI) => "Utiliser votre propre clé API OpenAI",
+        ("ja", ProviderKind::OpenAI) => "自分の OpenAI API Key を使う",
+        ("ko", ProviderKind::OpenAI) => "내 OpenAI API Key 사용",
+        ("zh-Hant", ProviderKind::OpenAI) => "使用自己的 OpenAI API Key",
+        (_, ProviderKind::OpenAI) => "使用自己的 OpenAI API Key",
+
+        ("en", ProviderKind::Anthropic) => "Provide your own Anthropic API key",
+        ("de", ProviderKind::Anthropic) => "Eigenen Anthropic API-Schlüssel verwenden",
+        ("fr", ProviderKind::Anthropic) => "Utiliser votre propre clé API Anthropic",
+        ("ja", ProviderKind::Anthropic) => "自分の Anthropic API Key を使う",
+        ("ko", ProviderKind::Anthropic) => "내 Anthropic API Key 사용",
+        ("zh-Hant", ProviderKind::Anthropic) => "使用自己的 Anthropic API Key",
+        (_, ProviderKind::Anthropic) => "使用自己的 Anthropic API Key",
+
+        ("en", ProviderKind::Ollama) => "Use Ollama",
+        ("de", ProviderKind::Ollama) => "Ollama verwenden",
+        ("fr", ProviderKind::Ollama) => "Utiliser Ollama",
+        ("ja", ProviderKind::Ollama) => "Ollama を使う",
+        ("ko", ProviderKind::Ollama) => "Ollama 사용",
+        ("zh-Hant", ProviderKind::Ollama) => "使用 Ollama",
+        (_, ProviderKind::Ollama) => "使用 Ollama",
+    }
+}
+
+fn provider_description(provider: ProviderKind, status: &ProviderStatus) -> String {
+    match provider {
+        ProviderKind::ChatGpt => match (i18n::locale(), status.account.as_deref()) {
+            ("en", Some(account)) => format!("Use ChatGPT OAuth. Current account: {account}"),
+            ("de", Some(account)) => format!("ChatGPT OAuth verwenden. Aktuelles Konto: {account}"),
+            ("fr", Some(account)) => format!("Utiliser OAuth ChatGPT. Compte actuel : {account}"),
+            ("ja", Some(account)) => format!("ChatGPT OAuth を使用します。現在のアカウント: {account}"),
+            ("ko", Some(account)) => format!("ChatGPT OAuth를 사용합니다. 현재 계정: {account}"),
+            ("zh-Hant", Some(account)) => format!("使用 ChatGPT OAuth 授權。目前帳號：{account}"),
+            (_, Some(account)) => format!("使用 ChatGPT OAuth 授权。当前账号：{account}"),
+            ("en", None) => "Use ChatGPT OAuth and finish sign-in in your browser".to_string(),
+            ("de", None) => "Mit ChatGPT OAuth anmelden und die Anmeldung im Browser abschließen".to_string(),
+            ("fr", None) => "Utilisez l'authentification OAuth de ChatGPT et terminez la connexion dans votre navigateur".to_string(),
+            ("ja", None) => "ChatGPT OAuth を使い、ブラウザでサインインを完了します".to_string(),
+            ("ko", None) => "ChatGPT OAuth를 사용해 브라우저에서 로그인을 완료합니다".to_string(),
+            ("zh-Hant", None) => "使用 ChatGPT OAuth 授權，並在瀏覽器中完成登入".to_string(),
+            (_, None) => "使用 ChatGPT OAuth 授权，在浏览器中完成登录".to_string(),
+        },
+        ProviderKind::OpenAI => match i18n::locale() {
+            "en" => "Use an OpenAI API key for model requests".to_string(),
+            "de" => "Einen OpenAI-API-Schlüssel für Modellanfragen verwenden".to_string(),
+            "fr" => "Utiliser une clé API OpenAI pour les requêtes au modèle".to_string(),
+            "ja" => "OpenAI API Key を使ってモデルを呼び出します".to_string(),
+            "ko" => "OpenAI API Key로 모델을 호출합니다".to_string(),
+            "zh-Hant" => "使用 OpenAI API Key 進行模型呼叫".to_string(),
+            _ => "使用 OpenAI API Key 进行模型调用".to_string(),
+        },
+        ProviderKind::Anthropic => match i18n::locale() {
+            "en" => "Use an Anthropic API key for model requests".to_string(),
+            "de" => "Einen Anthropic-API-Schlüssel für Modellanfragen verwenden".to_string(),
+            "fr" => "Utiliser une clé API Anthropic pour les requêtes au modèle".to_string(),
+            "ja" => "Anthropic API Key を使ってモデルを呼び出します".to_string(),
+            "ko" => "Anthropic API Key로 모델을 호출합니다".to_string(),
+            "zh-Hant" => "使用 Anthropic API Key 進行模型呼叫".to_string(),
+            _ => "使用 Anthropic API Key 进行模型调用".to_string(),
+        },
+        ProviderKind::Ollama => match i18n::locale() {
+            "en" => "Use local models through Ollama".to_string(),
+            "de" => "Lokale Modelle über Ollama verwenden".to_string(),
+            "fr" => "Utiliser des modèles locaux via Ollama".to_string(),
+            "ja" => "Ollama 経由でローカルモデルを使います".to_string(),
+            "ko" => "Ollama를 통해 로컬 모델을 사용합니다".to_string(),
+            "zh-Hant" => "透過 Ollama 使用本地模型".to_string(),
+            _ => "通过 Ollama 使用本地模型".to_string(),
+        },
+    }
+}
+
+fn provider_success_title(provider: ProviderKind) -> &'static str {
+    match (i18n::locale(), provider) {
+        ("en", ProviderKind::ChatGpt) => "ChatGPT signed in",
+        ("de", ProviderKind::ChatGpt) => "Bei ChatGPT angemeldet",
+        ("fr", ProviderKind::ChatGpt) => "Connexion ChatGPT réussie",
+        ("ja", ProviderKind::ChatGpt) => "ChatGPT にサインインしました",
+        ("ko", ProviderKind::ChatGpt) => "ChatGPT 로그인 완료",
+        ("zh-Hant", ProviderKind::ChatGpt) => "ChatGPT 登入成功",
+        (_, ProviderKind::ChatGpt) => "ChatGPT 登录成功",
+
+        ("en", ProviderKind::OpenAI) => "OpenAI API configured",
+        ("de", ProviderKind::OpenAI) => "OpenAI API konfiguriert",
+        ("fr", ProviderKind::OpenAI) => "API OpenAI configurée",
+        ("ja", ProviderKind::OpenAI) => "OpenAI API を設定しました",
+        ("ko", ProviderKind::OpenAI) => "OpenAI API 구성 완료",
+        ("zh-Hant", ProviderKind::OpenAI) => "OpenAI API 已設定",
+        (_, ProviderKind::OpenAI) => "OpenAI API 已配置",
+
+        ("en", ProviderKind::Anthropic) => "Anthropic API configured",
+        ("de", ProviderKind::Anthropic) => "Anthropic API konfiguriert",
+        ("fr", ProviderKind::Anthropic) => "API Anthropic configurée",
+        ("ja", ProviderKind::Anthropic) => "Anthropic API を設定しました",
+        ("ko", ProviderKind::Anthropic) => "Anthropic API 구성 완료",
+        ("zh-Hant", ProviderKind::Anthropic) => "Anthropic API 已設定",
+        (_, ProviderKind::Anthropic) => "Anthropic API 已配置",
+
+        ("en", ProviderKind::Ollama) => "Ollama configured",
+        ("de", ProviderKind::Ollama) => "Ollama konfiguriert",
+        ("fr", ProviderKind::Ollama) => "Ollama configuré",
+        ("ja", ProviderKind::Ollama) => "Ollama を設定しました",
+        ("ko", ProviderKind::Ollama) => "Ollama 구성 완료",
+        ("zh-Hant", ProviderKind::Ollama) => "Ollama 已設定",
+        (_, ProviderKind::Ollama) => "Ollama 已配置",
+    }
+}
+
+fn replace_placeholder(template: &str, key: &str, value: &str) -> String {
+    template.replace(&format!("{{{key}}}"), value)
 }
 
 fn logo_elapsed_seconds() -> f32 {
