@@ -183,6 +183,7 @@ dependencies = [
  "clap_complete",
  "deckclip-core",
  "deckclip-protocol",
+ "libc",
  "owo-colors",
  "serde",
  "serde_json",
