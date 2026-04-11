@@ -67,6 +67,15 @@ pub struct ErrorInfo {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventFrame {
+    pub v: u32,
+    pub id: String,
+    pub event: String,
+    #[serde(default)]
+    pub data: Option<serde_json::Value>,
+}
+
 // ─── Command Constants ───
 
 pub mod cmd {
@@ -86,4 +95,24 @@ pub mod cmd {
     pub const LOGIN_OPENAI_CONFIGURE: &str = "login.openai.configure";
     pub const LOGIN_ANTHROPIC_CONFIGURE: &str = "login.anthropic.configure";
     pub const LOGIN_OLLAMA_CONFIGURE: &str = "login.ollama.configure";
+    pub const AI_CHAT_BOOTSTRAP: &str = "ai.chat.bootstrap";
+    pub const AI_CHAT_OPEN: &str = "ai.chat.open";
+    pub const AI_CHAT_SEND: &str = "ai.chat.send";
+    pub const AI_CHAT_APPROVAL_RESPOND: &str = "ai.chat.approval.respond";
+    pub const AI_CHAT_CANCEL: &str = "ai.chat.cancel";
+    pub const AI_CHAT_HISTORY_LIST: &str = "ai.chat.history.list";
+    pub const AI_CHAT_HISTORY_LOAD: &str = "ai.chat.history.load";
+    pub const AI_CHAT_COMPACT: &str = "ai.chat.compact";
+    pub const AI_CHAT_CLOSE: &str = "ai.chat.close";
+}
+
+pub mod event {
+    pub const ASSISTANT_DELTA: &str = "assistant.delta";
+    pub const TOOL_STARTED: &str = "tool.started";
+    pub const TOOL_FINISHED: &str = "tool.finished";
+    pub const APPROVAL_REQUEST: &str = "approval.request";
+    pub const CONVERSATION_UPDATED: &str = "conversation.updated";
+    pub const COMPACTING: &str = "compacting";
+    pub const DONE: &str = "done";
+    pub const ERROR: &str = "error";
 }

@@ -51,6 +51,7 @@ fn help_lists_login_subcommand() {
 
     assert!(output.status.success());
     assert!(stdout(&output).contains("login"));
+    assert!(stdout(&output).contains("chat"));
 }
 
 #[test]

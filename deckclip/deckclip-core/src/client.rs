@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use deckclip_protocol::message::{AuthRequest, AuthResponse, Request, Response};
+use deckclip_protocol::message::{AuthRequest, AuthResponse, EventFrame, Request, Response};
 use deckclip_protocol::version::PROTOCOL_VERSION;
 use serde_json::{json, Value};
 use tokio::time::timeout;
@@ -18,6 +18,11 @@ pub struct DeckClient {
     transport: Option<Transport>,
     session_token: Option<String>,
     session_expires_at: u64,
+}
+
+pub enum ChatStreamFrame {
+    Event(EventFrame),
+    Response(Response),
 }
 
 impl DeckClient {
@@ -331,5 +336,137 @@ impl DeckClient {
             0,
         )
         .await
+    }
+
+    pub async fn chat_bootstrap(&mut self) -> Result<Response, DeckError> {
+        self.execute(deckclip_protocol::cmd::AI_CHAT_BOOTSTRAP, json!({}), 0)
+            .await
+    }
+
+    pub async fn chat_open(
+        &mut self,
+        session_id: Option<&str>,
+        conversation_id: Option<&str>,
+        new_conversation: bool,
+    ) -> Result<Response, DeckError> {
+        let mut args = json!({});
+        if let Some(session_id) = session_id {
+            args["sessionId"] = json!(session_id);
+        }
+        if let Some(conversation_id) = conversation_id {
+            args["conversationId"] = json!(conversation_id);
+        }
+        if new_conversation {
+            args["new"] = json!(true);
+        }
+
+        self.execute(deckclip_protocol::cmd::AI_CHAT_OPEN, args, 0)
+            .await
+    }
+
+    pub async fn chat_send(&mut self, session_id: &str, text: &str) -> Result<Response, DeckError> {
+        self.execute(
+            deckclip_protocol::cmd::AI_CHAT_SEND,
+            json!({
+                "sessionId": session_id,
+                "text": text,
+            }),
+            0,
+        )
+        .await
+    }
+
+    pub async fn chat_approval_respond(
+        &mut self,
+        session_id: &str,
+        call_id: &str,
+        approved: bool,
+    ) -> Result<Response, DeckError> {
+        self.execute(
+            deckclip_protocol::cmd::AI_CHAT_APPROVAL_RESPOND,
+            json!({
+                "sessionId": session_id,
+                "callId": call_id,
+                "approved": approved,
+            }),
+            0,
+        )
+        .await
+    }
+
+    pub async fn chat_cancel(&mut self, session_id: &str) -> Result<Response, DeckError> {
+        self.execute(
+            deckclip_protocol::cmd::AI_CHAT_CANCEL,
+            json!({ "sessionId": session_id }),
+            0,
+        )
+        .await
+    }
+
+    pub async fn chat_history_list(
+        &mut self,
+        query: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Response, DeckError> {
+        let mut args = json!({});
+        if let Some(query) = query {
+            args["query"] = json!(query);
+        }
+        if let Some(limit) = limit {
+            args["limit"] = json!(limit);
+        }
+        self.execute(deckclip_protocol::cmd::AI_CHAT_HISTORY_LIST, args, 0)
+            .await
+    }
+
+    pub async fn chat_history_load(
+        &mut self,
+        session_id: &str,
+        conversation_id: &str,
+    ) -> Result<Response, DeckError> {
+        self.execute(
+            deckclip_protocol::cmd::AI_CHAT_HISTORY_LOAD,
+            json!({
+                "sessionId": session_id,
+                "conversationId": conversation_id,
+            }),
+            0,
+        )
+        .await
+    }
+
+    pub async fn chat_compact(&mut self, session_id: &str) -> Result<Response, DeckError> {
+        self.execute(
+            deckclip_protocol::cmd::AI_CHAT_COMPACT,
+            json!({ "sessionId": session_id }),
+            0,
+        )
+        .await
+    }
+
+    pub async fn chat_close(&mut self, session_id: &str) -> Result<Response, DeckError> {
+        self.execute(
+            deckclip_protocol::cmd::AI_CHAT_CLOSE,
+            json!({ "sessionId": session_id }),
+            0,
+        )
+        .await
+    }
+
+    pub async fn recv_chat_frame(&mut self) -> Result<ChatStreamFrame, DeckError> {
+        self.ensure_connected().await?;
+
+        let transport = self.transport.as_mut().ok_or(DeckError::NotRunning)?;
+        let value: Value = transport.recv().await?;
+
+        if value.get("event").is_some() {
+            let event = serde_json::from_value::<EventFrame>(value)
+                .map_err(|error| DeckError::Protocol(error.to_string()))?;
+            return Ok(ChatStreamFrame::Event(event));
+        }
+
+        let response = serde_json::from_value::<Response>(value)
+            .map_err(|error| DeckError::Protocol(error.to_string()))?;
+        Ok(ChatStreamFrame::Response(response))
     }
 }

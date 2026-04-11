@@ -17,7 +17,7 @@ pub struct Cli {
     pub json: bool,
 
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -43,6 +43,9 @@ pub enum Commands {
 
     /// AI 功能 (运行/搜索/转换)
     Ai(AiCommand),
+
+    /// 交互式 AI 聊天
+    Chat,
 
     /// 配置 AI 登录与模型提供商
     Login,

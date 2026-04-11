@@ -22,3 +22,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 libc = "0.2"
 crossterm = "0.28"
 textwrap = "0.16"
+ratatui = "0.29"

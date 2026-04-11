@@ -5,6 +5,7 @@ mod output;
 
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches};
+use std::io::IsTerminal;
 use tracing_subscriber::EnvFilter;
 
 use cli::{Cli, Commands};
@@ -65,7 +66,19 @@ async fn main() {
     let config = Config::default();
     let mut client = DeckClient::new(config);
 
-    let result = run(cli.command, &mut client, output).await;
+    let command = match cli.command {
+        Some(command) => command,
+        None if !cli.json && std::io::stdin().is_terminal() && std::io::stdout().is_terminal() => {
+            Commands::Chat
+        }
+        None => {
+            let _ = localize_command(Cli::command()).print_help();
+            println!();
+            return;
+        }
+    };
+
+    let result = run(command, &mut client, output).await;
 
     if let Err(e) = result {
         output.print_error(&e);
@@ -130,6 +143,7 @@ fn localize_command(cmd: clap::Command) -> clap::Command {
             s.about(t("cmd.panel"))
                 .mut_subcommand("toggle", |ss| ss.about(t("cmd.panel.toggle")))
         })
+        .mut_subcommand("chat", |s| s.about(t("cmd.chat")))
         .mut_subcommand("login", |s| s.about(t("cmd.login")))
         .mut_subcommand("ai", |s| {
             s.about(t("cmd.ai"))
@@ -168,6 +182,7 @@ async fn run(command: Commands, client: &mut DeckClient, output: OutputMode) -> 
         Commands::Paste(args) => commands::paste::run(client, output, args).await,
         Commands::Panel { action } => commands::panel::run(client, output, action).await,
         Commands::Ai(sub) => commands::ai::run(client, output, sub).await,
+        Commands::Chat => commands::chat::run(output).await,
         Commands::Login => commands::login::run(output).await,
         Commands::Completion { shell } => {
             commands::completion::run(shell);

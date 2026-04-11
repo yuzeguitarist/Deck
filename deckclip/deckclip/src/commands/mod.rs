@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod chat;
 pub mod completion;
 pub mod health;
 pub mod login;
