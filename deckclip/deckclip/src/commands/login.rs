@@ -661,6 +661,10 @@ impl LoginApp {
 
 struct TerminalGuard {
     stdout: Stdout,
+    last_content_signature: Option<String>,
+    last_content_start_row: u16,
+    last_content_end_row: u16,
+    last_logo_rows: u16,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -698,16 +702,18 @@ impl RenderLayout {
 }
 
 impl<'a> ScreenWriter<'a> {
-    fn new(stdout: &'a mut Stdout, layout: RenderLayout) -> Self {
+    fn new(stdout: &'a mut Stdout, layout: RenderLayout, start_row: u16) -> Self {
         Self {
             stdout,
             layout,
-            row: 0,
+            row: start_row,
         }
     }
 
-    fn blank_line(&mut self) {
+    fn blank_line(&mut self) -> Result<()> {
+        self.clear_current_line()?;
         self.row = self.row.saturating_add(1);
+        Ok(())
     }
 
     fn write_logo(&mut self) -> Result<()> {
@@ -716,6 +722,7 @@ impl<'a> ScreenWriter<'a> {
             if self.row >= self.layout.terminal_height {
                 break;
             }
+            self.clear_current_line()?;
             queue!(self.stdout, MoveTo(0, self.row))?;
 
             for (column, cell) in line.iter().enumerate() {
@@ -723,11 +730,6 @@ impl<'a> ScreenWriter<'a> {
                 match cell.fg {
                     Some(base) if cell.ch != ' ' => {
                         let color = shimmer_color(base, intensity);
-                        let attribute = if intensity > 0.62 {
-                            Attribute::Bold
-                        } else {
-                            Attribute::NormalIntensity
-                        };
                         queue!(
                             self.stdout,
                             SetForegroundColor(Color::Rgb {
@@ -735,7 +737,7 @@ impl<'a> ScreenWriter<'a> {
                                 g: color.g,
                                 b: color.b,
                             }),
-                            SetAttribute(attribute),
+                            SetAttribute(Attribute::NormalIntensity),
                             Print(cell.ch)
                         )?;
                     }
@@ -765,9 +767,23 @@ impl<'a> ScreenWriter<'a> {
             return Ok(());
         }
 
+        self.clear_current_line()?;
         queue!(self.stdout, MoveTo(column, self.row))?;
         write!(self.stdout, "{line}")?;
         self.row = self.row.saturating_add(1);
+        Ok(())
+    }
+
+    fn clear_current_line(&mut self) -> Result<()> {
+        if self.row >= self.layout.terminal_height {
+            return Ok(());
+        }
+
+        queue!(
+            self.stdout,
+            MoveTo(0, self.row),
+            Clear(ClearType::CurrentLine)
+        )?;
         Ok(())
     }
 
@@ -798,38 +814,82 @@ impl TerminalGuard {
         enable_raw_mode().context("无法进入终端 raw mode")?;
         let mut stdout = stdout();
         execute!(stdout, EnterAlternateScreen, Hide).context("无法进入终端登录界面")?;
-        Ok(Self { stdout })
+        Ok(Self {
+            stdout,
+            last_content_signature: None,
+            last_content_start_row: 0,
+            last_content_end_row: 0,
+            last_logo_rows: 0,
+        })
     }
 
     fn render(&mut self, app: &LoginApp) -> Result<()> {
         let layout = RenderLayout::detect();
-        queue!(self.stdout, MoveTo(0, 0), Clear(ClearType::All))?;
+        let logo_rows = if layout.show_logo {
+            parsed_logo().len() as u16 + 1
+        } else {
+            0
+        };
 
-        let mut screen = ScreenWriter::new(&mut self.stdout, layout);
-
+        let mut logo_screen = ScreenWriter::new(&mut self.stdout, layout, 0);
         if layout.show_logo {
-            screen.write_logo()?;
-            screen.blank_line();
+            logo_screen.write_logo()?;
+            logo_screen.blank_line()?;
         }
+        for row in logo_rows
+            ..self
+                .last_logo_rows
+                .max(logo_rows)
+                .min(layout.terminal_height)
+        {
+            queue!(self.stdout, MoveTo(0, row), Clear(ClearType::CurrentLine))?;
+        }
+        self.last_logo_rows = logo_rows;
 
-        match &app.screen {
-            Screen::Menu { selected, info } => {
-                render_menu(&mut screen, &app.status, *selected, info.as_deref())?
+        let content_signature = format!(
+            "{}|{}|{:?}|{:?}",
+            layout.content_width, layout.show_logo, app.status, app.screen
+        );
+        let content_changed = self
+            .last_content_signature
+            .as_ref()
+            .map(|previous| previous != &content_signature)
+            .unwrap_or(true)
+            || self.last_content_start_row != logo_rows;
+
+        if content_changed {
+            let mut screen = ScreenWriter::new(&mut self.stdout, layout, logo_rows);
+
+            match &app.screen {
+                Screen::Menu { selected, info } => {
+                    render_menu(&mut screen, &app.status, *selected, info.as_deref())?
+                }
+                Screen::ConfirmOverwrite {
+                    provider,
+                    yes_selected,
+                } => render_confirm(&mut screen, *provider, *yes_selected)?,
+                Screen::Form(form) => render_form(&mut screen, form)?,
+                Screen::ChatGptWaiting {
+                    auth_url,
+                    browser_opened,
+                } => render_chatgpt_waiting(&mut screen, auth_url.as_deref(), *browser_opened)?,
+                Screen::Result {
+                    success,
+                    title,
+                    detail,
+                } => render_result(&mut screen, *success, title, detail.as_deref())?,
             }
-            Screen::ConfirmOverwrite {
-                provider,
-                yes_selected,
-            } => render_confirm(&mut screen, *provider, *yes_selected)?,
-            Screen::Form(form) => render_form(&mut screen, form)?,
-            Screen::ChatGptWaiting {
-                auth_url,
-                browser_opened,
-            } => render_chatgpt_waiting(&mut screen, auth_url.as_deref(), *browser_opened)?,
-            Screen::Result {
-                success,
-                title,
-                detail,
-            } => render_result(&mut screen, *success, title, detail.as_deref())?,
+
+            let content_end_row = screen.row;
+            drop(screen);
+
+            for row in content_end_row..self.last_content_end_row.min(layout.terminal_height) {
+                queue!(self.stdout, MoveTo(0, row), Clear(ClearType::CurrentLine))?;
+            }
+
+            self.last_content_signature = Some(content_signature);
+            self.last_content_start_row = logo_rows;
+            self.last_content_end_row = content_end_row;
         }
 
         self.stdout.flush()?;
@@ -852,7 +912,7 @@ fn render_menu(
 ) -> Result<()> {
     screen.write_wrapped("", "", "配置 Deck AI 提供商", LineStyle::Bold)?;
     screen.write_wrapped("", "", "为 Deck 选择并配置 AI 提供商。", LineStyle::Plain)?;
-    screen.blank_line();
+    screen.blank_line()?;
 
     for (index, provider) in ProviderKind::ALL.iter().enumerate() {
         let provider_status = status.provider(*provider);
@@ -885,7 +945,7 @@ fn render_menu(
             &provider.description(&provider_status),
             description_style,
         )?;
-        screen.blank_line();
+        screen.blank_line()?;
     }
 
     screen.write_wrapped(
@@ -895,7 +955,7 @@ fn render_menu(
         LineStyle::Dim,
     )?;
     if let Some(info) = info {
-        screen.blank_line();
+        screen.blank_line()?;
         screen.write_wrapped("", "", info, LineStyle::Cyan)?;
     }
     Ok(())
@@ -916,7 +976,7 @@ fn render_confirm(
         ),
         LineStyle::Plain,
     )?;
-    screen.blank_line();
+    screen.blank_line()?;
 
     let no_button = if yes_selected {
         "[ No ]".to_string()
@@ -930,7 +990,7 @@ fn render_confirm(
     };
 
     screen.write_padded_line(&format!("  {no_button}  {yes_button}"))?;
-    screen.blank_line();
+    screen.blank_line()?;
     screen.write_wrapped(
         "",
         "",
@@ -948,7 +1008,7 @@ fn render_form(screen: &mut ScreenWriter<'_>, form: &FormState) -> Result<()> {
         "填写下列信息后，Deck 会立即切换到对应提供商。",
         LineStyle::Plain,
     )?;
-    screen.blank_line();
+    screen.blank_line()?;
 
     for (index, field) in form.fields.iter().enumerate() {
         let selected = index == form.focus;
@@ -983,7 +1043,7 @@ fn render_form(screen: &mut ScreenWriter<'_>, form: &FormState) -> Result<()> {
                 LineStyle::Plain
             },
         )?;
-        screen.blank_line();
+        screen.blank_line()?;
     }
 
     screen.write_wrapped(
@@ -993,7 +1053,7 @@ fn render_form(screen: &mut ScreenWriter<'_>, form: &FormState) -> Result<()> {
         LineStyle::Dim,
     )?;
     if let Some(error) = &form.error {
-        screen.blank_line();
+        screen.blank_line()?;
         screen.write_wrapped("", "", error, LineStyle::Red)?;
     }
     Ok(())
@@ -1018,18 +1078,18 @@ fn render_chatgpt_waiting(
         LineStyle::Plain,
     )?;
     if let Some(auth_url) = auth_url.filter(|value| !value.trim().is_empty()) {
-        screen.blank_line();
+        screen.blank_line()?;
         screen.write_wrapped(
             "  ",
             "  ",
             "If the link doesn't open automatically, open the following link to authenticate:",
             LineStyle::Plain,
         )?;
-        screen.blank_line();
+        screen.blank_line()?;
         screen.write_wrapped("  ", "  ", auth_url, LineStyle::CyanUnderline)?;
     }
     if !browser_opened {
-        screen.blank_line();
+        screen.blank_line()?;
         screen.write_wrapped(
             "  ",
             "  ",
@@ -1037,7 +1097,7 @@ fn render_chatgpt_waiting(
             LineStyle::Dim,
         )?;
     }
-    screen.blank_line();
+    screen.blank_line()?;
     screen.write_wrapped("", "", "Press ESC to cancel and exit", LineStyle::Dim)?;
     Ok(())
 }
@@ -1061,10 +1121,10 @@ fn render_result(
         },
     )?;
     if let Some(detail) = detail.filter(|text| !text.trim().is_empty()) {
-        screen.blank_line();
+        screen.blank_line()?;
         screen.write_wrapped("", "", detail, LineStyle::Plain)?;
     }
-    screen.blank_line();
+    screen.blank_line()?;
     screen.write_wrapped(
         "",
         "",
