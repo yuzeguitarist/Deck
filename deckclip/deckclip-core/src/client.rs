@@ -406,11 +406,15 @@ impl DeckClient {
     pub async fn chat_history_list(
         &mut self,
         query: Option<&str>,
+        cursor: Option<&str>,
         limit: Option<u32>,
     ) -> Result<Response, DeckError> {
         let mut args = json!({});
         if let Some(query) = query {
             args["query"] = json!(query);
+        }
+        if let Some(cursor) = cursor {
+            args["cursor"] = json!(cursor);
         }
         if let Some(limit) = limit {
             args["limit"] = json!(limit);
