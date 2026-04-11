@@ -8,11 +8,13 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use crossterm::execute;
 use crossterm::queue;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen,
+    LeaveAlternateScreen,
 };
 use deckclip_core::{Config, DeckClient};
 use owo_colors::OwoColorize;
 use serde::Deserialize;
+use textwrap::Options;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use crate::output::OutputMode;
@@ -595,6 +597,102 @@ struct TerminalGuard {
     stdout: Stdout,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RenderLayout {
+    terminal_height: u16,
+    content_width: usize,
+    left_pad: u16,
+    show_logo: bool,
+}
+
+struct ScreenWriter<'a> {
+    stdout: &'a mut Stdout,
+    layout: RenderLayout,
+    row: u16,
+}
+
+impl RenderLayout {
+    fn detect() -> Self {
+        let (width, height) = size().unwrap_or((80, 24));
+        let terminal_width = width.max(1) as usize;
+        let terminal_height = height.max(1);
+
+        let content_width = terminal_width.saturating_sub(1).max(1);
+        let left_pad = 0;
+
+        let show_logo = terminal_width >= 50;
+
+        Self {
+            terminal_height,
+            content_width,
+            left_pad,
+            show_logo,
+        }
+    }
+}
+
+impl<'a> ScreenWriter<'a> {
+    fn new(stdout: &'a mut Stdout, layout: RenderLayout) -> Self {
+        Self {
+            stdout,
+            layout,
+            row: 0,
+        }
+    }
+
+    fn blank_line(&mut self) {
+        self.row = self.row.saturating_add(1);
+    }
+
+    fn write_logo(&mut self) -> Result<()> {
+        for line in LOGO.lines() {
+            if self.row >= self.layout.terminal_height {
+                break;
+            }
+            queue!(self.stdout, MoveTo(0, self.row))?;
+            write!(self.stdout, "{line}")?;
+            self.row = self.row.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    fn write_padded_line(&mut self, line: &str) -> Result<()> {
+        self.write_line(self.layout.left_pad, line)
+    }
+
+    fn write_line(&mut self, column: u16, line: &str) -> Result<()> {
+        if self.row >= self.layout.terminal_height {
+            return Ok(());
+        }
+
+        queue!(self.stdout, MoveTo(column, self.row))?;
+        write!(self.stdout, "{line}")?;
+        self.row = self.row.saturating_add(1);
+        Ok(())
+    }
+
+    fn write_wrapped(
+        &mut self,
+        initial_indent: &str,
+        subsequent_indent: &str,
+        text: &str,
+        style: LineStyle,
+    ) -> Result<()> {
+        let options = Options::new(self.layout.content_width)
+            .initial_indent(initial_indent)
+            .subsequent_indent(subsequent_indent)
+            .break_words(true)
+            .word_splitter(textwrap::WordSplitter::NoHyphenation);
+
+        for line in textwrap::wrap(text, &options) {
+            let rendered = apply_line_style(style, line.as_ref());
+            self.write_padded_line(&rendered)?;
+        }
+
+        Ok(())
+    }
+}
+
 impl TerminalGuard {
     fn enter() -> Result<Self> {
         enable_raw_mode().context("无法进入终端 raw mode")?;
@@ -604,25 +702,31 @@ impl TerminalGuard {
     }
 
     fn render(&mut self, app: &LoginApp) -> Result<()> {
+        let layout = RenderLayout::detect();
         queue!(self.stdout, MoveTo(0, 0), Clear(ClearType::All))?;
-        write!(self.stdout, "{LOGO}")?;
-        writeln!(self.stdout)?;
+
+        let mut screen = ScreenWriter::new(&mut self.stdout, layout);
+
+        if layout.show_logo {
+            screen.write_logo()?;
+            screen.blank_line();
+        }
 
         match &app.screen {
             Screen::Menu { selected, info } => {
-                render_menu(&mut self.stdout, &app.status, *selected, info.as_deref())?
+                render_menu(&mut screen, &app.status, *selected, info.as_deref())?
             }
             Screen::ConfirmOverwrite {
                 provider,
                 yes_selected,
-            } => render_confirm(&mut self.stdout, *provider, *yes_selected)?,
-            Screen::Form(form) => render_form(&mut self.stdout, form)?,
-            Screen::ChatGptWaiting => render_chatgpt_waiting(&mut self.stdout)?,
+            } => render_confirm(&mut screen, *provider, *yes_selected)?,
+            Screen::Form(form) => render_form(&mut screen, form)?,
+            Screen::ChatGptWaiting => render_chatgpt_waiting(&mut screen)?,
             Screen::Result {
                 success,
                 title,
                 detail,
-            } => render_result(&mut self.stdout, *success, title, detail.as_deref())?,
+            } => render_result(&mut screen, *success, title, detail.as_deref())?,
         }
 
         self.stdout.flush()?;
@@ -638,57 +742,83 @@ impl Drop for TerminalGuard {
 }
 
 fn render_menu(
-    stdout: &mut Stdout,
+    screen: &mut ScreenWriter<'_>,
     status: &LoginStatusData,
     selected: usize,
     info: Option<&str>,
 ) -> Result<()> {
-    writeln!(stdout, "{}", "DeckClip Login".bold())?;
-    writeln!(stdout, "为 Deck 选择或重新配置 AI 提供商。")?;
-    writeln!(stdout)?;
+    screen.write_wrapped("", "", "DeckClip Login", LineStyle::Bold)?;
+    screen.write_wrapped(
+        "",
+        "",
+        "为 Deck 选择或重新配置 AI 提供商。",
+        LineStyle::Plain,
+    )?;
+    screen.blank_line();
 
     for (index, provider) in ProviderKind::ALL.iter().enumerate() {
         let provider_status = status.provider(*provider);
-        let prefix = if index == selected { ">" } else { " " };
-        let title = format!("{prefix} {}. {}", index + 1, provider.title());
-        if index == selected {
-            writeln!(stdout, "{}", title.cyan())?;
-            writeln!(
-                stdout,
-                "    {}",
-                provider.description(&provider_status).dimmed().cyan()
-            )?;
+        let title_prefix = if index == selected {
+            format!("> {}. ", index + 1)
         } else {
-            writeln!(stdout, "{title}")?;
-            writeln!(
-                stdout,
-                "    {}",
-                provider.description(&provider_status).dimmed()
-            )?;
-        }
-        writeln!(stdout)?;
+            format!("  {}. ", index + 1)
+        };
+        let description_prefix = "     ";
+        let title_style = if index == selected {
+            LineStyle::Cyan
+        } else {
+            LineStyle::Plain
+        };
+        let description_style = if index == selected {
+            LineStyle::CyanDim
+        } else {
+            LineStyle::Dim
+        };
+
+        screen.write_wrapped(
+            &title_prefix,
+            description_prefix,
+            provider.title(),
+            title_style,
+        )?;
+        screen.write_wrapped(
+            description_prefix,
+            description_prefix,
+            &provider.description(&provider_status),
+            description_style,
+        )?;
+        screen.blank_line();
     }
 
-    writeln!(
-        stdout,
-        "{}",
-        "Press Enter to continue, or ESC to exit".dimmed()
+    screen.write_wrapped(
+        "",
+        "",
+        "Press Enter to continue, or ESC to exit",
+        LineStyle::Dim,
     )?;
     if let Some(info) = info {
-        writeln!(stdout)?;
-        writeln!(stdout, "{}", info.cyan())?;
+        screen.blank_line();
+        screen.write_wrapped("", "", info, LineStyle::Cyan)?;
     }
     Ok(())
 }
 
-fn render_confirm(stdout: &mut Stdout, provider: ProviderKind, yes_selected: bool) -> Result<()> {
-    writeln!(stdout, "{}", "检测到已有配置，请问是否要继续？".bold())?;
-    writeln!(
-        stdout,
-        "继续后会清空当前 {} 配置，并重新开始设置。",
-        provider.title()
+fn render_confirm(
+    screen: &mut ScreenWriter<'_>,
+    provider: ProviderKind,
+    yes_selected: bool,
+) -> Result<()> {
+    screen.write_wrapped("", "", "检测到已有配置，请问是否要继续？", LineStyle::Bold)?;
+    screen.write_wrapped(
+        "",
+        "",
+        &format!(
+            "继续后会清空当前 {} 配置，并重新开始设置。",
+            provider.title()
+        ),
+        LineStyle::Plain,
     )?;
-    writeln!(stdout)?;
+    screen.blank_line();
 
     let no_button = if yes_selected {
         "[ No ]".to_string()
@@ -701,28 +831,30 @@ fn render_confirm(stdout: &mut Stdout, provider: ProviderKind, yes_selected: boo
         "[ Yes ]".to_string()
     };
 
-    writeln!(stdout, "  {no_button}  {yes_button}")?;
-    writeln!(stdout)?;
-    writeln!(
-        stdout,
-        "{}",
-        "Press Enter to continue, or ESC to exit".dimmed()
+    screen.write_padded_line(&format!("  {no_button}  {yes_button}"))?;
+    screen.blank_line();
+    screen.write_wrapped(
+        "",
+        "",
+        "Press Enter to continue, or ESC to exit",
+        LineStyle::Dim,
     )?;
     Ok(())
 }
 
-fn render_form(stdout: &mut Stdout, form: &FormState) -> Result<()> {
-    writeln!(stdout, "{}", form.provider.title().bold())?;
-    writeln!(stdout, "填写下列信息后，Deck 会立即切换到对应提供商。")?;
-    writeln!(stdout)?;
+fn render_form(screen: &mut ScreenWriter<'_>, form: &FormState) -> Result<()> {
+    screen.write_wrapped("", "", form.provider.title(), LineStyle::Bold)?;
+    screen.write_wrapped(
+        "",
+        "",
+        "填写下列信息后，Deck 会立即切换到对应提供商。",
+        LineStyle::Plain,
+    )?;
+    screen.blank_line();
 
     for (index, field) in form.fields.iter().enumerate() {
         let selected = index == form.focus;
-        let label = if selected {
-            format!("> {}", field.label).cyan().to_string()
-        } else {
-            format!("  {}", field.label)
-        };
+        let label_prefix = if selected { "> " } else { "  " };
         let value = if field.value.is_empty() {
             format!("<{}>", field.placeholder).dimmed().to_string()
         } else if field.secret {
@@ -730,62 +862,114 @@ fn render_form(stdout: &mut Stdout, form: &FormState) -> Result<()> {
         } else {
             field.value.clone()
         };
-        if selected {
-            writeln!(stdout, "{label}")?;
-            writeln!(stdout, "    {}", value.cyan())?;
-        } else {
-            writeln!(stdout, "{label}")?;
-            writeln!(stdout, "    {value}")?;
-        }
-        writeln!(stdout)?;
+
+        screen.write_wrapped(
+            label_prefix,
+            "  ",
+            field.label,
+            if selected {
+                LineStyle::Cyan
+            } else {
+                LineStyle::Plain
+            },
+        )?;
+        screen.write_wrapped(
+            "    ",
+            "    ",
+            &value,
+            if selected {
+                LineStyle::Cyan
+            } else if field.value.is_empty() {
+                LineStyle::Dim
+            } else {
+                LineStyle::Plain
+            },
+        )?;
+        screen.blank_line();
     }
 
-    writeln!(
-        stdout,
-        "{}",
-        "Press Tab to switch fields, Enter to save, or ESC to exit".dimmed()
+    screen.write_wrapped(
+        "",
+        "",
+        "Press Tab to switch fields, Enter to save, or ESC to exit",
+        LineStyle::Dim,
     )?;
     if let Some(error) = &form.error {
-        writeln!(stdout)?;
-        writeln!(stdout, "{}", error.red())?;
+        screen.blank_line();
+        screen.write_wrapped("", "", error, LineStyle::Red)?;
     }
     Ok(())
 }
 
-fn render_chatgpt_waiting(stdout: &mut Stdout) -> Result<()> {
-    writeln!(stdout, "{}", "Sign in with ChatGPT".bold())?;
-    writeln!(stdout, "正在等待浏览器完成授权。")?;
-    writeln!(stdout, "完成后 Deck 会自动切换到 ChatGPT。")?;
-    writeln!(stdout)?;
-    writeln!(stdout, "{}", "Press ESC to cancel and exit".dimmed())?;
+fn render_chatgpt_waiting(screen: &mut ScreenWriter<'_>) -> Result<()> {
+    screen.write_wrapped("", "", "Sign in with ChatGPT", LineStyle::Bold)?;
+    screen.write_wrapped("", "", "正在等待浏览器完成授权。", LineStyle::Plain)?;
+    screen.write_wrapped(
+        "",
+        "",
+        "完成后 Deck 会自动切换到 ChatGPT。",
+        LineStyle::Plain,
+    )?;
+    screen.blank_line();
+    screen.write_wrapped("", "", "Press ESC to cancel and exit", LineStyle::Dim)?;
     Ok(())
 }
 
 fn render_result(
-    stdout: &mut Stdout,
+    screen: &mut ScreenWriter<'_>,
     success: bool,
     title: &str,
     detail: Option<&str>,
 ) -> Result<()> {
     let icon = if success { "✓" } else { "!" };
-    let title = if success {
-        title.green().bold().to_string()
-    } else {
-        title.red().bold().to_string()
-    };
 
-    writeln!(stdout, "{icon} {title}")?;
+    screen.write_wrapped(
+        "",
+        "",
+        &format!("{icon} {title}"),
+        if success {
+            LineStyle::GreenBold
+        } else {
+            LineStyle::RedBold
+        },
+    )?;
     if let Some(detail) = detail.filter(|text| !text.trim().is_empty()) {
-        writeln!(stdout)?;
-        writeln!(stdout, "{detail}")?;
+        screen.blank_line();
+        screen.write_wrapped("", "", detail, LineStyle::Plain)?;
     }
-    writeln!(stdout)?;
-    writeln!(
-        stdout,
-        "{}",
-        "Press Enter to finish, or ESC to exit".dimmed()
+    screen.blank_line();
+    screen.write_wrapped(
+        "",
+        "",
+        "Press Enter to continue, or ESC to exit",
+        LineStyle::Dim,
     )?;
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum LineStyle {
+    Plain,
+    Bold,
+    Dim,
+    Cyan,
+    CyanDim,
+    Red,
+    RedBold,
+    GreenBold,
+}
+
+fn apply_line_style(style: LineStyle, line: &str) -> String {
+    match style {
+        LineStyle::Plain => line.to_string(),
+        LineStyle::Bold => format!("{}", line.bold()),
+        LineStyle::Dim => format!("{}", line.dimmed()),
+        LineStyle::Cyan => format!("{}", line.cyan()),
+        LineStyle::CyanDim => format!("{}", line.cyan().dimmed()),
+        LineStyle::Red => format!("{}", line.red()),
+        LineStyle::RedBold => format!("{}", line.red().bold()),
+        LineStyle::GreenBold => format!("{}", line.green().bold()),
+    }
 }
 
 pub async fn run(output: OutputMode) -> Result<()> {
