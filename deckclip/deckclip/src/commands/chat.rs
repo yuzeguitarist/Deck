@@ -249,6 +249,7 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
 
 const THINKING_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const HISTORY_PAGE_SIZE: u32 = 24;
+const MAX_INPUT_VISIBLE_LINES: usize = 6;
 
 fn chat_text(key: &str) -> String {
     i18n::t(key)
@@ -604,6 +605,30 @@ impl ChatApp {
 
     fn move_cursor_end(&mut self) {
         self.input_cursor = char_count(&self.input);
+        self.clear_quit_hint();
+    }
+
+    fn is_multiline_input(&self) -> bool {
+        self.input.contains('\n')
+    }
+
+    fn move_cursor_up_line(&mut self) {
+        self.input_cursor = move_cursor_vertical(&self.input, self.input_cursor, -1);
+        self.clear_quit_hint();
+    }
+
+    fn move_cursor_down_line(&mut self) {
+        self.input_cursor = move_cursor_vertical(&self.input, self.input_cursor, 1);
+        self.clear_quit_hint();
+    }
+
+    fn clear_current_line(&mut self) {
+        let (start, end) = current_line_bounds(&self.input, self.input_cursor);
+        let byte_start = byte_index_from_char(&self.input, start);
+        let byte_end = byte_index_from_char(&self.input, end);
+        self.input.replace_range(byte_start..byte_end, "");
+        self.input_cursor = start;
+        self.refresh_slash_selection();
         self.clear_quit_hint();
     }
 
@@ -1013,6 +1038,13 @@ fn handle_key_event(
     }
 
     match key.code {
+        KeyCode::Enter
+            if key.modifiers.contains(KeyModifiers::ALT)
+                || key.modifiers.contains(KeyModifiers::SHIFT)
+                || key.modifiers.contains(KeyModifiers::SUPER) =>
+        {
+            app.insert_text("\n");
+        }
         KeyCode::Esc => {
             if app.slash_query().is_some() {
                 app.clear_input();
@@ -1045,10 +1077,18 @@ fn handle_key_event(
             app.scroll_down(8);
         }
         KeyCode::Up => {
-            app.scroll_up(3);
+            if app.is_multiline_input() {
+                app.move_cursor_up_line();
+            } else {
+                app.scroll_up(3);
+            }
         }
         KeyCode::Down => {
-            app.scroll_down(3);
+            if app.is_multiline_input() {
+                app.move_cursor_down_line();
+            } else {
+                app.scroll_down(3);
+            }
         }
         KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.auto_scroll = false;
@@ -1056,9 +1096,17 @@ fn handle_key_event(
         }
         KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => app.follow_output(),
         KeyCode::Backspace => {
+            if key.modifiers.contains(KeyModifiers::SUPER) {
+                app.clear_current_line();
+                return;
+            }
             app.backspace();
         }
         KeyCode::Delete => {
+            if key.modifiers.contains(KeyModifiers::SUPER) {
+                app.clear_current_line();
+                return;
+            }
             app.delete_forward();
         }
         KeyCode::Left => {
@@ -1643,12 +1691,13 @@ fn response_data<T: DeserializeOwned>(response: deckclip_protocol::Response) -> 
 
 fn render(frame: &mut Frame<'_>, app: &mut ChatApp) {
     let area = frame.area();
+    let input_height = input_panel_height(app, area.width);
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(4),
             Constraint::Min(8),
-            Constraint::Length(3),
+            Constraint::Length(input_height),
             Constraint::Length(1),
         ])
         .split(area);
@@ -1730,9 +1779,27 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut ChatApp) {
         chat_text("chat.body.title.reviewing")
     };
     let block = Block::default().title(title).borders(Borders::ALL);
+    frame.render_widget(block.clone(), area);
     let inner = block.inner(area);
-    let lines = transcript_lines(app, inner.width.saturating_sub(1) as usize);
-    let max_scroll = lines.len().saturating_sub(inner.height as usize);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let chunks = if inner.width > 1 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(inner)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1)])
+            .split(inner)
+    };
+
+    let content_area = chunks[0];
+    let lines = transcript_lines(app, content_area.width as usize);
+    let max_scroll = lines.len().saturating_sub(content_area.height as usize);
     if app.auto_scroll {
         app.scroll = max_scroll;
     } else if app.scroll > max_scroll {
@@ -1743,10 +1810,21 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut ChatApp) {
         app.auto_scroll = true;
     }
 
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .scroll((app.scroll as u16, 0));
-    frame.render_widget(paragraph, area);
+    let total_lines = lines.len();
+    let paragraph = Paragraph::new(lines).scroll((app.scroll as u16, 0));
+    frame.render_widget(paragraph, content_area);
+
+    if chunks.len() > 1 {
+        render_scrollbar(
+            frame,
+            chunks[1],
+            total_lines,
+            content_area.height as usize,
+            app.scroll,
+            Color::DarkGray,
+            Color::Cyan,
+        );
+    }
 }
 
 fn render_input(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
@@ -1756,11 +1834,35 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
         chat_text("chat.input.title.prompt")
     };
     let block = Block::default().title(title).borders(Borders::ALL);
+    frame.render_widget(block.clone(), area);
     let inner = block.inner(area);
-    let (visible_input, cursor_offset) = visible_input(
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let sections = if inner.width > 2 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(2), Constraint::Min(1)])
+            .split(inner)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1)])
+            .split(inner)
+    };
+
+    let gutter_area = sections[0];
+    let text_area = if sections.len() > 1 {
+        sections[1]
+    } else {
+        sections[0]
+    };
+    let viewport = input_viewport(
         &app.input,
         app.input_cursor,
-        inner.width.saturating_sub(3) as usize,
+        text_area.width as usize,
+        text_area.height as usize,
     );
     let prompt_color = if app.slash_query().is_some() {
         Color::Yellow
@@ -1768,20 +1870,35 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
         Color::Green
     };
 
-    let paragraph = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "> ",
-            Style::default()
-                .fg(prompt_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(visible_input),
-    ]))
-    .block(block);
-    frame.render_widget(paragraph, area);
+    if sections.len() > 1 {
+        let gutter_lines: Vec<Line<'_>> = (0..text_area.height)
+            .map(|row| {
+                let symbol = if row == 0 { ">" } else { "│" };
+                let style = if row == 0 {
+                    Style::default()
+                        .fg(prompt_color)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                Line::from(Span::styled(symbol, style))
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(gutter_lines), gutter_area);
+    }
+
+    let text_lines: Vec<Line<'_>> = viewport
+        .visible_lines
+        .iter()
+        .map(|line| Line::from(Span::raw(line.clone())))
+        .collect();
+    frame.render_widget(Paragraph::new(text_lines), text_area);
 
     if matches!(app.overlay, OverlayState::None) {
-        frame.set_cursor_position((inner.x + 2 + cursor_offset as u16, inner.y));
+        frame.set_cursor_position((
+            text_area.x + viewport.cursor_col as u16,
+            text_area.y + viewport.cursor_row as u16,
+        ));
     }
 }
 
@@ -1901,6 +2018,7 @@ fn render_history_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &HistoryOv
         .constraints([Constraint::Min(6), Constraint::Length(1)])
         .split(popup);
 
+    let line_width = layout[0].width.saturating_sub(6) as usize;
     let items: Vec<ListItem<'_>> = overlay
         .items
         .iter()
@@ -1921,10 +2039,13 @@ fn render_history_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &HistoryOv
             };
             ListItem::new(vec![
                 Line::from(Span::styled(
-                    title,
+                    truncate_text(&title, line_width),
                     Style::default().add_modifier(Modifier::BOLD),
                 )),
-                Line::from(Span::styled(detail, Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(
+                    truncate_text(&detail, line_width),
+                    Style::default().fg(Color::DarkGray),
+                )),
             ])
         })
         .collect();
@@ -2043,23 +2164,199 @@ fn centered_rect(percent_x: u16, percent_y: u16, rect: Rect) -> Rect {
         .split(vertical[1])[1]
 }
 
-fn visible_input(input: &str, cursor: usize, width: usize) -> (String, usize) {
-    if width == 0 {
-        return (String::new(), 0);
-    }
+struct WrappedInputLayout {
+    lines: Vec<String>,
+    cursor_row: usize,
+    cursor_col: usize,
+}
 
-    let chars: Vec<char> = input.chars().collect();
-    if chars.len() <= width {
-        return (input.to_string(), cursor.min(chars.len()));
-    }
+struct InputViewport {
+    visible_lines: Vec<String>,
+    cursor_row: usize,
+    cursor_col: usize,
+}
 
-    let max_start = chars.len().saturating_sub(width);
-    let start = cursor
-        .saturating_sub(width.saturating_sub(1))
+fn input_panel_height(app: &ChatApp, width: u16) -> u16 {
+    let input_width = width.saturating_sub(4) as usize;
+    let layout = wrapped_input_layout(&app.input, app.input_cursor, input_width.max(1));
+    let visible_lines = layout
+        .lines
+        .len()
+        .clamp(1, MAX_INPUT_VISIBLE_LINES as usize);
+    visible_lines as u16 + 2
+}
+
+fn input_viewport(input: &str, cursor: usize, width: usize, height: usize) -> InputViewport {
+    let width = width.max(1);
+    let height = height.max(1);
+    let layout = wrapped_input_layout(input, cursor, width);
+    let max_start = layout.lines.len().saturating_sub(height);
+    let start = layout
+        .cursor_row
+        .saturating_sub(height.saturating_sub(1))
         .min(max_start);
-    let end = (start + width).min(chars.len());
-    let visible: String = chars[start..end].iter().collect();
-    (visible, cursor.saturating_sub(start).min(width))
+    let end = (start + height).min(layout.lines.len());
+    let mut visible_lines = layout.lines[start..end].to_vec();
+    while visible_lines.len() < height {
+        visible_lines.push(String::new());
+    }
+
+    InputViewport {
+        visible_lines,
+        cursor_row: layout.cursor_row.saturating_sub(start).min(height - 1),
+        cursor_col: layout.cursor_col.min(width.saturating_sub(1)),
+    }
+}
+
+fn wrapped_input_layout(input: &str, cursor: usize, width: usize) -> WrappedInputLayout {
+    let width = width.max(1);
+    let cursor = cursor.min(char_count(input));
+    let mut lines = vec![String::new()];
+    let mut row = 0usize;
+    let mut col = 0usize;
+    let mut offset = 0usize;
+    let mut cursor_row = 0usize;
+    let mut cursor_col = 0usize;
+
+    for ch in input.chars() {
+        if offset == cursor {
+            cursor_row = row;
+            cursor_col = col;
+        }
+
+        if ch == '\n' {
+            row += 1;
+            lines.push(String::new());
+            col = 0;
+            offset += 1;
+            continue;
+        }
+
+        lines[row].push(ch);
+        col += 1;
+        offset += 1;
+
+        if col >= width {
+            row += 1;
+            lines.push(String::new());
+            col = 0;
+        }
+    }
+
+    if offset == cursor {
+        cursor_row = row;
+        cursor_col = col;
+    }
+
+    WrappedInputLayout {
+        lines,
+        cursor_row,
+        cursor_col,
+    }
+}
+
+fn current_line_bounds(text: &str, cursor: usize) -> (usize, usize) {
+    let cursor = cursor.min(char_count(text));
+    let chars: Vec<char> = text.chars().collect();
+    let mut start = cursor;
+    while start > 0 && chars[start - 1] != '\n' {
+        start -= 1;
+    }
+
+    let mut end = cursor;
+    while end < chars.len() && chars[end] != '\n' {
+        end += 1;
+    }
+
+    (start, end)
+}
+
+fn move_cursor_vertical(text: &str, cursor: usize, delta: isize) -> usize {
+    let cursor = cursor.min(char_count(text));
+    let chars: Vec<char> = text.chars().collect();
+    let (line_start, line_end) = current_line_bounds(text, cursor);
+    let column = cursor.saturating_sub(line_start);
+
+    if delta < 0 {
+        if line_start == 0 {
+            return cursor;
+        }
+        let prev_end = line_start.saturating_sub(1);
+        let mut prev_start = prev_end;
+        while prev_start > 0 && chars[prev_start - 1] != '\n' {
+            prev_start -= 1;
+        }
+        return prev_start + column.min(prev_end.saturating_sub(prev_start));
+    }
+
+    if line_end >= chars.len() {
+        return cursor;
+    }
+
+    let next_start = line_end + 1;
+    let mut next_end = next_start;
+    while next_end < chars.len() && chars[next_end] != '\n' {
+        next_end += 1;
+    }
+    next_start + column.min(next_end.saturating_sub(next_start))
+}
+
+fn render_scrollbar(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    total_lines: usize,
+    visible_lines: usize,
+    scroll: usize,
+    track_color: Color,
+    thumb_color: Color,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let total_lines = total_lines.max(1);
+    let visible_lines = visible_lines.max(1).min(total_lines);
+    let height = area.height as usize;
+    let max_scroll = total_lines.saturating_sub(visible_lines);
+    let thumb_height = ((visible_lines * height) + total_lines.saturating_sub(1)) / total_lines;
+    let thumb_height = thumb_height.clamp(1, height);
+    let max_thumb_top = height.saturating_sub(thumb_height);
+    let thumb_top = if max_scroll == 0 {
+        0
+    } else {
+        scroll.min(max_scroll) * max_thumb_top / max_scroll
+    };
+
+    let lines: Vec<Line<'_>> = (0..height)
+        .map(|row| {
+            let color = if row >= thumb_top && row < thumb_top + thumb_height {
+                thumb_color
+            } else {
+                track_color
+            };
+            Line::from(Span::styled("│", Style::default().fg(color)))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn truncate_text(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= width {
+        return text.to_string();
+    }
+
+    if width == 1 {
+        return "…".to_string();
+    }
+
+    let mut truncated: String = chars[..width - 1].iter().collect();
+    truncated.push('…');
+    truncated
 }
 
 fn char_count(text: &str) -> usize {
