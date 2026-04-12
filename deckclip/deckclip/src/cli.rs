@@ -1,4 +1,6 @@
-use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
 #[derive(Parser)]
@@ -49,6 +51,9 @@ pub enum Commands {
 
     /// 配置 AI 登录与模型提供商
     Login,
+
+    /// Deck MCP bridge 与客户端配置
+    Mcp(McpCommand),
 
     /// 生成 shell 补全脚本
     Completion {
@@ -123,6 +128,57 @@ pub enum AiAction {
 
     /// AI 文本转换
     Transform(AiTransformArgs),
+}
+
+// ─── MCP ───
+
+#[derive(clap::Args)]
+pub struct McpCommand {
+    #[command(subcommand)]
+    pub action: McpAction,
+}
+
+#[derive(Subcommand)]
+pub enum McpAction {
+    /// 以前台 stdio 方式运行 Deck MCP bridge
+    Serve,
+
+    /// 列出首发 MCP tools
+    Tools,
+
+    /// 检查 Deck MCP 运行与配置环境
+    Doctor,
+
+    /// 输出或写入 MCP 客户端配置片段
+    Setup(McpSetupArgs),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum McpSetupClient {
+    ClaudeDesktop,
+    Cursor,
+    Codex,
+    Opencode,
+    All,
+}
+
+#[derive(clap::Args)]
+pub struct McpSetupArgs {
+    /// 目标 MCP 客户端
+    #[arg(long, value_enum, default_value = "all")]
+    pub client: McpSetupClient,
+
+    /// 直接写入默认配置文件
+    #[arg(long)]
+    pub write: bool,
+
+    /// 覆盖默认配置文件路径
+    #[arg(long)]
+    pub path: Option<PathBuf>,
+
+    /// 覆盖 deckclip 启动命令
+    #[arg(long)]
+    pub command: Option<String>,
 }
 
 #[derive(clap::Args)]

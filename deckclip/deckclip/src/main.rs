@@ -145,6 +145,19 @@ fn localize_command(cmd: clap::Command) -> clap::Command {
         })
         .mut_subcommand("chat", |s| s.about(t("cmd.chat")))
         .mut_subcommand("login", |s| s.about(t("cmd.login")))
+        .mut_subcommand("mcp", |s| {
+            s.about(t("cmd.mcp"))
+                .mut_subcommand("serve", |ss| ss.about(t("cmd.mcp.serve")))
+                .mut_subcommand("tools", |ss| ss.about(t("cmd.mcp.tools")))
+                .mut_subcommand("doctor", |ss| ss.about(t("cmd.mcp.doctor")))
+                .mut_subcommand("setup", |ss| {
+                    ss.about(t("cmd.mcp.setup"))
+                        .mut_arg("client", |a| a.help(t("arg.mcp.setup.client")))
+                        .mut_arg("write", |a| a.help(t("arg.mcp.setup.write")))
+                        .mut_arg("path", |a| a.help(t("arg.mcp.setup.path")))
+                        .mut_arg("command", |a| a.help(t("arg.mcp.setup.command")))
+                })
+        })
         .mut_subcommand("ai", |s| {
             s.about(t("cmd.ai"))
                 .mut_subcommand("run", |ss| {
@@ -184,6 +197,7 @@ async fn run(command: Commands, client: &mut DeckClient, output: OutputMode) -> 
         Commands::Ai(sub) => commands::ai::run(client, output, sub).await,
         Commands::Chat => commands::chat::run(output).await,
         Commands::Login => commands::login::run(output).await,
+        Commands::Mcp(sub) => commands::mcp::run(sub, output).await,
         Commands::Completion { shell } => {
             commands::completion::run(shell);
             Ok(())

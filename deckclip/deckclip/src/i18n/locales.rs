@@ -46,9 +46,16 @@ fn zh_hans() -> Map {
         ("cmd.panel", "控制面板显示"),
         ("cmd.chat", "交互式 AI 聊天"),
         ("cmd.login", "配置 AI 登录与模型提供商"),
+        ("cmd.mcp", "运行 Deck MCP bridge 与配置向导"),
         ("cmd.ai", "AI 功能（运行/搜索/转换）"),
         ("cmd.completion", "生成 shell 补全脚本"),
         ("cmd.version", "显示版本信息"),
+
+        // MCP subcommands
+        ("cmd.mcp.serve", "以前台 stdio 方式运行 Deck MCP bridge"),
+        ("cmd.mcp.tools", "列出首发 MCP tools 与参数"),
+        ("cmd.mcp.doctor", "检查 Deck App、本地 socket/token 与客户端配置路径"),
+        ("cmd.mcp.setup", "输出或写入 Claude Desktop / Cursor / Codex / OpenCode 的配置片段"),
 
         // Panel subcommands
         ("cmd.panel.toggle", "切换面板显示/隐藏"),
@@ -81,6 +88,10 @@ fn zh_hans() -> Map {
         ("arg.ai.transform_text", "待转换文本（省略则从 stdin 读取）"),
         ("arg.ai.plugin", "使用指定插件 ID"),
         ("arg.completion.shell", "Shell 类型"),
+        ("arg.mcp.setup.client", "目标 MCP 客户端"),
+        ("arg.mcp.setup.write", "直接写入默认配置文件"),
+        ("arg.mcp.setup.path", "覆盖默认配置文件路径"),
+        ("arg.mcp.setup.command", "覆盖 deckclip 启动命令"),
 
         // Command output
         ("label.error", "错误:"),
@@ -88,6 +99,61 @@ fn zh_hans() -> Map {
         ("write.ok", "已写入剪贴板"),
         ("paste.ok", "已粘贴第 {} 项"),
         ("panel.toggled", "面板已切换"),
+
+        // MCP UI
+        ("mcp.common.yes", "是"),
+        ("mcp.common.no", "否"),
+        ("mcp.common.not_found", "未找到"),
+        ("mcp.common.unavailable", "不可用"),
+        ("mcp.status.present", "存在"),
+        ("mcp.status.missing", "缺失"),
+        ("mcp.status.ok", "ok"),
+        ("mcp.status.failed", "失败"),
+
+        ("mcp.client.claude_desktop", "Claude Desktop"),
+        ("mcp.client.cursor", "Cursor"),
+        ("mcp.client.codex", "Codex"),
+        ("mcp.client.opencode", "OpenCode"),
+
+        ("mcp.tools.title", "Deck MCP tools"),
+        ("mcp.tools.label.description", "说明:"),
+        ("mcp.tools.label.input", "输入:"),
+        ("mcp.tools.label.read_only", "只读:"),
+        ("mcp.tools.footer", "使用 deckclip mcp setup --client <client> 可查看对应客户端配置片段。"),
+        ("mcp.tools.read_latest.description", "读取 Deck 中最新的剪贴板项。"),
+        ("mcp.tools.read_latest.input", "无参数"),
+        ("mcp.tools.write_text.description", "把文本写入 Deck 剪贴板历史。"),
+        ("mcp.tools.write_text.input", "text, tag?, tag_id?, raw?"),
+        ("mcp.tools.search_history.description", "通过 Deck AI 语义搜索剪贴板历史。"),
+        ("mcp.tools.search_history.input", "query, mode?, limit?"),
+        ("mcp.tools.transform_text.description", "使用 Deck AI 转换文本；省略 text 时会读取最新剪贴板文本。"),
+        ("mcp.tools.transform_text.input", "prompt, text?, plugin?"),
+
+        ("mcp.doctor.title", "Deck MCP doctor"),
+        ("mcp.doctor.section.bridge", "Bridge 命令"),
+        ("mcp.doctor.section.service", "Deck 本地服务"),
+        ("mcp.doctor.section.targets", "客户端默认配置路径"),
+        ("mcp.doctor.label.recommended_command", "推荐命令:"),
+        ("mcp.doctor.label.command_in_path", "PATH 中的 deckclip:"),
+        ("mcp.doctor.label.current_executable", "当前可执行文件:"),
+        ("mcp.doctor.label.socket_path", "Socket 路径:"),
+        ("mcp.doctor.label.token_path", "Token 路径:"),
+        ("mcp.doctor.label.deck_health", "Deck App 健康检查:"),
+        ("mcp.doctor.footer", "如需生成配置片段，运行 deckclip mcp setup --client claude-desktop。"),
+
+        ("mcp.setup.title", "Deck MCP setup"),
+        ("mcp.setup.label.client", "客户端:"),
+        ("mcp.setup.label.mode", "模式:"),
+        ("mcp.setup.label.path", "配置路径:"),
+        ("mcp.setup.label.command", "启动命令:"),
+        ("mcp.setup.label.snippet", "配置片段:"),
+        ("mcp.setup.label.notes", "说明:"),
+        ("mcp.setup.mode.preview", "预览"),
+        ("mcp.setup.mode.written", "已写入"),
+        ("mcp.setup.mode.already_present", "已存在"),
+        ("mcp.setup.note.restart_client", "写入后请重启对应客户端，或重新加载当前工作区。"),
+        ("mcp.setup.note.cursor_project", "Cursor 采用项目级配置，默认会写到当前目录下的 .cursor/mcp.json。"),
+        ("mcp.setup.note.preview_only", "当前仅提供可直接粘贴的预览片段，暂不自动改写此客户端配置文件。"),
 
         // Errors
         ("err.not_running", "Deck App 未运行或未启用 Deck CLI"),
@@ -121,6 +187,14 @@ fn zh_hans() -> Map {
         ("err.clipboard_write_failed", "写入 pbcopy 失败"),
         ("err.clipboard_wait_failed", "等待 pbcopy 结束失败"),
         ("err.clipboard_copy_failed", "pbcopy 执行失败"),
+        ("err.mcp_home_unavailable", "无法确定当前用户的 HOME 目录"),
+        ("err.mcp_latest_clipboard_missing_text", "最新剪贴板项里没有可供 MCP tool 使用的文本字段"),
+        ("err.mcp_setup_write_requires_single_client", "自动写入一次只支持一个 client，请先指定 --client"),
+        ("err.mcp_setup_path_requires_single_client", "自定义 --path 需要先指定单个 --client"),
+        ("err.mcp_setup_write_unsupported", "{} 暂不支持自动写入，请先使用预览片段手动配置"),
+        ("err.mcp_setup_invalid_json", "配置文件不是有效 JSON: {} ({})"),
+        ("err.mcp_setup_invalid_root", "配置文件根节点必须是对象: {}"),
+        ("err.mcp_setup_invalid_section", "配置文件中的 {} 节点必须是对象: {}"),
     ]);
     map.extend(chat_zh_hans());
     map
