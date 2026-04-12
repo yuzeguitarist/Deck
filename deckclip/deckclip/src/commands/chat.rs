@@ -66,6 +66,8 @@ struct ConversationMessageData {
     text: String,
     #[serde(default)]
     attachment: Option<ChatAttachmentData>,
+    #[serde(default)]
+    attachments: Vec<ChatAttachmentData>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -88,6 +90,28 @@ struct ClipboardPasteData {
     text: Option<String>,
     #[serde(default)]
     attachment: Option<ChatAttachmentData>,
+    #[serde(default)]
+    attachments: Vec<ChatAttachmentData>,
+}
+
+impl ConversationMessageData {
+    fn normalized_attachments(&self) -> Vec<ChatAttachmentData> {
+        if !self.attachments.is_empty() {
+            self.attachments.clone()
+        } else {
+            self.attachment.clone().into_iter().collect()
+        }
+    }
+}
+
+impl ClipboardPasteData {
+    fn normalized_attachments(&self) -> Vec<ChatAttachmentData> {
+        if !self.attachments.is_empty() {
+            self.attachments.clone()
+        } else {
+            self.attachment.clone().into_iter().collect()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -179,10 +203,13 @@ impl MetaTone {
 enum TranscriptEntry {
     User {
         text: String,
-        attachment: Option<ChatAttachmentData>,
+        attachments: Vec<ChatAttachmentData>,
     },
     Assistant(String),
-    Meta { text: String, tone: MetaTone },
+    Meta {
+        text: String,
+        tone: MetaTone,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -248,7 +275,10 @@ enum UiEvent {
     ApprovalRequested(ToolEventData),
     Compacting(CompactingEventData),
     Done(DoneEventData),
-    HistoryLoaded { data: HistoryListData, append: bool },
+    HistoryLoaded {
+        data: HistoryListData,
+        append: bool,
+    },
     FooterMessage(String, MetaTone),
     Error(String),
 }
@@ -296,6 +326,9 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
 const THINKING_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const HISTORY_PAGE_SIZE: u32 = 24;
 const MAX_INPUT_VISIBLE_LINES: usize = 6;
+const MAX_PENDING_ATTACHMENTS: usize = 2;
+const ATTACHMENT_CARD_HEIGHT: u16 = 3;
+const MIN_TWO_COLUMN_ATTACHMENT_WIDTH: u16 = 56;
 
 fn chat_text(key: &str) -> String {
     i18n::t(key)
@@ -351,7 +384,7 @@ struct ChatApp {
     activities: Vec<TranscriptEntry>,
     input: String,
     input_cursor: usize,
-    pending_attachment: Option<ChatAttachmentData>,
+    pending_attachments: Vec<ChatAttachmentData>,
     input_history: Vec<String>,
     input_history_index: Option<usize>,
     input_history_draft: String,
@@ -398,7 +431,7 @@ impl ChatApp {
             activities: Vec::new(),
             input: String::new(),
             input_cursor: 0,
-            pending_attachment: None,
+            pending_attachments: Vec::new(),
             input_history: Vec::new(),
             input_history_index: None,
             input_history_draft: String::new(),
@@ -445,10 +478,13 @@ impl ChatApp {
             .messages
             .into_iter()
             .filter_map(|message| match message.role.as_str() {
-                "user" => Some(TranscriptEntry::User {
-                    text: message.text,
-                    attachment: message.attachment,
-                }),
+                "user" => {
+                    let attachments = message.normalized_attachments();
+                    Some(TranscriptEntry::User {
+                        text: message.text,
+                        attachments,
+                    })
+                }
                 "assistant" => Some(TranscriptEntry::Assistant(message.text)),
                 _ => None,
             })
@@ -651,7 +687,7 @@ impl ChatApp {
 
     fn clear_composer(&mut self) {
         self.clear_input_text();
-        self.pending_attachment = None;
+        self.pending_attachments.clear();
     }
 
     fn clear_input_text(&mut self) {
@@ -664,15 +700,49 @@ impl ChatApp {
         self.sync_footer_after_input_change();
     }
 
+    fn append_pending_attachments(
+        &mut self,
+        attachments: impl IntoIterator<Item = ChatAttachmentData>,
+    ) -> usize {
+        let remaining = MAX_PENDING_ATTACHMENTS.saturating_sub(self.pending_attachments.len());
+        if remaining == 0 {
+            return 0;
+        }
+
+        let mut added = 0;
+        for attachment in attachments.into_iter().take(remaining) {
+            self.pending_attachments.push(attachment);
+            added += 1;
+        }
+
+        if added > 0 {
+            self.input_history_index = None;
+            self.clear_quit_hint();
+            self.sync_footer_after_input_change();
+        }
+
+        added
+    }
+
+    #[cfg(test)]
     fn set_pending_attachment(&mut self, attachment: ChatAttachmentData) {
-        self.pending_attachment = Some(attachment);
-        self.input_history_index = None;
-        self.clear_quit_hint();
-        self.sync_footer_after_input_change();
+        let _ = self.append_pending_attachments([attachment]);
+    }
+
+    fn pending_attachments(&self) -> &[ChatAttachmentData] {
+        &self.pending_attachments
+    }
+
+    fn pending_attachment_count(&self) -> usize {
+        self.pending_attachments.len()
+    }
+
+    fn pending_attachments_full(&self) -> bool {
+        self.pending_attachments.len() >= MAX_PENDING_ATTACHMENTS
     }
 
     fn clear_pending_attachment(&mut self) -> bool {
-        let removed = self.pending_attachment.take().is_some();
+        let removed = self.pending_attachments.pop().is_some();
         if removed {
             self.clear_quit_hint();
             self.sync_footer_after_input_change();
@@ -1521,8 +1591,8 @@ fn handle_key_event(
             }
 
             let submitted = app.input.trim().to_string();
-            let pending_attachment = app.pending_attachment.clone();
-            if submitted.is_empty() && pending_attachment.is_none() {
+            let pending_attachments = app.pending_attachments.clone();
+            if submitted.is_empty() && pending_attachments.is_empty() {
                 return;
             }
             app.remember_input(&submitted);
@@ -1560,19 +1630,18 @@ fn handle_key_event(
                     existing_session_id
                 };
 
-                let event =
-                    match send_chat_message(
-                        primary_client,
-                        &session_id,
-                        submitted,
-                        pending_attachment,
-                        ui_tx.clone(),
-                    )
-                    .await
-                    {
-                        Ok(()) => return,
-                        Err(error) => ui_error(error),
-                    };
+                let event = match send_chat_message(
+                    primary_client,
+                    &session_id,
+                    submitted,
+                    pending_attachments,
+                    ui_tx.clone(),
+                )
+                .await
+                {
+                    Ok(()) => return,
+                    Err(error) => ui_error(error),
+                };
                 let _ = ui_tx.send(event);
             });
         }
@@ -1836,14 +1905,28 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
             clipboard,
         } => match clipboard {
             Ok(data) => {
-                let has_attachment = data.attachment.is_some();
+                let attachments = data.normalized_attachments();
+                let has_attachment = !attachments.is_empty();
 
-                if let Some(attachment) = data.attachment {
-                    app.set_pending_attachment(attachment);
-                    app.set_footer(chat_text("chat.footer.attachment_ready"), MetaTone::Success);
+                if has_attachment {
+                    let added = app.append_pending_attachments(attachments);
+                    if added > 0 {
+                        app.set_footer(
+                            chat_text("chat.footer.attachment_ready"),
+                            MetaTone::Success,
+                        );
+                    } else if app.pending_attachments_full() {
+                        app.set_footer(
+                            chat_text("chat.footer.attachment_limit_reached"),
+                            MetaTone::Warning,
+                        );
+                    }
                 } else if let Some(text) = data.text {
                     app.insert_text(&text);
-                    app.set_footer(chat_text("chat.footer.clipboard_text_pasted"), MetaTone::Success);
+                    app.set_footer(
+                        chat_text("chat.footer.clipboard_text_pasted"),
+                        MetaTone::Success,
+                    );
                 } else if !pasted_text.is_empty() && !looks_like_path_payload(&pasted_text) {
                     app.insert_text(&pasted_text);
                 } else {
@@ -2118,15 +2201,15 @@ async fn send_chat_message(
     client: Arc<Mutex<DeckClient>>,
     session_id: &str,
     text: String,
-    attachment: Option<ChatAttachmentData>,
+    attachments: Vec<ChatAttachmentData>,
     ui_tx: UnboundedSender<UiEvent>,
 ) -> Result<()> {
     let mut client = client.lock().await;
-    let attachment = attachment
-        .map(serde_json::to_value)
+    let attachments = (!attachments.is_empty())
+        .then(|| serde_json::to_value(&attachments))
         .transpose()
         .context(i18n::t("err.chat_unexpected_stream_response"))?;
-    let _ = client.chat_send(session_id, &text, attachment).await?;
+    let _ = client.chat_send(session_id, &text, attachments).await?;
 
     loop {
         match client.recv_chat_frame().await? {
@@ -2361,10 +2444,12 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, app: &mut ChatApp) {
         return;
     }
 
-    let sections = if app.pending_attachment.is_some() {
+    let attachment_height =
+        pending_attachment_preview_height(inner.width, app.pending_attachment_count());
+    let sections = if attachment_height > 0 {
         Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(1)])
+            .constraints([Constraint::Length(attachment_height), Constraint::Min(1)])
             .split(inner)
     } else {
         Layout::default()
@@ -2373,16 +2458,8 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, app: &mut ChatApp) {
             .split(inner)
     };
 
-    if let Some(attachment) = app.pending_attachment.as_ref() {
-        frame.render_widget(
-            Paragraph::new(vec![attachment_chip_line(
-                attachment,
-                sections[0].width as usize,
-                true,
-                "",
-            )]),
-            sections[0],
-        );
+    if attachment_height > 0 {
+        render_pending_attachments(frame, sections[0], app.pending_attachments());
     }
 
     let input_row = *sections.last().unwrap_or(&inner);
@@ -2708,9 +2785,9 @@ fn transcript_lines(app: &ChatApp, width: usize) -> Vec<Line<'static>> {
     for entry in app.all_entries() {
         let line_start = lines.len();
         match entry {
-            TranscriptEntry::User { text, attachment } => {
-                if let Some(attachment) = attachment.as_ref() {
-                    lines.push(attachment_chip_line(attachment, width, false, "  "));
+            TranscriptEntry::User { text, attachments } => {
+                for attachment in attachments {
+                    lines.push(attachment_chip_line(&attachment, width, false, "  "));
                 }
                 if !text.trim().is_empty() {
                     push_wrapped_lines(
@@ -2783,34 +2860,159 @@ fn attachment_chip_line(
     } else {
         String::new()
     };
-    let kind = if attachment.kind == "image_ocr" {
-        "img"
-    } else {
-        "clip"
-    };
+    let label = attachment_inline_label(attachment, None);
     let prefix_width = display_width(left_padding);
     let available_width = width.saturating_sub(prefix_width);
     let hint_width = display_width(&hint);
-    let chip_budget = available_width.saturating_sub(hint_width);
-    let body_budget = chip_budget.saturating_sub(2).max(1);
-    let body = truncate_text(
-        &format!("{}: {}", kind, attachment.display_text),
-        body_budget,
-    );
-    let chip_style = if attachment.kind == "image_ocr" {
-        Style::default()
-            .fg(Color::LightCyan)
-            .bg(Color::Rgb(30, 36, 44))
-    } else {
-        Style::default().fg(Color::Gray).bg(Color::Rgb(34, 34, 38))
-    };
+    let body_budget = available_width
+        .saturating_sub(display_width(&label))
+        .saturating_sub(hint_width)
+        .saturating_sub(4)
+        .max(1);
+    let body = truncate_text(&attachment_preview_text(attachment), body_budget);
 
     let mut spans = vec![Span::raw(left_padding.to_string())];
-    spans.push(Span::styled(format!(" {} ", body), chip_style));
+    spans.push(Span::styled("[", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled(
+        label,
+        attachment_label_style(attachment).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled("] ", Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled(body, Style::default().fg(Color::Gray)));
     if !hint.is_empty() {
         spans.push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
     }
     Line::from(spans)
+}
+
+fn render_pending_attachments(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    attachments: &[ChatAttachmentData],
+) {
+    if attachments.is_empty() || area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let card_areas = attachment_card_areas(area, attachments.len());
+    for (index, (attachment, card_area)) in attachments.iter().zip(card_areas.iter()).enumerate() {
+        let title = attachment_inline_label(attachment, Some(index + 1));
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(attachment_card_border_style(attachment))
+            .title(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(
+                    title,
+                    attachment_label_style(attachment).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" "),
+            ]));
+        frame.render_widget(block.clone(), *card_area);
+
+        let inner = block.inner(*card_area);
+        if inner.width == 0 || inner.height == 0 {
+            continue;
+        }
+
+        let body_budget = inner.width.saturating_sub(1) as usize;
+        let body = truncate_text(&attachment_preview_text(attachment), body_budget.max(1));
+        let line = Line::from(vec![Span::styled(body, Style::default().fg(Color::Gray))]);
+        frame.render_widget(Paragraph::new(line), inner);
+    }
+}
+
+fn attachment_card_areas(area: Rect, attachment_count: usize) -> Vec<Rect> {
+    if attachment_count == 0 || area.width == 0 || area.height == 0 {
+        return Vec::new();
+    }
+
+    if attachment_count == 1 {
+        return vec![area];
+    }
+
+    if area.width >= MIN_TWO_COLUMN_ATTACHMENT_WIDTH {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Fill(1),
+                Constraint::Length(1),
+                Constraint::Fill(1),
+            ])
+            .split(area);
+        return vec![cols[0], cols[2]];
+    }
+
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![
+            Constraint::Length(ATTACHMENT_CARD_HEIGHT);
+            attachment_count
+        ])
+        .split(area)
+        .iter()
+        .copied()
+        .take(attachment_count)
+        .collect()
+}
+
+fn pending_attachment_preview_height(width: u16, attachment_count: usize) -> u16 {
+    if attachment_count == 0 {
+        return 0;
+    }
+
+    if attachment_count == 1 || width >= MIN_TWO_COLUMN_ATTACHMENT_WIDTH {
+        ATTACHMENT_CARD_HEIGHT
+    } else {
+        ATTACHMENT_CARD_HEIGHT.saturating_mul(attachment_count as u16)
+    }
+}
+
+fn attachment_preview_text(attachment: &ChatAttachmentData) -> String {
+    let source = if attachment.kind == "image_ocr" {
+        attachment.full_content.as_str()
+    } else {
+        attachment.display_text.as_str()
+    };
+    let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        attachment.display_text.clone()
+    } else {
+        normalized
+    }
+}
+
+fn attachment_inline_label(attachment: &ChatAttachmentData, index: Option<usize>) -> String {
+    let base = if attachment.kind == "image_ocr" {
+        match i18n::locale() {
+            "zh-Hans" | "zh-Hant" => "图片",
+            _ => "Image",
+        }
+    } else {
+        match i18n::locale() {
+            "zh-Hans" | "zh-Hant" => "剪贴",
+            _ => "Clip",
+        }
+    };
+    index
+        .map(|index| format!("{base} {index}"))
+        .unwrap_or_else(|| base.to_string())
+}
+
+fn attachment_label_style(attachment: &ChatAttachmentData) -> Style {
+    if attachment.kind == "image_ocr" {
+        Style::default().fg(Color::LightCyan)
+    } else {
+        Style::default().fg(Color::Gray)
+    }
+}
+
+fn attachment_card_border_style(attachment: &ChatAttachmentData) -> Style {
+    if attachment.kind == "image_ocr" {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
 }
 
 fn looks_like_path_payload(text: &str) -> bool {
@@ -2868,7 +3070,9 @@ fn input_panel_height(app: &ChatApp, width: u16) -> u16 {
     let input_width = width.saturating_sub(4) as usize;
     let layout = wrapped_input_layout(&app.input, app.input_cursor, input_width.max(1));
     let visible_lines = layout.rows.len().clamp(1, MAX_INPUT_VISIBLE_LINES as usize);
-    visible_lines as u16 + 2 + if app.pending_attachment.is_some() { 1 } else { 0 }
+    let attachment_height =
+        pending_attachment_preview_height(width.saturating_sub(2), app.pending_attachment_count());
+    visible_lines as u16 + 2 + attachment_height
 }
 
 fn input_viewport(input: &str, cursor: usize, width: usize, height: usize) -> InputViewport {
@@ -3542,7 +3746,7 @@ mod tests {
 
         app.set_pending_attachment(test_attachment());
 
-        assert_eq!(input_panel_height(&app, 48), base + 1);
+        assert_eq!(input_panel_height(&app, 48), base + ATTACHMENT_CARD_HEIGHT);
     }
 
     #[test]
@@ -3562,6 +3766,7 @@ mod tests {
                         role: "user".to_string(),
                         text: "".to_string(),
                         attachment: Some(attachment.clone()),
+                        attachments: Vec::new(),
                     }],
                 },
                 context_usage: None,
@@ -3571,12 +3776,10 @@ mod tests {
         );
 
         match &app.conversation_entries[0] {
-            TranscriptEntry::User {
-                text,
-                attachment: Some(restored),
-            } => {
+            TranscriptEntry::User { text, attachments } => {
                 assert!(text.is_empty());
-                assert_eq!(restored.display_text, attachment.display_text);
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(attachments[0].display_text, attachment.display_text);
             }
             other => panic!("unexpected transcript entry: {other:?}"),
         }

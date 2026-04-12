@@ -385,18 +385,19 @@ impl DeckClient {
         &mut self,
         session_id: &str,
         text: &str,
-        attachment: Option<Value>,
+        attachments: Option<Value>,
     ) -> Result<Response, DeckError> {
         let mut args = json!({
             "sessionId": session_id,
             "text": text,
         });
 
-        if let Some(attachment) = attachment {
-            args["attachment"] = attachment;
+        if let Some(attachments) = attachments {
+            args["attachments"] = attachments;
         }
 
-        self.execute(deckclip_protocol::cmd::AI_CHAT_SEND, args, 0).await
+        self.execute(deckclip_protocol::cmd::AI_CHAT_SEND, args, 0)
+            .await
     }
 
     pub async fn chat_approval_respond(
