@@ -165,6 +165,18 @@ enum ChatMode {
     AwaitingApproval,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuitHintTrigger {
+    CtrlC,
+    Esc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FooterTag {
+    QuitHint(QuitHintTrigger),
+    SlashSelected,
+}
+
 #[derive(Debug, Clone)]
 struct ApprovalOverlay {
     call_id: String,
@@ -176,6 +188,7 @@ struct ApprovalOverlay {
 struct HistoryOverlay {
     items: Vec<HistoryItemData>,
     selected: usize,
+    visible_start: usize,
     next_cursor: Option<String>,
     has_more: bool,
     loading_more: bool,
@@ -313,9 +326,12 @@ struct ChatApp {
     input_visual_width: u16,
     input_text_area: Option<Rect>,
     slash_selected: usize,
+    slash_popup_hitboxes: Vec<Rect>,
+    history_hitboxes: Vec<Rect>,
     overlay: OverlayState,
     mode: ChatMode,
     footer_message: Option<(String, MetaTone)>,
+    footer_tag: Option<FooterTag>,
     busy_action: Option<String>,
     busy_started_at: Option<Instant>,
     streaming_text: String,
@@ -356,9 +372,12 @@ impl ChatApp {
             input_visual_width: 1,
             input_text_area: None,
             slash_selected: 0,
+            slash_popup_hitboxes: Vec::new(),
+            history_hitboxes: Vec::new(),
             overlay: OverlayState::None,
             mode: ChatMode::Ready,
-            footer_message: Some((chat_text("chat.footer.ready"), MetaTone::Dim)),
+            footer_message: None,
+            footer_tag: None,
             busy_action: None,
             busy_started_at: None,
             streaming_text: String::new(),
@@ -426,6 +445,17 @@ impl ChatApp {
 
     fn set_footer(&mut self, text: impl Into<String>, tone: MetaTone) {
         self.footer_message = Some((text.into(), tone));
+        self.footer_tag = None;
+    }
+
+    fn set_tagged_footer(&mut self, text: impl Into<String>, tone: MetaTone, tag: FooterTag) {
+        self.footer_message = Some((text.into(), tone));
+        self.footer_tag = Some(tag);
+    }
+
+    fn clear_footer(&mut self) {
+        self.footer_message = None;
+        self.footer_tag = None;
     }
 
     fn set_busy_action(&mut self, text: impl Into<String>) {
@@ -436,6 +466,37 @@ impl ChatApp {
     fn clear_busy_action(&mut self) {
         self.busy_action = None;
         self.busy_started_at = None;
+    }
+
+    fn clear_popup_hitboxes(&mut self) {
+        self.slash_popup_hitboxes.clear();
+        self.history_hitboxes.clear();
+    }
+
+    fn sync_footer_after_input_change(&mut self) {
+        if matches!(self.footer_tag, Some(FooterTag::SlashSelected)) && self.slash_query().is_none()
+        {
+            self.clear_footer();
+        }
+    }
+
+    fn history_hitbox_index(&self, column: u16, row: u16) -> Option<usize> {
+        self.history_hitboxes
+            .iter()
+            .position(|rect| point_in_rect(column, row, *rect))
+    }
+
+    fn slash_hitbox_index(&self, column: u16, row: u16) -> Option<usize> {
+        self.slash_popup_hitboxes
+            .iter()
+            .position(|rect| point_in_rect(column, row, *rect))
+    }
+
+    fn quit_hint_text(trigger: QuitHintTrigger) -> String {
+        match trigger {
+            QuitHintTrigger::CtrlC => chat_text("chat.quit_hint.ctrl_c"),
+            QuitHintTrigger::Esc => chat_text("chat.quit_hint.esc"),
+        }
     }
 
     fn begin_send(&mut self) {
@@ -558,6 +619,8 @@ impl ChatApp {
         self.input_history_index = None;
         self.input_history_draft.clear();
         self.slash_selected = 0;
+        self.clear_quit_hint();
+        self.sync_footer_after_input_change();
     }
 
     fn remember_input(&mut self, submitted: &str) {
@@ -598,6 +661,7 @@ impl ChatApp {
         self.input_cursor = char_count(&self.input);
         self.refresh_slash_selection();
         self.clear_quit_hint();
+        self.sync_footer_after_input_change();
         true
     }
 
@@ -619,6 +683,7 @@ impl ChatApp {
 
         self.refresh_slash_selection();
         self.clear_quit_hint();
+        self.sync_footer_after_input_change();
         true
     }
 
@@ -770,6 +835,8 @@ impl ChatApp {
         self.input_cursor = char_count(&self.input);
         self.input_history_index = None;
         self.refresh_slash_selection();
+        self.clear_quit_hint();
+        self.sync_footer_after_input_change();
     }
 
     fn insert_char(&mut self, ch: char) {
@@ -777,6 +844,7 @@ impl ChatApp {
         self.input_history_index = None;
         self.refresh_slash_selection();
         self.clear_quit_hint();
+        self.sync_footer_after_input_change();
     }
 
     fn insert_text(&mut self, text: &str) {
@@ -784,6 +852,7 @@ impl ChatApp {
         self.input_history_index = None;
         self.refresh_slash_selection();
         self.clear_quit_hint();
+        self.sync_footer_after_input_change();
     }
 
     fn backspace(&mut self) {
@@ -791,6 +860,7 @@ impl ChatApp {
         self.input_history_index = None;
         self.refresh_slash_selection();
         self.clear_quit_hint();
+        self.sync_footer_after_input_change();
     }
 
     fn delete_forward(&mut self) {
@@ -798,6 +868,7 @@ impl ChatApp {
         self.input_history_index = None;
         self.refresh_slash_selection();
         self.clear_quit_hint();
+        self.sync_footer_after_input_change();
     }
 
     fn move_cursor_left(&mut self) {
@@ -849,6 +920,7 @@ impl ChatApp {
         self.input_history_index = None;
         self.refresh_slash_selection();
         self.clear_quit_hint();
+        self.sync_footer_after_input_change();
     }
 
     fn slash_query(&self) -> Option<&str> {
@@ -915,20 +987,19 @@ impl ChatApp {
         Some(selected)
     }
 
-    fn arm_quit_hint(&mut self) {
+    fn arm_quit_hint(&mut self, trigger: QuitHintTrigger) {
         self.quit_hint_until = Some(Instant::now() + Duration::from_secs(1));
-        self.set_footer(chat_text("chat.quit_hint"), MetaTone::Warning);
+        self.set_tagged_footer(
+            Self::quit_hint_text(trigger),
+            MetaTone::Warning,
+            FooterTag::QuitHint(trigger),
+        );
     }
 
     fn clear_quit_hint(&mut self) {
         self.quit_hint_until = None;
-        let quit_hint = chat_text("chat.quit_hint");
-        if self
-            .footer_message
-            .as_ref()
-            .is_some_and(|(text, _)| text == &quit_hint)
-        {
-            self.footer_message = None;
+        if matches!(self.footer_tag, Some(FooterTag::QuitHint(_))) {
+            self.clear_footer();
         }
     }
 
@@ -1218,7 +1289,7 @@ fn handle_key_event(
         if app.quit_hint_active() {
             app.should_quit = true;
         } else {
-            app.arm_quit_hint();
+            app.arm_quit_hint(QuitHintTrigger::CtrlC);
         }
         return;
     }
@@ -1235,12 +1306,13 @@ fn handle_key_event(
             }
             KeyCode::Tab => {
                 if let Some(command) = app.complete_selected_slash() {
-                    app.set_footer(
+                    app.set_tagged_footer(
                         chat_format(
                             "chat.footer.slash_selected",
                             &[("{command}", command.to_string())],
                         ),
                         MetaTone::Dim,
+                        FooterTag::SlashSelected,
                     );
                 }
                 return;
@@ -1259,12 +1331,13 @@ fn handle_key_event(
 
                 if selected.is_some() && normalize_slash_command(&submitted).is_none() {
                     if let Some(command) = app.complete_selected_slash() {
-                        app.set_footer(
+                        app.set_tagged_footer(
                             chat_format(
                                 "chat.footer.slash_selected",
                                 &[("{command}", command.to_string())],
                             ),
                             MetaTone::Dim,
+                            FooterTag::SlashSelected,
                         );
                     }
                     return;
@@ -1307,7 +1380,7 @@ fn handle_key_event(
                 if app.quit_hint_active() {
                     app.should_quit = true;
                 } else {
-                    app.arm_quit_hint();
+                    app.arm_quit_hint(QuitHintTrigger::Esc);
                 }
             }
         }
@@ -1446,7 +1519,34 @@ fn handle_mouse_event(
 ) {
     match mouse.kind {
         MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(index) = app.history_hitbox_index(mouse.column, mouse.row) {
+                if let OverlayState::History(overlay) = &mut app.overlay {
+                    let item_index = overlay.visible_start + index;
+                    if item_index < overlay.items.len() {
+                        overlay.selected = item_index;
+                        app.clear_quit_hint();
+                        maybe_request_more_history(app, primary_client, ui_tx);
+                    }
+                }
+                return;
+            }
+
             if !matches!(app.overlay, OverlayState::None) {
+                return;
+            }
+
+            if let Some(index) = app.slash_hitbox_index(mouse.column, mouse.row) {
+                app.slash_selected = index;
+                if let Some(command) = app.complete_selected_slash() {
+                    app.set_tagged_footer(
+                        chat_format(
+                            "chat.footer.slash_selected",
+                            &[("{command}", command.to_string())],
+                        ),
+                        MetaTone::Dim,
+                        FooterTag::SlashSelected,
+                    );
+                }
                 return;
             }
 
@@ -1715,6 +1815,7 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
                 app.overlay = OverlayState::History(HistoryOverlay {
                     items: data.items,
                     selected: 0,
+                    visible_start: 0,
                     next_cursor: data.next_cursor,
                     has_more: data.has_more,
                     loading_more: false,
@@ -1955,6 +2056,7 @@ fn response_data<T: DeserializeOwned>(response: deckclip_protocol::Response) -> 
 
 fn render(frame: &mut Frame<'_>, app: &mut ChatApp) {
     let area = frame.area();
+    app.clear_popup_hitboxes();
     let input_height = input_panel_height(app, area.width);
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -1971,9 +2073,11 @@ fn render(frame: &mut Frame<'_>, app: &mut ChatApp) {
     render_input(frame, layout[2], app);
     render_footer(frame, layout[3], app);
 
-    match &app.overlay {
+    match &mut app.overlay {
         OverlayState::Approval(overlay) => render_approval_overlay(frame, area, overlay),
-        OverlayState::History(overlay) => render_history_overlay(frame, area, overlay),
+        OverlayState::History(overlay) => {
+            render_history_overlay(frame, area, overlay, &mut app.history_hitboxes)
+        }
         OverlayState::None => render_slash_popup(frame, layout[2], app),
     }
 }
@@ -2194,10 +2298,12 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
     } else {
         chat_text("chat.footer.default.reviewing")
     };
-    let (text, tone) = app
-        .footer_message
-        .clone()
-        .unwrap_or_else(|| (default_footer, MetaTone::Dim));
+    let footer_message = match app.footer_tag {
+        Some(FooterTag::QuitHint(_)) if !app.quit_hint_active() => None,
+        Some(FooterTag::SlashSelected) if app.slash_query().is_none() => None,
+        _ => app.footer_message.clone(),
+    };
+    let (text, tone) = footer_message.unwrap_or_else(|| (default_footer, MetaTone::Dim));
     let line = Line::from(Span::styled(text, tone.style()));
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -2232,7 +2338,7 @@ fn render_approval_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &Approval
     );
 }
 
-fn render_slash_popup(frame: &mut Frame<'_>, input_area: Rect, app: &ChatApp) {
+fn render_slash_popup(frame: &mut Frame<'_>, input_area: Rect, app: &mut ChatApp) {
     let matches = app.slash_matches();
     if matches.is_empty() {
         return;
@@ -2248,6 +2354,10 @@ fn render_slash_popup(frame: &mut Frame<'_>, input_area: Rect, app: &ChatApp) {
         width: popup_width,
         height,
     };
+    let block = Block::default()
+        .title(chat_text("chat.commands.title"))
+        .borders(Borders::ALL);
+    let inner = block.inner(popup);
     frame.render_widget(Clear, popup);
 
     let items: Vec<ListItem<'_>> = matches
@@ -2279,11 +2389,7 @@ fn render_slash_popup(frame: &mut Frame<'_>, input_area: Rect, app: &ChatApp) {
             .min(4),
     ));
     let list = List::new(items)
-        .block(
-            Block::default()
-                .title(chat_text("chat.commands.title"))
-                .borders(Borders::ALL),
-        )
+        .block(block)
         .highlight_style(
             Style::default()
                 .bg(Color::Rgb(26, 26, 26))
@@ -2291,9 +2397,31 @@ fn render_slash_popup(frame: &mut Frame<'_>, input_area: Rect, app: &ChatApp) {
         )
         .highlight_symbol("› ");
     frame.render_stateful_widget(list, popup, &mut state);
+
+    for index in 0..matches.len().min(5) {
+        let y = inner.y.saturating_add((index as u16).saturating_mul(2));
+        let height = inner
+            .height
+            .saturating_sub((index as u16).saturating_mul(2))
+            .min(2);
+        if height == 0 {
+            break;
+        }
+        app.slash_popup_hitboxes.push(Rect {
+            x: inner.x,
+            y,
+            width: inner.width,
+            height,
+        });
+    }
 }
 
-fn render_history_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &HistoryOverlay) {
+fn render_history_overlay(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    overlay: &mut HistoryOverlay,
+    history_hitboxes: &mut Vec<Rect>,
+) {
     let popup = centered_rect(76, 58, area);
     frame.render_widget(Clear, popup);
 
@@ -2303,6 +2431,13 @@ fn render_history_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &HistoryOv
         .split(popup);
 
     let line_width = layout[0].width.saturating_sub(6) as usize;
+    let block = Block::default()
+        .title(chat_format(
+            "chat.resume.title",
+            &[("{count}", overlay.items.len().to_string())],
+        ))
+        .borders(Borders::ALL);
+    let inner = block.inner(layout[0]);
     let items: Vec<ListItem<'_>> = overlay
         .items
         .iter()
@@ -2337,17 +2472,36 @@ fn render_history_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &HistoryOv
     let mut state = ListState::default();
     state.select(Some(overlay.selected));
     let list = List::new(items)
-        .block(
-            Block::default()
-                .title(chat_format(
-                    "chat.resume.title",
-                    &[("{count}", overlay.items.len().to_string())],
-                ))
-                .borders(Borders::ALL),
-        )
+        .block(block)
         .highlight_style(Style::default().bg(Color::Rgb(30, 30, 30)).fg(Color::Cyan))
         .highlight_symbol("› ");
     frame.render_stateful_widget(list, layout[0], &mut state);
+
+    let visible_slots = (inner.height as usize) / 2;
+    overlay.visible_start = if visible_slots == 0 || overlay.items.len() <= visible_slots {
+        0
+    } else {
+        overlay
+            .selected
+            .saturating_sub(visible_slots.saturating_sub(1))
+            .min(overlay.items.len().saturating_sub(visible_slots))
+    };
+    for index in 0..visible_slots.min(overlay.items.len().saturating_sub(overlay.visible_start)) {
+        let y = inner.y.saturating_add((index as u16).saturating_mul(2));
+        let height = inner
+            .height
+            .saturating_sub((index as u16).saturating_mul(2))
+            .min(2);
+        if height == 0 {
+            break;
+        }
+        history_hitboxes.push(Rect {
+            x: inner.x,
+            y,
+            width: inner.width,
+            height,
+        });
+    }
 
     let status = if overlay.loading_more {
         chat_format(
@@ -3079,5 +3233,41 @@ mod tests {
         assert_eq!(app.input, "/cost");
         assert!(app.browse_input_history_down());
         assert_eq!(app.input, "");
+    }
+
+    #[test]
+    fn clear_current_line_resets_slash_selected_footer() {
+        let mut app = test_app();
+        app.set_input("/help".to_string());
+        app.set_tagged_footer(
+            chat_format(
+                "chat.footer.slash_selected",
+                &[("{command}", "/help".to_string())],
+            ),
+            MetaTone::Dim,
+            FooterTag::SlashSelected,
+        );
+
+        app.clear_current_line();
+
+        assert_eq!(app.input, "");
+        assert!(app.footer_message.is_none());
+        assert!(app.footer_tag.is_none());
+    }
+
+    #[test]
+    fn quit_hint_footer_uses_trigger_specific_text() {
+        let mut app = test_app();
+
+        app.arm_quit_hint(QuitHintTrigger::Esc);
+
+        assert_eq!(
+            app.footer_message.as_ref().map(|(text, _)| text.as_str()),
+            Some(chat_text("chat.quit_hint.esc").as_str())
+        );
+        assert_eq!(
+            app.footer_tag,
+            Some(FooterTag::QuitHint(QuitHintTrigger::Esc))
+        );
     }
 }
