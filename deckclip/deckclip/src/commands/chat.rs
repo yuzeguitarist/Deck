@@ -1304,7 +1304,11 @@ fn handle_key_event(
                     app.set_footer(chat_text("chat.footer.creating_session"), MetaTone::Warning);
                 }
             } else {
-                app.should_quit = true;
+                if app.quit_hint_active() {
+                    app.should_quit = true;
+                } else {
+                    app.arm_quit_hint();
+                }
             }
         }
         KeyCode::PageUp => {
