@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -8,7 +9,9 @@ use deckclip_core::{Config, DeckClient};
 use deckclip_protocol::Response;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::handler::server::ServerHandler;
-use rmcp::model::ErrorData;
+use rmcp::model::{
+    ErrorData, Implementation, ListToolsResult, ServerCapabilities, ServerInfo, Tool,
+};
 use rmcp::service::serve_server;
 use rmcp::transport::io::stdio;
 use rmcp::{tool, tool_handler, tool_router};
@@ -237,10 +240,26 @@ fn render_setup_entries(entries: &[SetupEntry]) -> String {
     let mut lines = vec![i18n::t("mcp.setup.title"), String::new()];
 
     for (index, entry) in entries.iter().enumerate() {
-        lines.push(format!("{} {}", i18n::t("mcp.setup.label.client"), entry.client));
-        lines.push(format!("{} {}", i18n::t("mcp.setup.label.mode"), entry.mode));
-        lines.push(format!("{} {}", i18n::t("mcp.setup.label.path"), entry.path));
-        lines.push(format!("{} {}", i18n::t("mcp.setup.label.command"), entry.command));
+        lines.push(format!(
+            "{} {}",
+            i18n::t("mcp.setup.label.client"),
+            entry.client
+        ));
+        lines.push(format!(
+            "{} {}",
+            i18n::t("mcp.setup.label.mode"),
+            entry.mode
+        ));
+        lines.push(format!(
+            "{} {}",
+            i18n::t("mcp.setup.label.path"),
+            entry.path
+        ));
+        lines.push(format!(
+            "{} {}",
+            i18n::t("mcp.setup.label.command"),
+            entry.command
+        ));
         lines.push(i18n::t("mcp.setup.label.snippet"));
         lines.push(entry.snippet.clone());
 
@@ -295,6 +314,50 @@ fn tool_descriptors() -> Vec<ToolDescriptor> {
             true,
         ),
     ]
+}
+
+fn server_instructions() -> String {
+    i18n::t("mcp.server.instructions")
+}
+
+fn tool_title_key(name: &str) -> Option<&'static str> {
+    match name {
+        TOOL_READ_LATEST => Some("mcp.tool.read_latest.title"),
+        TOOL_WRITE_TEXT => Some("mcp.tool.write_text.title"),
+        TOOL_SEARCH_HISTORY => Some("mcp.tool.search_history.title"),
+        TOOL_TRANSFORM_TEXT => Some("mcp.tool.transform_text.title"),
+        _ => None,
+    }
+}
+
+fn tool_description_key(name: &str) -> Option<&'static str> {
+    match name {
+        TOOL_READ_LATEST => Some("mcp.tools.read_latest.description"),
+        TOOL_WRITE_TEXT => Some("mcp.tools.write_text.description"),
+        TOOL_SEARCH_HISTORY => Some("mcp.tools.search_history.description"),
+        TOOL_TRANSFORM_TEXT => Some("mcp.tools.transform_text.description"),
+        _ => None,
+    }
+}
+
+fn localize_tool_definition(mut tool: Tool) -> Tool {
+    if let Some(title_key) = tool_title_key(tool.name.as_ref()) {
+        tool.title = Some(i18n::t(title_key));
+    }
+
+    if let Some(description_key) = tool_description_key(tool.name.as_ref()) {
+        tool.description = Some(Cow::Owned(i18n::t(description_key)));
+    }
+
+    tool
+}
+
+fn localized_tool_catalog() -> Vec<Tool> {
+    DeckMcpServer::tool_router()
+        .list_all()
+        .into_iter()
+        .map(localize_tool_definition)
+        .collect()
 }
 
 fn build_setup_plan(
@@ -380,9 +443,10 @@ fn build_setup_plan(
 
 fn write_setup_plan(plan: &SetupPlan) -> Result<SetupWriteOutcome> {
     match &plan.kind {
-        SetupPlanKind::JsonMcpServers { root_key, server_value } => {
-            write_json_mcp_config(&plan.path, root_key, server_value)
-        }
+        SetupPlanKind::JsonMcpServers {
+            root_key,
+            server_value,
+        } => write_json_mcp_config(&plan.path, root_key, server_value),
         SetupPlanKind::CodexToml => write_codex_config(&plan.path, &plan.snippet),
         SetupPlanKind::PreviewOnly => bail!(
             "{}",
@@ -394,7 +458,11 @@ fn write_setup_plan(plan: &SetupPlan) -> Result<SetupWriteOutcome> {
     }
 }
 
-fn write_json_mcp_config(path: &Path, root_key: &str, server_value: &Value) -> Result<SetupWriteOutcome> {
+fn write_json_mcp_config(
+    path: &Path,
+    root_key: &str,
+    server_value: &Value,
+) -> Result<SetupWriteOutcome> {
     ensure_parent_dir(path)?;
 
     let mut root = if path.exists() {
@@ -420,7 +488,9 @@ fn write_json_mcp_config(path: &Path, root_key: &str, server_value: &Value) -> R
         ))
     })?;
 
-    let section = root_object.entry(root_key.to_string()).or_insert_with(|| json!({}));
+    let section = root_object
+        .entry(root_key.to_string())
+        .or_insert_with(|| json!({}));
     let section_object = section.as_object_mut().ok_or_else(|| {
         anyhow!(format_i18n(
             "err.mcp_setup_invalid_section",
@@ -537,7 +607,10 @@ fn json_mcp_snippet(root_key: &str, server_value: Value) -> Value {
 
 fn opencode_snippet(command: &str) -> Value {
     let mut root = serde_json::Map::new();
-    root.insert("$schema".to_string(), Value::String(OPENCODE_SCHEMA_URL.to_string()));
+    root.insert(
+        "$schema".to_string(),
+        Value::String(OPENCODE_SCHEMA_URL.to_string()),
+    );
 
     let mut mcp = serde_json::Map::new();
     mcp.insert(
@@ -599,7 +672,9 @@ fn latest_clipboard_text(response: &Response) -> Result<String, ErrorData> {
         .and_then(|data| data.get("text"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
-        .ok_or_else(|| ErrorData::internal_error(i18n::t("err.mcp_latest_clipboard_missing_text"), None))
+        .ok_or_else(|| {
+            ErrorData::internal_error(i18n::t("err.mcp_latest_clipboard_missing_text"), None)
+        })
 }
 
 fn tool_error(err: anyhow::Error) -> ErrorData {
@@ -710,7 +785,35 @@ impl DeckMcpServer {
     name = "deckclip-mcp",
     instructions = "Bridge Deck's local clipboard and AI workflow tools into the Deck app running on this machine."
 )]
-impl ServerHandler for DeckMcpServer {}
+impl ServerHandler for DeckMcpServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(
+                "deckclip-mcp",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(server_instructions())
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        Ok(ListToolsResult {
+            tools: localized_tool_catalog(),
+            meta: None,
+            next_cursor: None,
+        })
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        DeckMcpServer::tool_router()
+            .get(name)
+            .cloned()
+            .map(localize_tool_definition)
+    }
+}
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct WriteClipboardTextParams {
@@ -892,6 +995,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn localized_tool_catalog_uses_i18n_metadata() {
+        let tools = localized_tool_catalog();
+        let read_latest = tools
+            .into_iter()
+            .find(|tool| tool.name.as_ref() == TOOL_READ_LATEST)
+            .expect("expected localized read_latest tool");
+
+        assert_eq!(
+            read_latest.title.as_deref(),
+            Some(i18n::t("mcp.tool.read_latest.title").as_str())
+        );
+        assert_eq!(
+            read_latest.description.as_deref(),
+            Some(i18n::t("mcp.tools.read_latest.description").as_str())
+        );
+    }
+
+    #[test]
+    fn server_info_uses_localized_instructions() {
+        let server = DeckMcpServer::new();
+        let info = server.get_info();
+
+        assert_eq!(
+            info.instructions.as_deref(),
+            Some(i18n::t("mcp.server.instructions").as_str())
+        );
+    }
+
+    #[test]
     fn write_json_config_merges_existing_servers() {
         let temp_dir = std::env::temp_dir().join("deckclip-mcp-json-test");
         let file_path = temp_dir.join("claude_desktop_config.json");
@@ -921,7 +1053,8 @@ mod tests {
 
         assert!(matches!(outcome, SetupWriteOutcome::Written));
 
-        let updated: Value = serde_json::from_str(&fs::read_to_string(&file_path).unwrap()).unwrap();
+        let updated: Value =
+            serde_json::from_str(&fs::read_to_string(&file_path).unwrap()).unwrap();
         assert!(updated["mcpServers"]["existing"].is_object());
         assert_eq!(updated["mcpServers"]["deck"]["command"], "deckclip");
 
