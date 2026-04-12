@@ -2,6 +2,7 @@ use owo_colors::OwoColorize;
 use serde_json::json;
 
 use crate::i18n;
+use deckclip_core::DeckError;
 
 /// Output formatting mode.
 #[derive(Debug, Clone, Copy)]
@@ -52,14 +53,83 @@ impl OutputMode {
     }
 
     /// Print an error.
-    pub fn print_error(&self, err: &dyn std::fmt::Display) {
+    pub fn print_error(&self, err: &anyhow::Error) {
+        let message = localized_error_message(err);
         match self {
-            OutputMode::Text => eprintln!("{} {}", i18n::t("label.error").red().bold(), err),
+            OutputMode::Text => {
+                eprintln!("{} {}", i18n::t("label.error").red().bold(), message)
+            }
             OutputMode::Json => {
-                eprintln!("{}", json!({ "ok": false, "error": err.to_string() }));
+                eprintln!("{}", json!({ "ok": false, "error": message }));
             }
         }
     }
+}
+
+fn localized_error_message(err: &anyhow::Error) -> String {
+    if let Some(deck_err) = err.downcast_ref::<DeckError>() {
+        return format_deck_error(deck_err);
+    }
+    err.to_string()
+}
+
+fn format_deck_error(err: &DeckError) -> String {
+    match err {
+        DeckError::NotRunning => i18n::t("err.not_running"),
+        DeckError::Connection(message) => {
+            if message == "连接已关闭" {
+                i18n::t("err.conn_closed")
+            } else {
+                format_template("err.connection", &[message])
+            }
+        }
+        DeckError::Auth(message) => {
+            if message == "token 文件为空" {
+                i18n::t("err.token_empty")
+            } else if message == "认证被拒绝" {
+                i18n::t("err.auth_rejected")
+            } else if message == "无 session token" {
+                i18n::t("err.no_session")
+            } else if let Some((path, reason)) = parse_token_read_error(message) {
+                format_template("err.token_read", &[&path, &reason])
+            } else {
+                format_template("err.auth", &[message])
+            }
+        }
+        DeckError::TokenNotFound { path } => format_template("err.token_not_found", &[path]),
+        DeckError::Timeout => i18n::t("err.timeout"),
+        DeckError::Protocol(message) => {
+            if let Some((expected, got)) = parse_id_mismatch_error(message) {
+                format_template("err.id_mismatch", &[&expected, &got])
+            } else {
+                format_template("err.protocol", &[message])
+            }
+        }
+        DeckError::Server { code, message } => format_template("err.server", &[code, message]),
+        DeckError::Io(error) => format_template("err.io", &[&error.to_string()]),
+        DeckError::Other(error) => error.to_string(),
+    }
+}
+
+fn format_template(key: &str, values: &[&str]) -> String {
+    let mut rendered = i18n::t(key);
+    for value in values {
+        rendered = rendered.replacen("{}", value, 1);
+    }
+    rendered
+}
+
+fn parse_token_read_error(message: &str) -> Option<(String, String)> {
+    message
+        .strip_prefix("无法读取 token 文件 ")
+        .and_then(|rest| rest.rsplit_once(": "))
+        .map(|(path, reason)| (path.to_string(), reason.to_string()))
+}
+
+fn parse_id_mismatch_error(message: &str) -> Option<(String, String)> {
+    let rest = message.strip_prefix("响应 ID 不匹配: expected ")?;
+    let (expected, got) = rest.split_once(", got ")?;
+    Some((expected.to_string(), got.to_string()))
 }
 
 /// Read text from an optional argument or stdin.
