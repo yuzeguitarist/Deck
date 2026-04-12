@@ -29,7 +29,7 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tokio::sync::Mutex;
 
 use crate::commands::login;
-use crate::output::OutputMode;
+use crate::{i18n, output::OutputMode};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -653,12 +653,12 @@ struct TerminalGuard {
 
 impl TerminalGuard {
     fn enter() -> Result<Self> {
-        enable_raw_mode().context("无法进入终端 raw mode")?;
+        enable_raw_mode().context(i18n::t("err.chat_raw_mode"))?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-            .context("无法进入终端全屏模式")?;
+            .context(i18n::t("err.chat_enter_screen"))?;
         let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend).context("无法初始化终端 UI")?;
+        let terminal = Terminal::new(backend).context(i18n::t("err.chat_terminal_init"))?;
         Ok(Self { terminal })
     }
 
@@ -682,11 +682,11 @@ impl Drop for TerminalGuard {
 
 pub async fn run(output: OutputMode) -> Result<()> {
     if matches!(output, OutputMode::Json) {
-        bail!("deckclip chat 暂不支持 --json")
+        bail!(i18n::t("err.chat_json_unsupported"))
     }
 
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        bail!("deckclip chat 需要交互式终端")
+        bail!(i18n::t("err.chat_requires_tty"))
     }
 
     let primary_client = Arc::new(Mutex::new(DeckClient::new(Config::default())));
@@ -708,8 +708,8 @@ pub async fn run(output: OutputMode) -> Result<()> {
             break;
         }
 
-        if event::poll(Duration::from_millis(50)).context("读取终端事件失败")? {
-            match event::read().context("读取终端事件失败")? {
+        if event::poll(Duration::from_millis(50)).context(i18n::t("err.chat_event_read"))? {
+            match event::read().context(i18n::t("err.chat_event_read"))? {
                 Event::Key(key) => {
                     handle_key_event(&mut app, key, primary_client.clone(), ui_tx.clone())
                 }
@@ -1360,7 +1360,7 @@ fn maybe_request_more_history(
 async fn ensure_bootstrapped(client: Arc<Mutex<DeckClient>>) -> Result<BootstrapData> {
     let bootstrap = fetch_bootstrap(client.clone()).await?;
     if bootstrap.busy == Some(true) {
-        bail!("Deck AI 当前正被另一个活动会话占用，请先关闭它")
+        bail!(i18n::t("err.chat_busy"))
     }
     if bootstrap.configured {
         return Ok(bootstrap);
@@ -1370,10 +1370,10 @@ async fn ensure_bootstrapped(client: Arc<Mutex<DeckClient>>) -> Result<Bootstrap
 
     let bootstrap = fetch_bootstrap(client).await?;
     if !bootstrap.configured {
-        bail!("当前 AI Provider 尚未配置，无法进入 deckclip chat")
+        bail!(i18n::t("err.chat_provider_unconfigured"))
     }
     if bootstrap.busy == Some(true) {
-        bail!("Deck AI 当前正被另一个活动会话占用，请先关闭它")
+        bail!(i18n::t("err.chat_busy"))
     }
     Ok(bootstrap)
 }
@@ -1472,7 +1472,7 @@ async fn send_chat_message(
             }
             ChatStreamFrame::Response(response) => {
                 if !response.ok {
-                    return Err(anyhow!("聊天流返回了意外响应"));
+                    return Err(anyhow!(i18n::t("err.chat_unexpected_stream_response")));
                 }
             }
         }
@@ -1506,19 +1506,21 @@ fn parse_stream_event(event: deckclip_protocol::EventFrame) -> Result<UiEvent> {
             let message = data
                 .get("message")
                 .and_then(Value::as_str)
-                .unwrap_or("聊天流发生未知错误")
-                .to_string();
+                .map(str::to_string)
+                .unwrap_or_else(|| i18n::t("err.chat_unknown_stream_error"));
             Ok(UiEvent::Error(message))
         }
         other => Ok(UiEvent::FooterMessage(
-            format!("收到未识别事件: {}", other),
+            i18n::t("err.chat_unrecognized_event").replace("{}", other),
             MetaTone::Warning,
         )),
     }
 }
 
 fn response_data<T: DeserializeOwned>(response: deckclip_protocol::Response) -> Result<T> {
-    let data = response.data.ok_or_else(|| anyhow!("响应缺少 data 字段"))?;
+    let data = response
+        .data
+        .ok_or_else(|| anyhow!(i18n::t("err.response_missing_data")))?;
     serde_json::from_value(data).map_err(Into::into)
 }
 
@@ -2164,18 +2166,18 @@ fn copy_to_system_clipboard(text: &str) -> Result<()> {
     let mut child = Command::new("pbcopy")
         .stdin(Stdio::piped())
         .spawn()
-        .context("无法调用 pbcopy")?;
+        .context(i18n::t("err.clipboard_invoke_failed"))?;
 
     if let Some(stdin) = child.stdin.as_mut() {
         use std::io::Write;
         stdin
             .write_all(text.as_bytes())
-            .context("写入 pbcopy 失败")?;
+            .context(i18n::t("err.clipboard_write_failed"))?;
     }
 
-    let status = child.wait().context("等待 pbcopy 结束失败")?;
+    let status = child.wait().context(i18n::t("err.clipboard_wait_failed"))?;
     if !status.success() {
-        bail!("pbcopy 执行失败")
+        bail!(i18n::t("err.clipboard_copy_failed"))
     }
     Ok(())
 }

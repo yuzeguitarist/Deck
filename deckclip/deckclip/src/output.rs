@@ -1,6 +1,8 @@
 use owo_colors::OwoColorize;
 use serde_json::json;
 
+use crate::i18n;
+
 /// Output formatting mode.
 #[derive(Debug, Clone, Copy)]
 pub enum OutputMode {
@@ -52,7 +54,7 @@ impl OutputMode {
     /// Print an error.
     pub fn print_error(&self, err: &dyn std::fmt::Display) {
         match self {
-            OutputMode::Text => eprintln!("{} {}", "error:".red().bold(), err),
+            OutputMode::Text => eprintln!("{} {}", i18n::t("label.error").red().bold(), err),
             OutputMode::Json => {
                 eprintln!("{}", json!({ "ok": false, "error": err.to_string() }));
             }
