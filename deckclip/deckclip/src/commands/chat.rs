@@ -220,6 +220,36 @@ enum ChatMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AnimationState {
+    spinner_frame: usize,
+    elapsed_seconds: u64,
+    quit_hint_active: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum TranscriptTailKey {
+    #[default]
+    None,
+    Streaming {
+        version: u64,
+    },
+    Meta {
+        mode: ChatMode,
+        spinner_frame: usize,
+        elapsed_seconds: u64,
+    },
+}
+
+#[derive(Debug, Default)]
+struct TranscriptRenderCache {
+    width: usize,
+    base_revision: u64,
+    base_line_count: usize,
+    combined_lines: Vec<Line<'static>>,
+    tail_key: TranscriptTailKey,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuitHintTrigger {
     CtrlC,
     Esc,
@@ -400,6 +430,9 @@ struct ChatApp {
     busy_action: Option<String>,
     busy_started_at: Option<Instant>,
     streaming_text: String,
+    transcript_revision: u64,
+    streaming_revision: u64,
+    transcript_cache: TranscriptRenderCache,
     last_assistant_text: Option<String>,
     tool_states: HashMap<String, ToolLifecycle>,
     mode_started_at: Option<Instant>,
@@ -447,6 +480,9 @@ impl ChatApp {
             busy_action: None,
             busy_started_at: None,
             streaming_text: String::new(),
+            transcript_revision: 0,
+            streaming_revision: 0,
+            transcript_cache: TranscriptRenderCache::default(),
             last_assistant_text: None,
             tool_states: HashMap::new(),
             mode_started_at: None,
@@ -502,6 +538,8 @@ impl ChatApp {
         }
 
         self.auto_scroll = true;
+        self.bump_transcript_revision();
+        self.bump_streaming_revision();
     }
 
     fn conversation_updated(&mut self, session: SessionData) {
@@ -513,6 +551,7 @@ impl ChatApp {
             text: text.into(),
             tone,
         });
+        self.bump_transcript_revision();
     }
 
     fn set_footer(&mut self, text: impl Into<String>, tone: MetaTone) {
@@ -538,6 +577,14 @@ impl ChatApp {
     fn clear_busy_action(&mut self) {
         self.busy_action = None;
         self.busy_started_at = None;
+    }
+
+    fn bump_transcript_revision(&mut self) {
+        self.transcript_revision = self.transcript_revision.wrapping_add(1);
+    }
+
+    fn bump_streaming_revision(&mut self) {
+        self.streaming_revision = self.streaming_revision.wrapping_add(1);
     }
 
     fn clear_popup_hitboxes(&mut self) {
@@ -580,6 +627,8 @@ impl ChatApp {
         self.overlay = OverlayState::None;
         self.auto_scroll = true;
         self.clear_quit_hint();
+        self.bump_transcript_revision();
+        self.bump_streaming_revision();
         self.set_footer(chat_text("chat.footer.generating"), MetaTone::Info);
     }
 
@@ -589,6 +638,7 @@ impl ChatApp {
         self.streaming_text.clear();
         self.overlay = OverlayState::None;
         self.clear_busy_action();
+        self.bump_streaming_revision();
     }
 
     fn status_text(&self) -> String {
@@ -625,40 +675,103 @@ impl ChatApp {
         }
     }
 
-    fn all_entries(&self) -> Vec<TranscriptEntry> {
-        let mut entries = self.conversation_entries.clone();
-        entries.extend(self.activities.clone());
-        if !self.streaming_text.is_empty() {
-            entries.push(TranscriptEntry::Assistant(self.streaming_text.clone()));
-        } else if self.mode == ChatMode::Streaming {
-            entries.push(TranscriptEntry::Meta {
-                text: chat_format(
-                    "chat.meta.thinking",
-                    &[
-                        ("{spinner}", self.spinner_frame().to_string()),
-                        ("{elapsed}", self.elapsed_suffix()),
-                    ],
-                ),
-                tone: MetaTone::Dim,
-            });
-        } else if self.mode == ChatMode::AwaitingApproval {
-            entries.push(TranscriptEntry::Meta {
-                text: chat_format(
-                    "chat.meta.waiting_approval",
-                    &[
-                        ("{spinner}", self.spinner_frame().to_string()),
-                        ("{elapsed}", self.elapsed_suffix()),
-                    ],
-                ),
-                tone: MetaTone::Warning,
-            });
+    fn transcript_lines(&mut self, width: usize) -> &[Line<'static>] {
+        let width = width.max(1);
+        let tail_key = self.current_tail_key();
+        let rebuild_base = self.transcript_cache.width != width
+            || self.transcript_cache.base_revision != self.transcript_revision;
+
+        if rebuild_base {
+            self.transcript_cache.width = width;
+            self.transcript_cache.base_revision = self.transcript_revision;
+            self.transcript_cache.combined_lines =
+                build_transcript_base_lines(&self.conversation_entries, &self.activities, width);
+            self.transcript_cache.base_line_count = self.transcript_cache.combined_lines.len();
+            self.transcript_cache.tail_key = TranscriptTailKey::None;
         }
-        entries
+
+        if rebuild_base || self.transcript_cache.tail_key != tail_key {
+            let tail_lines = build_transcript_tail_lines(self, width);
+            self.transcript_cache
+                .combined_lines
+                .truncate(self.transcript_cache.base_line_count);
+            self.transcript_cache.combined_lines.extend(tail_lines);
+            if self.transcript_cache.combined_lines.is_empty() {
+                self.transcript_cache
+                    .combined_lines
+                    .push(Line::from(Span::styled(
+                        chat_text("chat.empty"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+            }
+            self.transcript_cache.tail_key = tail_key;
+        }
+
+        &self.transcript_cache.combined_lines
+    }
+
+    fn current_tail_key(&self) -> TranscriptTailKey {
+        if !self.streaming_text.is_empty() {
+            return TranscriptTailKey::Streaming {
+                version: self.streaming_revision,
+            };
+        }
+
+        match self.mode {
+            ChatMode::Streaming | ChatMode::AwaitingApproval => TranscriptTailKey::Meta {
+                mode: self.mode,
+                spinner_frame: self.spinner_frame_index(),
+                elapsed_seconds: self
+                    .mode_started_at
+                    .or(self.busy_started_at)
+                    .map(|started_at| started_at.elapsed().as_secs())
+                    .unwrap_or(0),
+            },
+            ChatMode::Ready => TranscriptTailKey::None,
+        }
+    }
+
+    fn animation_state(&self) -> Option<AnimationState> {
+        let animated = self.busy_action.is_some()
+            || matches!(self.mode, ChatMode::Streaming | ChatMode::AwaitingApproval);
+        let has_timed_footer = self.quit_hint_until.is_some();
+        if !animated && !has_timed_footer {
+            return None;
+        }
+
+        Some(AnimationState {
+            spinner_frame: if animated {
+                self.spinner_frame_index()
+            } else {
+                0
+            },
+            elapsed_seconds: if animated {
+                self.mode_started_at
+                    .or(self.busy_started_at)
+                    .map(|started_at| started_at.elapsed().as_secs())
+                    .unwrap_or(0)
+            } else {
+                0
+            },
+            quit_hint_active: self.quit_hint_active(),
+        })
+    }
+
+    fn poll_timeout(&self) -> Duration {
+        if self.animation_state().is_some() {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(200)
+        }
+    }
+
+    fn spinner_frame_index(&self) -> usize {
+        let elapsed_ms = self.created_at.elapsed().as_millis() as usize;
+        (elapsed_ms / 80) % THINKING_FRAMES.len()
     }
 
     fn spinner_frame(&self) -> &'static str {
-        let elapsed_ms = self.created_at.elapsed().as_millis() as usize;
-        THINKING_FRAMES[(elapsed_ms / 80) % THINKING_FRAMES.len()]
+        THINKING_FRAMES[self.spinner_frame_index()]
     }
 
     fn elapsed_suffix(&self) -> String {
@@ -955,6 +1068,8 @@ impl ChatApp {
         self.dragging_body_scrollbar = false;
         self.clear_busy_action();
         self.clear_composer();
+        self.bump_transcript_revision();
+        self.bump_streaming_revision();
     }
 
     fn set_input(&mut self, value: String) {
@@ -1144,13 +1259,16 @@ impl ChatApp {
             .is_some_and(|deadline| deadline > Instant::now())
     }
 
-    fn tick(&mut self) {
+    fn tick(&mut self) -> bool {
         if self
             .quit_hint_until
             .is_some_and(|deadline| deadline <= Instant::now())
         {
             self.clear_quit_hint();
+            return true;
         }
+
+        false
     }
 }
 
@@ -1230,32 +1348,47 @@ pub async fn run(output: OutputMode) -> Result<()> {
     }
     let (ui_tx, mut ui_rx) = unbounded_channel();
     let mut terminal = TerminalGuard::enter()?;
+    let mut needs_redraw = true;
+    let mut last_animation_state = None;
 
     loop {
-        app.tick();
+        needs_redraw |= app.tick();
 
         while let Ok(message) = ui_rx.try_recv() {
             handle_ui_event(&mut app, message);
+            needs_redraw = true;
         }
 
-        terminal.draw(&mut app)?;
+        let animation_state = app.animation_state();
+        if animation_state != last_animation_state {
+            last_animation_state = animation_state;
+            needs_redraw = true;
+        }
+
+        if needs_redraw {
+            terminal.draw(&mut app)?;
+            needs_redraw = false;
+        }
 
         if app.should_quit {
             break;
         }
 
-        if event::poll(Duration::from_millis(50)).context(i18n::t("err.chat_event_read"))? {
+        if event::poll(app.poll_timeout()).context(i18n::t("err.chat_event_read"))? {
             match event::read().context(i18n::t("err.chat_event_read"))? {
                 Event::Key(key) => {
-                    handle_key_event(&mut app, key, primary_client.clone(), ui_tx.clone())
+                    handle_key_event(&mut app, key, primary_client.clone(), ui_tx.clone());
+                    needs_redraw = true;
                 }
                 Event::Paste(text) => {
-                    handle_paste(&mut app, text, primary_client.clone(), ui_tx.clone())
+                    handle_paste(&mut app, text, primary_client.clone(), ui_tx.clone());
+                    needs_redraw = true;
                 }
                 Event::Mouse(mouse) => {
-                    handle_mouse_event(&mut app, mouse, primary_client.clone(), ui_tx.clone())
+                    handle_mouse_event(&mut app, mouse, primary_client.clone(), ui_tx.clone());
+                    needs_redraw = true;
                 }
-                Event::Resize(_, _) => {}
+                Event::Resize(_, _) => needs_redraw = true,
                 _ => {}
             }
         }
@@ -1899,6 +2032,7 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
         }
         UiEvent::AssistantDelta(delta) => {
             app.streaming_text.push_str(&delta);
+            app.bump_streaming_revision();
         }
         UiEvent::TerminalPasteResolved {
             pasted_text,
@@ -2405,8 +2539,8 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut ChatApp) {
     } else {
         None
     };
-    let lines = transcript_lines(app, content_area.width as usize);
-    let max_scroll = lines.len().saturating_sub(content_area.height as usize);
+    let total_lines = app.transcript_lines(content_area.width as usize).len();
+    let max_scroll = total_lines.saturating_sub(content_area.height as usize);
     if app.auto_scroll {
         app.scroll = max_scroll;
     } else if app.scroll > max_scroll {
@@ -2417,9 +2551,14 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut ChatApp) {
         app.auto_scroll = true;
     }
 
-    let total_lines = lines.len();
     app.update_body_scrollbar_state(scrollbar_area, content_area.height as usize, total_lines);
-    let paragraph = Paragraph::new(lines).scroll((app.scroll as u16, 0));
+    let visible_lines = {
+        let scroll = app.scroll;
+        let lines = app.transcript_lines(content_area.width as usize);
+        let end = (scroll + content_area.height as usize).min(lines.len());
+        lines[scroll..end].to_vec()
+    };
+    let paragraph = Paragraph::new(visible_lines);
     frame.render_widget(paragraph, content_area);
 
     if let Some(scrollbar_area) = scrollbar_area {
@@ -2779,54 +2918,125 @@ fn render_history_overlay(
     );
 }
 
-fn transcript_lines(app: &ChatApp, width: usize) -> Vec<Line<'static>> {
+fn build_transcript_base_lines(
+    conversation_entries: &[TranscriptEntry],
+    activities: &[TranscriptEntry],
+    width: usize,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
 
-    for entry in app.all_entries() {
-        let line_start = lines.len();
-        match entry {
-            TranscriptEntry::User { text, attachments } => {
-                for attachment in attachments {
-                    lines.push(attachment_chip_line(&attachment, width, false, "  "));
-                }
-                if !text.trim().is_empty() {
-                    push_wrapped_lines(
-                        &mut lines,
-                        width,
-                        "> ",
-                        "  ",
-                        &text,
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    );
-                }
-            }
-            TranscriptEntry::Assistant(text) => push_wrapped_lines(
-                &mut lines,
-                width,
-                "< ",
-                "  ",
-                &text,
-                Style::default().fg(Color::Cyan),
-            ),
-            TranscriptEntry::Meta { text, tone } => {
-                push_wrapped_lines(&mut lines, width, "· ", "  ", &text, tone.style())
-            }
-        }
-        if lines.len() > line_start {
-            lines.push(Line::from(""));
-        }
+    for entry in conversation_entries {
+        push_transcript_entry_lines(&mut lines, width, entry);
     }
 
-    if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
-            chat_text("chat.empty"),
-            Style::default().fg(Color::DarkGray),
-        )));
+    for entry in activities {
+        push_transcript_entry_lines(&mut lines, width, entry);
     }
 
     lines
+}
+
+fn build_transcript_tail_lines(app: &ChatApp, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+
+    if !app.streaming_text.is_empty() {
+        push_assistant_entry_lines(&mut lines, width, &app.streaming_text);
+        return lines;
+    }
+
+    match app.mode {
+        ChatMode::Streaming => push_meta_entry_lines(
+            &mut lines,
+            width,
+            &chat_format(
+                "chat.meta.thinking",
+                &[
+                    ("{spinner}", app.spinner_frame().to_string()),
+                    ("{elapsed}", app.elapsed_suffix()),
+                ],
+            ),
+            MetaTone::Dim,
+        ),
+        ChatMode::AwaitingApproval => push_meta_entry_lines(
+            &mut lines,
+            width,
+            &chat_format(
+                "chat.meta.waiting_approval",
+                &[
+                    ("{spinner}", app.spinner_frame().to_string()),
+                    ("{elapsed}", app.elapsed_suffix()),
+                ],
+            ),
+            MetaTone::Warning,
+        ),
+        ChatMode::Ready => {}
+    }
+
+    lines
+}
+
+fn push_transcript_entry_lines(
+    lines: &mut Vec<Line<'static>>,
+    width: usize,
+    entry: &TranscriptEntry,
+) {
+    match entry {
+        TranscriptEntry::User { text, attachments } => {
+            push_user_entry_lines(lines, width, text, attachments)
+        }
+        TranscriptEntry::Assistant(text) => push_assistant_entry_lines(lines, width, text),
+        TranscriptEntry::Meta { text, tone } => push_meta_entry_lines(lines, width, text, *tone),
+    }
+}
+
+fn push_user_entry_lines(
+    lines: &mut Vec<Line<'static>>,
+    width: usize,
+    text: &str,
+    attachments: &[ChatAttachmentData],
+) {
+    let line_start = lines.len();
+    for attachment in attachments {
+        lines.push(attachment_chip_line(attachment, width, false, "  "));
+    }
+    if !text.trim().is_empty() {
+        push_wrapped_lines(
+            lines,
+            width,
+            "> ",
+            "  ",
+            text,
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+    if lines.len() > line_start {
+        lines.push(Line::from(""));
+    }
+}
+
+fn push_assistant_entry_lines(lines: &mut Vec<Line<'static>>, width: usize, text: &str) {
+    let line_start = lines.len();
+    push_wrapped_lines(
+        lines,
+        width,
+        "< ",
+        "  ",
+        text,
+        Style::default().fg(Color::Cyan),
+    );
+    if lines.len() > line_start {
+        lines.push(Line::from(""));
+    }
+}
+
+fn push_meta_entry_lines(lines: &mut Vec<Line<'static>>, width: usize, text: &str, tone: MetaTone) {
+    let line_start = lines.len();
+    push_wrapped_lines(lines, width, "· ", "  ", text, tone.style());
+    if lines.len() > line_start {
+        lines.push(Line::from(""));
+    }
 }
 
 fn push_wrapped_lines(

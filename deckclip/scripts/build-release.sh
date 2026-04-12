@@ -17,6 +17,8 @@ set -euo pipefail
 #   TARGET     编译目标，支持 native / aarch64-apple-darwin /
 #              x86_64-apple-darwin / universal-apple-darwin
 #              (默认: 当前架构)
+#   KEEP_SLICE_ARTIFACTS=1
+#              universal 构建完成后保留两个架构的中间 release 产物
 # ==========================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,6 +31,7 @@ fi
 
 CARGO="${CARGO:-cargo}"
 RUSTUP="${RUSTUP:-rustup}"
+KEEP_SLICE_ARTIFACTS="${KEEP_SLICE_ARTIFACTS:-0}"
 BINARY_NAME="deckclip"
 
 detect_native_target() {
@@ -149,6 +152,13 @@ if [[ -n "${1:-}" ]]; then
     cp -f "$BINARY" "$RESOURCES_DIR/$BINARY_NAME"
     chmod +x "$RESOURCES_DIR/$BINARY_NAME"
     echo "$((STEP + 1))) Injected into: $RESOURCES_DIR/$BINARY_NAME"
+fi
+
+if [[ "$UNIVERSAL_BUILD" == "1" && "$KEEP_SLICE_ARTIFACTS" != "1" ]]; then
+    for BUILD_TARGET in "${BUILD_TARGETS[@]}"; do
+        rm -rf "$PROJECT_DIR/target/$BUILD_TARGET/release"
+    done
+    echo "   Cleaned per-arch release artifacts to save disk space"
 fi
 
 echo ""
