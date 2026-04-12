@@ -211,38 +211,79 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "/cost",
         aliases: &[],
-        description: "查看当前上下文占用",
+        description: "chat.slash.cost.description",
     },
     SlashCommand {
         name: "/compact",
         aliases: &[],
-        description: "压缩当前会话上下文",
+        description: "chat.slash.compact.description",
     },
     SlashCommand {
         name: "/copy",
         aliases: &[],
-        description: "复制最后一条 AI 回复",
+        description: "chat.slash.copy.description",
     },
     SlashCommand {
         name: "/resume",
         aliases: &[],
-        description: "打开历史会话列表",
+        description: "chat.slash.resume.description",
     },
     SlashCommand {
         name: "/clear",
         aliases: &["/new"],
-        description: "新建一个空白会话",
+        description: "chat.slash.clear.description",
     },
     SlashCommand {
         name: "/help",
         aliases: &[],
-        description: "显示可用命令说明",
+        description: "chat.slash.help.description",
     },
 ];
 
 const THINKING_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const QUIT_HINT_TEXT: &str = "再按一次 Ctrl+C 即可关闭";
 const HISTORY_PAGE_SIZE: u32 = 24;
+
+fn chat_text(key: &str) -> String {
+    i18n::t(key)
+}
+
+fn chat_format(key: &str, replacements: &[(&str, String)]) -> String {
+    let mut text = chat_text(key);
+    for (placeholder, value) in replacements {
+        text = text.replace(placeholder, value);
+    }
+    text
+}
+
+fn message_count_text(count: usize) -> String {
+    match i18n::locale() {
+        "en" => {
+            if count == 1 {
+                "1 message".to_string()
+            } else {
+                format!("{} messages", count)
+            }
+        }
+        "de" => {
+            if count == 1 {
+                "1 Nachricht".to_string()
+            } else {
+                format!("{} Nachrichten", count)
+            }
+        }
+        "fr" => {
+            if count == 1 {
+                "1 message".to_string()
+            } else {
+                format!("{} messages", count)
+            }
+        }
+        "ja" => format!("{} 件のメッセージ", count),
+        "ko" => format!("메시지 {}개", count),
+        "zh-Hant" => format!("{} 條訊息", count),
+        _ => format!("{} 条消息", count),
+    }
+}
 
 struct ChatApp {
     session_id: String,
@@ -278,9 +319,11 @@ impl ChatApp {
         Self {
             session_id: String::new(),
             conversation_id: String::new(),
-            conversation_title: "新对话".to_string(),
+            conversation_title: chat_text("chat.conversation.new"),
             provider: bootstrap.provider.unwrap_or_else(|| "AI".to_string()),
-            model: bootstrap.model.unwrap_or_else(|| "未开始".to_string()),
+            model: bootstrap
+                .model
+                .unwrap_or_else(|| chat_text("chat.model.not_started")),
             account: bootstrap.account,
             context_usage: None,
             conversation_entries: Vec::new(),
@@ -290,10 +333,7 @@ impl ChatApp {
             slash_selected: 0,
             overlay: OverlayState::None,
             mode: ChatMode::Ready,
-            footer_message: Some((
-                "Deck AI 已就绪，输入内容直接发送，输入 /help 查看命令。".to_string(),
-                MetaTone::Dim,
-            )),
+            footer_message: Some((chat_text("chat.footer.ready"), MetaTone::Dim)),
             busy_action: None,
             busy_started_at: None,
             streaming_text: String::new(),
@@ -377,7 +417,7 @@ impl ChatApp {
         self.overlay = OverlayState::None;
         self.auto_scroll = true;
         self.clear_quit_hint();
-        self.set_footer("Deck AI 正在生成回复…", MetaTone::Info);
+        self.set_footer(chat_text("chat.footer.generating"), MetaTone::Info);
     }
 
     fn finish_send(&mut self) {
@@ -393,17 +433,21 @@ impl ChatApp {
             return format!("{} {}", self.spinner_frame(), action);
         }
         match self.mode {
-            ChatMode::Ready => "Ready".to_string(),
-            ChatMode::Streaming => {
-                format!("{} Thinking{}", self.spinner_frame(), self.elapsed_suffix())
-            }
-            ChatMode::AwaitingApproval => {
-                format!(
-                    "{} Waiting approval{}",
-                    self.spinner_frame(),
-                    self.elapsed_suffix()
-                )
-            }
+            ChatMode::Ready => chat_text("chat.status.ready"),
+            ChatMode::Streaming => chat_format(
+                "chat.status.thinking",
+                &[
+                    ("{spinner}", self.spinner_frame().to_string()),
+                    ("{elapsed}", self.elapsed_suffix()),
+                ],
+            ),
+            ChatMode::AwaitingApproval => chat_format(
+                "chat.status.waiting_approval",
+                &[
+                    ("{spinner}", self.spinner_frame().to_string()),
+                    ("{elapsed}", self.elapsed_suffix()),
+                ],
+            ),
         }
     }
 
@@ -425,19 +469,23 @@ impl ChatApp {
             entries.push(TranscriptEntry::Assistant(self.streaming_text.clone()));
         } else if self.mode == ChatMode::Streaming {
             entries.push(TranscriptEntry::Meta {
-                text: format!(
-                    "{} Deck AI 正在思考{}",
-                    self.spinner_frame(),
-                    self.elapsed_suffix()
+                text: chat_format(
+                    "chat.meta.thinking",
+                    &[
+                        ("{spinner}", self.spinner_frame().to_string()),
+                        ("{elapsed}", self.elapsed_suffix()),
+                    ],
                 ),
                 tone: MetaTone::Dim,
             });
         } else if self.mode == ChatMode::AwaitingApproval {
             entries.push(TranscriptEntry::Meta {
-                text: format!(
-                    "{} 工具调用正在等待你的确认{}",
-                    self.spinner_frame(),
-                    self.elapsed_suffix()
+                text: chat_format(
+                    "chat.meta.waiting_approval",
+                    &[
+                        ("{spinner}", self.spinner_frame().to_string()),
+                        ("{elapsed}", self.elapsed_suffix()),
+                    ],
                 ),
                 tone: MetaTone::Warning,
             });
@@ -487,7 +535,7 @@ impl ChatApp {
     fn reset_to_empty_conversation(&mut self) {
         self.session_id.clear();
         self.conversation_id.clear();
-        self.conversation_title = "新对话".to_string();
+        self.conversation_title = chat_text("chat.conversation.new");
         self.context_usage = None;
         self.conversation_entries.clear();
         self.activities.clear();
@@ -618,15 +666,16 @@ impl ChatApp {
 
     fn arm_quit_hint(&mut self) {
         self.quit_hint_until = Some(Instant::now() + Duration::from_secs(1));
-        self.set_footer(QUIT_HINT_TEXT, MetaTone::Warning);
+        self.set_footer(chat_text("chat.quit_hint"), MetaTone::Warning);
     }
 
     fn clear_quit_hint(&mut self) {
         self.quit_hint_until = None;
+        let quit_hint = chat_text("chat.quit_hint");
         if self
             .footer_message
             .as_ref()
-            .is_some_and(|(text, _)| text == QUIT_HINT_TEXT)
+            .is_some_and(|(text, _)| text == &quit_hint)
         {
             self.footer_message = None;
         }
@@ -742,7 +791,7 @@ fn handle_key_event(
     match &mut app.overlay {
         OverlayState::Approval(overlay) => {
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                app.set_footer("当前有待审批操作，请先按 Y 或 N。", MetaTone::Warning);
+                app.set_footer(chat_text("chat.footer.approval_pending"), MetaTone::Warning);
                 return;
             }
 
@@ -752,11 +801,14 @@ fn handle_key_event(
                     let call_id = overlay.call_id.clone();
                     app.overlay = OverlayState::None;
                     app.mode = ChatMode::Streaming;
-                    app.set_footer("已批准工具调用，继续执行…", MetaTone::Info);
+                    app.set_footer(
+                        chat_text("chat.footer.tool_approved_continue"),
+                        MetaTone::Info,
+                    );
                     tokio::spawn(async move {
                         let event = match respond_to_approval(&session_id, &call_id, true).await {
                             Ok(()) => UiEvent::FooterMessage(
-                                "已批准工具调用。".to_string(),
+                                chat_text("chat.footer.tool_approved"),
                                 MetaTone::Info,
                             ),
                             Err(error) => UiEvent::Error(error.to_string()),
@@ -769,11 +821,11 @@ fn handle_key_event(
                     let call_id = overlay.call_id.clone();
                     app.overlay = OverlayState::None;
                     app.mode = ChatMode::Streaming;
-                    app.set_footer("已拒绝工具调用。", MetaTone::Warning);
+                    app.set_footer(chat_text("chat.footer.tool_rejected"), MetaTone::Warning);
                     tokio::spawn(async move {
                         let event = match respond_to_approval(&session_id, &call_id, false).await {
                             Ok(()) => UiEvent::FooterMessage(
-                                "已拒绝工具调用。".to_string(),
+                                chat_text("chat.footer.tool_rejected"),
                                 MetaTone::Warning,
                             ),
                             Err(error) => UiEvent::Error(error.to_string()),
@@ -791,12 +843,12 @@ fn handle_key_event(
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     app.overlay = OverlayState::None;
                     app.clear_quit_hint();
-                    app.set_footer("已关闭历史列表。", MetaTone::Dim);
+                    app.set_footer(chat_text("chat.footer.history_closed"), MetaTone::Dim);
                 }
                 KeyCode::Esc => {
                     app.overlay = OverlayState::None;
                     app.clear_quit_hint();
-                    app.set_footer("已关闭历史列表。", MetaTone::Dim);
+                    app.set_footer(chat_text("chat.footer.history_closed"), MetaTone::Dim);
                 }
                 KeyCode::Up | KeyCode::Char('k') => {
                     if overlay.selected > 0 {
@@ -830,7 +882,7 @@ fn handle_key_event(
                 KeyCode::Enter => {
                     if let Some(item) = overlay.items.get(overlay.selected).cloned() {
                         app.overlay = OverlayState::None;
-                        app.set_busy_action("正在恢复会话历史…");
+                        app.set_busy_action(chat_text("chat.busy.restoring_history"));
                         let session_id = if app.has_session() {
                             Some(app.session_id.clone())
                         } else {
@@ -866,11 +918,11 @@ fn handle_key_event(
         if app.mode != ChatMode::Ready {
             if app.has_session() {
                 let session_id = app.session_id.clone();
-                app.set_footer("正在中断当前回复…", MetaTone::Warning);
+                app.set_footer(chat_text("chat.footer.interrupting"), MetaTone::Warning);
                 tokio::spawn(async move {
                     let event = match cancel_stream(&session_id).await {
                         Ok(()) => UiEvent::FooterMessage(
-                            "已发送中断请求。".to_string(),
+                            chat_text("chat.footer.interrupt_sent"),
                             MetaTone::Warning,
                         ),
                         Err(error) => UiEvent::Error(error.to_string()),
@@ -878,7 +930,7 @@ fn handle_key_event(
                     let _ = ui_tx.send(event);
                 });
             } else {
-                app.set_footer("正在创建会话，请稍候…", MetaTone::Warning);
+                app.set_footer(chat_text("chat.footer.creating_session"), MetaTone::Warning);
             }
             return;
         }
@@ -904,7 +956,10 @@ fn handle_key_event(
             KeyCode::Tab => {
                 if let Some(command) = app.complete_selected_slash() {
                     app.set_footer(
-                        format!("已选择 {}，按 Enter 执行。", command),
+                        chat_format(
+                            "chat.footer.slash_selected",
+                            &[("{command}", command.to_string())],
+                        ),
                         MetaTone::Dim,
                     );
                 }
@@ -912,7 +967,7 @@ fn handle_key_event(
             }
             KeyCode::Enter => {
                 if app.busy_action.is_some() {
-                    app.set_footer("当前仍有后台操作，请稍候。", MetaTone::Warning);
+                    app.set_footer(chat_text("chat.footer.busy_wait"), MetaTone::Warning);
                     return;
                 }
 
@@ -925,7 +980,10 @@ fn handle_key_event(
                 if selected.is_some() && normalize_slash_command(&submitted).is_none() {
                     if let Some(command) = app.complete_selected_slash() {
                         app.set_footer(
-                            format!("已选择 {}，按 Enter 执行。", command),
+                            chat_format(
+                                "chat.footer.slash_selected",
+                                &[("{command}", command.to_string())],
+                            ),
                             MetaTone::Dim,
                         );
                     }
@@ -940,15 +998,15 @@ fn handle_key_event(
         KeyCode::Esc => {
             if app.slash_query().is_some() {
                 app.clear_input();
-                app.set_footer("已取消 slash 命令输入。", MetaTone::Dim);
+                app.set_footer(chat_text("chat.footer.slash_cancelled"), MetaTone::Dim);
             } else if app.mode == ChatMode::Streaming || app.mode == ChatMode::AwaitingApproval {
                 if app.has_session() {
                     let session_id = app.session_id.clone();
-                    app.set_footer("正在停止当前回复…", MetaTone::Warning);
+                    app.set_footer(chat_text("chat.footer.stopping"), MetaTone::Warning);
                     tokio::spawn(async move {
                         let event = match cancel_stream(&session_id).await {
                             Ok(()) => UiEvent::FooterMessage(
-                                "已发送停止请求。".to_string(),
+                                chat_text("chat.footer.stop_sent"),
                                 MetaTone::Warning,
                             ),
                             Err(error) => UiEvent::Error(error.to_string()),
@@ -956,7 +1014,7 @@ fn handle_key_event(
                         let _ = ui_tx.send(event);
                     });
                 } else {
-                    app.set_footer("正在创建会话，请稍候…", MetaTone::Warning);
+                    app.set_footer(chat_text("chat.footer.creating_session"), MetaTone::Warning);
                 }
             } else {
                 app.should_quit = true;
@@ -999,7 +1057,7 @@ fn handle_key_event(
         }
         KeyCode::Enter => {
             if app.busy_action.is_some() {
-                app.set_footer("当前仍有后台操作，请稍候。", MetaTone::Warning);
+                app.set_footer(chat_text("chat.footer.busy_wait"), MetaTone::Warning);
                 return;
             }
 
@@ -1016,7 +1074,7 @@ fn handle_key_event(
 
             if app.mode != ChatMode::Ready {
                 app.set_footer(
-                    "当前回复尚未完成，请先等待或按 ESC 停止。",
+                    chat_text("chat.footer.reply_incomplete_stop"),
                     MetaTone::Warning,
                 );
                 return;
@@ -1110,39 +1168,49 @@ fn handle_slash_command(
     let command = match normalize_slash_command(input.trim()) {
         Some(command) => command,
         None => {
-            app.set_footer("未知命令。输入 /help 查看可用命令。", MetaTone::Warning);
+            app.set_footer(chat_text("chat.footer.unknown_command"), MetaTone::Warning);
             return;
         }
     };
 
     match command {
         "/help" => {
-            app.push_activity("/cost 查看上下文占用  /compact 手动压缩  /copy 复制最后一条回复  /resume 恢复历史会话  /clear 或 /new 新建会话", MetaTone::Dim);
-            app.set_footer("可用命令已显示在消息区。", MetaTone::Dim);
+            app.push_activity(chat_text("chat.activity.help_commands"), MetaTone::Dim);
+            app.set_footer(chat_text("chat.footer.help_shown"), MetaTone::Dim);
         }
         "/cost" => {
             if let Some(usage) = &app.context_usage {
                 app.set_footer(
-                    format!(
-                        "上下文占用 {}  ({} / {})",
-                        usage.usage_percent_text, usage.estimated_tokens, usage.context_window_size
+                    chat_format(
+                        "chat.footer.context_usage",
+                        &[
+                            ("{usage}", usage.usage_percent_text.clone()),
+                            ("{tokens}", usage.estimated_tokens.to_string()),
+                            ("{window}", usage.context_window_size.to_string()),
+                        ],
                     ),
                     MetaTone::Info,
                 );
             } else {
-                app.set_footer("当前还没有上下文占用数据。", MetaTone::Dim);
+                app.set_footer(chat_text("chat.footer.no_context_usage"), MetaTone::Dim);
             }
         }
         "/copy" => match app.last_assistant_text.clone() {
             Some(text) if !text.trim().is_empty() => match copy_to_system_clipboard(&text) {
-                Ok(()) => app.set_footer("已复制最后一条回复到系统剪贴板。", MetaTone::Success),
+                Ok(()) => app.set_footer(
+                    chat_text("chat.footer.copied_last_reply"),
+                    MetaTone::Success,
+                ),
                 Err(error) => app.set_footer(error.to_string(), MetaTone::Error),
             },
-            _ => app.set_footer("当前还没有可复制的 AI 回复。", MetaTone::Warning),
+            _ => app.set_footer(chat_text("chat.footer.no_reply_to_copy"), MetaTone::Warning),
         },
         "/clear" => {
             if app.mode != ChatMode::Ready {
-                app.set_footer("当前回复尚未完成，无法新建会话。", MetaTone::Warning);
+                app.set_footer(
+                    chat_text("chat.footer.cannot_clear_while_replying"),
+                    MetaTone::Warning,
+                );
                 return;
             }
 
@@ -1153,16 +1221,16 @@ fn handle_slash_command(
             };
             app.reset_to_empty_conversation();
             app.set_footer(
-                "已清空当前对话，下一条消息会创建新会话。",
+                chat_text("chat.footer.cleared_new_message_creates_session"),
                 MetaTone::Success,
             );
 
             if let Some(session_id) = session_id {
-                app.set_busy_action("正在清理当前会话…");
+                app.set_busy_action(chat_text("chat.busy.clearing_session"));
                 tokio::spawn(async move {
                     let _ = close_chat_session(primary_client, &session_id).await;
                     let _ = ui_tx.send(UiEvent::FooterMessage(
-                        "已准备新的空白对话。".to_string(),
+                        chat_text("chat.footer.blank_conversation_ready"),
                         MetaTone::Success,
                     ));
                 });
@@ -1170,11 +1238,14 @@ fn handle_slash_command(
         }
         "/resume" => {
             if app.mode != ChatMode::Ready {
-                app.set_footer("当前回复尚未完成，无法恢复历史会话。", MetaTone::Warning);
+                app.set_footer(
+                    chat_text("chat.footer.cannot_resume_while_replying"),
+                    MetaTone::Warning,
+                );
                 return;
             }
 
-            app.set_busy_action("正在读取会话历史…");
+            app.set_busy_action(chat_text("chat.busy.loading_history"));
             tokio::spawn(async move {
                 let event =
                     match list_history(primary_client, None, None, Some(HISTORY_PAGE_SIZE)).await {
@@ -1189,16 +1260,22 @@ fn handle_slash_command(
         }
         "/compact" => {
             if app.mode != ChatMode::Ready {
-                app.set_footer("当前回复尚未完成，无法压缩上下文。", MetaTone::Warning);
+                app.set_footer(
+                    chat_text("chat.footer.cannot_compact_while_replying"),
+                    MetaTone::Warning,
+                );
                 return;
             }
 
             if !app.has_session() {
-                app.set_footer("当前还没有可压缩的对话。", MetaTone::Warning);
+                app.set_footer(
+                    chat_text("chat.footer.nothing_to_compact"),
+                    MetaTone::Warning,
+                );
                 return;
             }
 
-            app.set_busy_action("正在压缩上下文…");
+            app.set_busy_action(chat_text("chat.busy.compacting"));
             let session_id = app.session_id.clone();
             tokio::spawn(async move {
                 let event = match compact_session(primary_client, &session_id).await {
@@ -1208,7 +1285,7 @@ fn handle_slash_command(
                 let _ = ui_tx.send(event);
             });
         }
-        _ => app.set_footer("未知命令。输入 /help 查看可用命令。", MetaTone::Warning),
+        _ => app.set_footer(chat_text("chat.footer.unknown_command"), MetaTone::Warning),
     }
 }
 
@@ -1217,7 +1294,7 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
         UiEvent::SessionOpened(session) => {
             app.replace_session(session, true);
             app.clear_busy_action();
-            app.set_footer("会话已就绪。", MetaTone::Success);
+            app.set_footer(chat_text("chat.footer.session_ready"), MetaTone::Success);
         }
         UiEvent::SessionAttached(session) => {
             app.replace_session(session, false);
@@ -1257,18 +1334,32 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
                 tool: tool.tool.clone(),
                 preview: approval_preview(&tool),
             });
-            app.set_footer("需要审批。按 Y 同意，按 N 拒绝。", MetaTone::Warning);
+            app.set_footer(
+                chat_text("chat.footer.approval_required"),
+                MetaTone::Warning,
+            );
         }
         UiEvent::Compacting(data) => {
             if data.completed == Some(true) {
                 let suffix = data
                     .compressed_count
-                    .map(|count| format!("，压缩了 {} 段历史", count))
+                    .map(|count| {
+                        chat_format(
+                            "chat.footer.compact_done_suffix",
+                            &[("{count}", count.to_string())],
+                        )
+                    })
                     .unwrap_or_default();
-                app.set_footer(format!("上下文压缩完成{}。", suffix), MetaTone::Success);
+                app.set_footer(
+                    chat_format("chat.footer.compact_done", &[("{suffix}", suffix)]),
+                    MetaTone::Success,
+                );
             } else if data.attempt > 0 {
                 app.set_footer(
-                    format!("正在自动压缩上下文（第 {} 次）…", data.attempt),
+                    chat_format(
+                        "chat.footer.compacting_attempt",
+                        &[("{attempt}", data.attempt.to_string())],
+                    ),
                     MetaTone::Info,
                 );
             }
@@ -1276,19 +1367,19 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
         UiEvent::Done(done) => {
             app.last_assistant_text = Some(done.text);
             app.finish_send();
-            app.set_footer("本轮回复完成。", MetaTone::Success);
+            app.set_footer(chat_text("chat.footer.round_done"), MetaTone::Success);
         }
         UiEvent::HistoryLoaded { data, append } => {
             app.clear_busy_action();
             if data.items.is_empty() && !append {
-                app.set_footer("当前还没有可恢复的历史会话。", MetaTone::Dim);
+                app.set_footer(chat_text("chat.footer.no_history"), MetaTone::Dim);
             } else if append {
                 if let OverlayState::History(overlay) = &mut app.overlay {
                     overlay.loading_more = false;
                     overlay.has_more = data.has_more;
                     overlay.next_cursor = data.next_cursor;
                     overlay.items.extend(data.items);
-                    app.set_footer("已加载更多历史会话。", MetaTone::Dim);
+                    app.set_footer(chat_text("chat.footer.history_loaded_more"), MetaTone::Dim);
                 }
             } else {
                 app.overlay = OverlayState::History(HistoryOverlay {
@@ -1298,7 +1389,7 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
                     has_more: data.has_more,
                     loading_more: false,
                 });
-                app.set_footer("选择要恢复的历史会话。继续向下可加载更多。", MetaTone::Info);
+                app.set_footer(chat_text("chat.footer.history_choose"), MetaTone::Info);
             }
         }
         UiEvent::FooterMessage(message, tone) => {
@@ -1564,16 +1655,21 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
     let account = app
         .account
         .clone()
-        .unwrap_or_else(|| "未显示账号".to_string());
+        .unwrap_or_else(|| chat_text("chat.header.account_hidden"));
     let usage = app
         .context_usage
         .as_ref()
-        .map(|value| format!("上下文 {}", value.usage_percent_text))
-        .unwrap_or_else(|| "上下文 --".to_string());
+        .map(|value| {
+            chat_format(
+                "chat.header.context_usage",
+                &[("{usage}", value.usage_percent_text.clone())],
+            )
+        })
+        .unwrap_or_else(|| chat_text("chat.header.context_usage_none"));
     let transcript_mode = if app.auto_scroll {
-        "跟随输出"
+        chat_text("chat.header.mode.following")
     } else {
-        "浏览历史"
+        chat_text("chat.header.mode.reviewing")
     };
     let left_title = format!("Deck AI · {}", app.conversation_title);
     let left_meta = format!("{} / {} · {}", app.provider, app.model, account);
@@ -1603,9 +1699,9 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
 
 fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut ChatApp) {
     let title = if app.auto_scroll {
-        " Conversation · Following ".to_string()
+        chat_text("chat.body.title.following")
     } else {
-        " Conversation · Reviewing ".to_string()
+        chat_text("chat.body.title.reviewing")
     };
     let block = Block::default().title(title).borders(Borders::ALL);
     let inner = block.inner(area);
@@ -1629,9 +1725,9 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut ChatApp) {
 
 fn render_input(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
     let title = if app.slash_query().is_some() {
-        " Prompt · Slash ".to_string()
+        chat_text("chat.input.title.prompt_slash")
     } else {
-        " Prompt ".to_string()
+        chat_text("chat.input.title.prompt")
     };
     let block = Block::default().title(title).borders(Borders::ALL);
     let inner = block.inner(area);
@@ -1665,16 +1761,16 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
 
 fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
     let default_footer = if app.slash_query().is_some() {
-        "↑/↓ 选择命令  Tab 补全  Enter 执行  Esc 取消"
+        chat_text("chat.footer.default.slash")
     } else if app.auto_scroll {
-        "Enter 发送  Ctrl+C 双击退出  鼠标/↑↓/PgUp/PgDn 浏览  /help 命令"
+        chat_text("chat.footer.default.following")
     } else {
-        "正在浏览历史消息  Ctrl+End 回到底部继续跟随"
+        chat_text("chat.footer.default.reviewing")
     };
     let (text, tone) = app
         .footer_message
         .clone()
-        .unwrap_or_else(|| (default_footer.to_string(), MetaTone::Dim));
+        .unwrap_or_else(|| (default_footer, MetaTone::Dim));
     let line = Line::from(Span::styled(text, tone.style()));
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -1685,7 +1781,7 @@ fn render_approval_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &Approval
 
     let text = vec![
         Line::from(Span::styled(
-            format!("需要审批: {}", overlay.tool),
+            chat_format("chat.approval.needs", &[("{tool}", overlay.tool.clone())]),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -1694,13 +1790,17 @@ fn render_approval_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &Approval
         Line::from(Span::raw(overlay.preview.clone())),
         Line::from(Span::raw("")),
         Line::from(Span::styled(
-            "按 Y 同意，按 N 拒绝",
+            chat_text("chat.approval.actions"),
             Style::default().fg(Color::DarkGray),
         )),
     ];
 
     frame.render_widget(
-        Paragraph::new(text).block(Block::default().title(" Approval ").borders(Borders::ALL)),
+        Paragraph::new(text).block(
+            Block::default()
+                .title(chat_text("chat.approval.title"))
+                .borders(Borders::ALL),
+        ),
         popup,
     );
 }
@@ -1738,7 +1838,7 @@ fn render_slash_popup(frame: &mut Frame<'_>, input_area: Rect, app: &ChatApp) {
                     Span::styled(alias, Style::default().fg(Color::DarkGray)),
                 ]),
                 Line::from(Span::styled(
-                    command.description,
+                    chat_text(command.description),
                     Style::default().fg(Color::Gray),
                 )),
             ])
@@ -1752,7 +1852,11 @@ fn render_slash_popup(frame: &mut Frame<'_>, input_area: Rect, app: &ChatApp) {
             .min(4),
     ));
     let list = List::new(items)
-        .block(Block::default().title(" Commands ").borders(Borders::ALL))
+        .block(
+            Block::default()
+                .title(chat_text("chat.commands.title"))
+                .borders(Borders::ALL),
+        )
         .highlight_style(
             Style::default()
                 .bg(Color::Rgb(26, 26, 26))
@@ -1781,9 +1885,13 @@ fn render_history_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &HistoryOv
                 format!("{}  {}", item.title, item.provider)
             };
             let detail = if item.last_snippet.trim().is_empty() {
-                format!("{} 条消息", item.message_count)
+                message_count_text(item.message_count)
             } else {
-                format!("{} 条消息  |  {}", item.message_count, item.last_snippet)
+                format!(
+                    "{}  |  {}",
+                    message_count_text(item.message_count),
+                    item.last_snippet
+                )
             };
             ListItem::new(vec![
                 Line::from(Span::styled(
@@ -1800,7 +1908,10 @@ fn render_history_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &HistoryOv
     let list = List::new(items)
         .block(
             Block::default()
-                .title(format!(" Resume · {} loaded ", overlay.items.len()))
+                .title(chat_format(
+                    "chat.resume.title",
+                    &[("{count}", overlay.items.len().to_string())],
+                ))
                 .borders(Borders::ALL),
         )
         .highlight_style(Style::default().bg(Color::Rgb(30, 30, 30)).fg(Color::Cyan))
@@ -1808,11 +1919,14 @@ fn render_history_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &HistoryOv
     frame.render_stateful_widget(list, layout[0], &mut state);
 
     let status = if overlay.loading_more {
-        format!("{} 正在加载更多历史会话…", THINKING_FRAMES[0])
+        chat_format(
+            "chat.resume.loading_more",
+            &[("{spinner}", THINKING_FRAMES[0].to_string())],
+        )
     } else if overlay.has_more {
-        "继续向下浏览可自动加载更多 · Enter 恢复 · Esc 关闭".to_string()
+        chat_text("chat.resume.more_available")
     } else {
-        "已到末尾 · Enter 恢复 · Esc 关闭".to_string()
+        chat_text("chat.resume.end")
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -1855,7 +1969,7 @@ fn transcript_lines(app: &ChatApp, width: usize) -> Vec<Line<'static>> {
 
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
-            "还没有消息，直接输入内容开始对话。",
+            chat_text("chat.empty"),
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -2074,20 +2188,23 @@ fn describe_tool_started(tool: &ToolEventData) -> String {
                 .and_then(Value::as_str)
                 .unwrap_or("");
             if query.is_empty() {
-                "正在搜索剪贴板…".to_string()
+                chat_text("chat.tool.searching_clipboard")
             } else {
-                format!("正在搜索剪贴板: {}", query)
+                chat_format(
+                    "chat.tool.searching_clipboard_with_query",
+                    &[("{query}", query.to_string())],
+                )
             }
         }
-        "write_clipboard" => "正在写入 Deck 剪贴板…".to_string(),
-        "delete_clipboard" => "正在删除剪贴板项…".to_string(),
-        _ => format!("正在执行工具: {}", tool.tool),
+        "write_clipboard" => chat_text("chat.tool.writing_clipboard"),
+        "delete_clipboard" => chat_text("chat.tool.deleting_clipboard"),
+        _ => chat_format("chat.tool.running", &[("{tool}", tool.tool.clone())]),
     }
 }
 
 fn describe_tool_finished(tool: &ToolEventData) -> String {
     if tool.approved == Some(false) {
-        return format!("已拒绝工具调用: {}", tool.tool);
+        return chat_format("chat.tool.rejected", &[("{tool}", tool.tool.clone())]);
     }
 
     if let Some(result) = &tool.result {
@@ -2096,15 +2213,22 @@ fn describe_tool_finished(tool: &ToolEventData) -> String {
             .and_then(Value::as_bool)
             .is_some_and(|ok| !ok)
         {
+            let default_error = chat_text("chat.tool.failed_default");
             let error = result
                 .get("error")
                 .and_then(Value::as_str)
-                .unwrap_or("工具执行失败");
-            return format!("工具 {} 执行失败: {}", tool.tool, error);
+                .unwrap_or(default_error.as_str());
+            return chat_format(
+                "chat.tool.failed",
+                &[
+                    ("{tool}", tool.tool.clone()),
+                    ("{error}", error.to_string()),
+                ],
+            );
         }
     }
 
-    format!("工具执行完成: {}", tool.tool)
+    chat_format("chat.tool.finished", &[("{tool}", tool.tool.clone())])
 }
 
 fn tool_finish_tone(tool: &ToolEventData) -> MetaTone {
@@ -2131,17 +2255,22 @@ fn approval_preview(tool: &ToolEventData) -> String {
             .parameters
             .get("text")
             .and_then(Value::as_str)
-            .map(|text| format!("将写入以下文本:\n\n{}", trim_preview(text, 600)))
-            .unwrap_or_else(|| "将写入新的文本内容。".to_string()),
+            .map(|text| {
+                chat_format(
+                    "chat.approval.write_text",
+                    &[("{text}", trim_preview(text, 600))],
+                )
+            })
+            .unwrap_or_else(|| chat_text("chat.approval.write_text_default")),
         "delete_clipboard" => tool
             .parameters
             .get("item_id")
             .and_then(Value::as_i64)
-            .map(|id| format!("将删除 item_id = {} 的剪贴板记录。", id))
-            .unwrap_or_else(|| "将删除一条剪贴板记录。".to_string()),
+            .map(|id| chat_format("chat.approval.delete_item", &[("{id}", id.to_string())]))
+            .unwrap_or_else(|| chat_text("chat.approval.delete_default")),
         _ => match serde_json::to_string_pretty(&tool.parameters) {
             Ok(json) => trim_preview(&json, 800),
-            Err(_) => "该工具请求需要你的确认。".to_string(),
+            Err(_) => chat_text("chat.approval.generic"),
         },
     }
 }

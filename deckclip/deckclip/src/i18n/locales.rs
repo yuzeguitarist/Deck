@@ -26,7 +26,7 @@ pub fn get(locale: &str, key: &str) -> Option<String> {
 // ─── zh-Hans (source) ───
 
 fn zh_hans() -> Map {
-    HashMap::from([
+    let mut map = HashMap::from([
         // CLI top-level
         ("cli.about", "\u{1b}]8;;https://deckclip.app/zh-cn\u{1b}\\DeckClip@Deck\u{1b}]8;;\u{1b}\\"),
         ("cli.long_about", "\u{1b}]8;;https://deckclip.app/zh-cn\u{1b}\\DeckClip@Deck\u{1b}]8;;\u{1b}\\\n\nAI Agent 可直接调用命令操作 Deck 剪贴板。\n详细用法: deckclip <command> --help"),
@@ -121,13 +121,15 @@ fn zh_hans() -> Map {
         ("err.clipboard_write_failed", "写入 pbcopy 失败"),
         ("err.clipboard_wait_failed", "等待 pbcopy 结束失败"),
         ("err.clipboard_copy_failed", "pbcopy 执行失败"),
-    ])
+    ]);
+    map.extend(chat_zh_hans());
+    map
 }
 
 // ─── English ───
 
 fn en() -> Map {
-    HashMap::from([
+    let mut map = HashMap::from([
         ("cli.about", "\u{1b}]8;;https://deckclip.app\u{1b}\\DeckClip@Deck\u{1b}]8;;\u{1b}\\"),
         ("cli.long_about", "\u{1b}]8;;https://deckclip.app\u{1b}\\DeckClip@Deck\u{1b}]8;;\u{1b}\\\n\nAI agents can call these commands to operate the Deck clipboard.\nUsage: deckclip <command> --help"),
         ("arg.json", "Output in JSON format"),
@@ -212,13 +214,15 @@ fn en() -> Map {
         ("err.clipboard_write_failed", "Failed to write to pbcopy"),
         ("err.clipboard_wait_failed", "Failed while waiting for pbcopy to finish"),
         ("err.clipboard_copy_failed", "pbcopy failed"),
-    ])
+    ]);
+    map.extend(chat_en());
+    map
 }
 
 // ─── German ───
 
 fn de() -> Map {
-    HashMap::from([
+    let mut map = HashMap::from([
         ("cli.about", "\u{1b}]8;;https://deckclip.app\u{1b}\\DeckClip@Deck\u{1b}]8;;\u{1b}\\"),
         ("cli.long_about", "\u{1b}]8;;https://deckclip.app\u{1b}\\DeckClip@Deck\u{1b}]8;;\u{1b}\\\n\nKI-Agenten können diese Befehle direkt aufrufen.\nVerwendung: deckclip <command> --help"),
         ("arg.json", "Ausgabe im JSON-Format"),
@@ -303,13 +307,15 @@ fn de() -> Map {
         ("err.clipboard_write_failed", "Schreiben an pbcopy fehlgeschlagen"),
         ("err.clipboard_wait_failed", "Warten auf pbcopy ist fehlgeschlagen"),
         ("err.clipboard_copy_failed", "pbcopy ist fehlgeschlagen"),
-    ])
+    ]);
+    map.extend(chat_de());
+    map
 }
 
 // ─── French ───
 
 fn fr() -> Map {
-    HashMap::from([
+    let mut map = HashMap::from([
         ("cli.about", "\u{1b}]8;;https://deckclip.app\u{1b}\\DeckClip@Deck\u{1b}]8;;\u{1b}\\"),
         ("cli.long_about", "\u{1b}]8;;https://deckclip.app\u{1b}\\DeckClip@Deck\u{1b}]8;;\u{1b}\\\n\nLes agents IA peuvent appeler ces commandes directement.\nUtilisation : deckclip <command> --help"),
         ("arg.json", "Sortie au format JSON"),
@@ -394,13 +400,15 @@ fn fr() -> Map {
         ("err.clipboard_write_failed", "Impossible d'écrire dans pbcopy"),
         ("err.clipboard_wait_failed", "Échec lors de l'attente de la fin de pbcopy"),
         ("err.clipboard_copy_failed", "Échec de pbcopy"),
-    ])
+    ]);
+    map.extend(chat_fr());
+    map
 }
 
 // ─── Japanese ───
 
 fn ja() -> Map {
-    HashMap::from([
+    let mut map = HashMap::from([
         ("cli.about", "\u{1b}]8;;https://deckclip.app\u{1b}\\DeckClip@Deck\u{1b}]8;;\u{1b}\\"),
         ("cli.long_about", "\u{1b}]8;;https://deckclip.app\u{1b}\\DeckClip@Deck\u{1b}]8;;\u{1b}\\\n\nAI エージェントはこれらのコマンドを直接呼び出すことができます。\n使い方: deckclip <command> --help"),
         ("arg.json", "JSON 形式で出力"),
@@ -485,13 +493,15 @@ fn ja() -> Map {
         ("err.clipboard_write_failed", "pbcopy への書き込みに失敗しました"),
         ("err.clipboard_wait_failed", "pbcopy の終了待機に失敗しました"),
         ("err.clipboard_copy_failed", "pbcopy の実行に失敗しました"),
-    ])
+    ]);
+    map.extend(chat_ja());
+    map
 }
 
 // ─── Korean ───
 
 fn ko() -> Map {
-    HashMap::from([
+    let mut map = HashMap::from([
         ("cli.about", "\u{1b}]8;;https://deckclip.app\u{1b}\\DeckClip@Deck\u{1b}]8;;\u{1b}\\"),
         ("cli.long_about", "\u{1b}]8;;https://deckclip.app\u{1b}\\DeckClip@Deck\u{1b}]8;;\u{1b}\\\n\nAI 에이전트가 이 명령어를 직접 호출할 수 있습니다.\n사용법: deckclip <command> --help"),
         ("arg.json", "JSON 형식으로 출력"),
@@ -576,13 +586,15 @@ fn ko() -> Map {
         ("err.clipboard_write_failed", "pbcopy에 쓰지 못했습니다"),
         ("err.clipboard_wait_failed", "pbcopy 종료를 기다리는 중 실패했습니다"),
         ("err.clipboard_copy_failed", "pbcopy 실행에 실패했습니다"),
-    ])
+    ]);
+    map.extend(chat_ko());
+    map
 }
 
 // ─── zh-Hant ───
 
 fn zh_hant() -> Map {
-    HashMap::from([
+    let mut map = HashMap::from([
         ("cli.about", "\u{1b}]8;;https://deckclip.app/zh-cn\u{1b}\\DeckClip@Deck\u{1b}]8;;\u{1b}\\"),
         ("cli.long_about", "\u{1b}]8;;https://deckclip.app/zh-cn\u{1b}\\DeckClip@Deck\u{1b}]8;;\u{1b}\\\n\nAI Agent 可直接呼叫指令操作 Deck 剪貼簿。\n詳細用法: deckclip <command> --help"),
         ("arg.json", "使用 JSON 格式輸出"),
@@ -667,5 +679,219 @@ fn zh_hant() -> Map {
         ("err.clipboard_write_failed", "寫入 pbcopy 失敗"),
         ("err.clipboard_wait_failed", "等待 pbcopy 結束失敗"),
         ("err.clipboard_copy_failed", "pbcopy 執行失敗"),
+    ]);
+    map.extend(chat_zh_hant());
+    map
+}
+
+fn chat_zh_hans() -> Map {
+    HashMap::from([
+        ("chat.slash.cost.description", "查看当前上下文占用"),
+        ("chat.slash.compact.description", "压缩当前会话上下文"),
+        ("chat.slash.copy.description", "复制最后一条 AI 回复"),
+        ("chat.slash.resume.description", "打开历史会话列表"),
+        ("chat.slash.clear.description", "新建一个空白会话"),
+        ("chat.slash.help.description", "显示可用命令说明"),
+        ("chat.quit_hint", "再按一次 Ctrl+C 即可关闭"),
+        ("chat.conversation.new", "新对话"),
+        ("chat.model.not_started", "未开始"),
+        ("chat.footer.ready", "Deck AI 已就绪，输入内容直接发送，输入 /help 查看命令。"),
+        ("chat.footer.generating", "Deck AI 正在生成回复…"),
+        ("chat.status.ready", "就绪"),
+        ("chat.status.thinking", "{spinner} 思考中{elapsed}"),
+        ("chat.status.waiting_approval", "{spinner} 等待审批{elapsed}"),
+        ("chat.meta.thinking", "{spinner} Deck AI 正在思考{elapsed}"),
+        ("chat.meta.waiting_approval", "{spinner} 工具调用正在等待你的确认{elapsed}"),
+        ("chat.footer.approval_pending", "当前有待审批操作，请先按 Y 或 N。"),
+        ("chat.footer.tool_approved_continue", "已批准工具调用，继续执行…"),
+        ("chat.footer.tool_approved", "已批准工具调用。"),
+        ("chat.footer.tool_rejected", "已拒绝工具调用。"),
+        ("chat.footer.history_closed", "已关闭历史列表。"),
+        ("chat.busy.restoring_history", "正在恢复会话历史…"),
+        ("chat.footer.interrupting", "正在中断当前回复…"),
+        ("chat.footer.interrupt_sent", "已发送中断请求。"),
+        ("chat.footer.creating_session", "正在创建会话，请稍候…"),
+        ("chat.footer.slash_selected", "已选择 {command}，按 Enter 执行。"),
+        ("chat.footer.busy_wait", "当前仍有后台操作，请稍候。"),
+        ("chat.footer.slash_cancelled", "已取消 slash 命令输入。"),
+        ("chat.footer.stopping", "正在停止当前回复…"),
+        ("chat.footer.stop_sent", "已发送停止请求。"),
+        ("chat.footer.reply_incomplete_stop", "当前回复尚未完成，请先等待或按 ESC 停止。"),
+        ("chat.footer.unknown_command", "未知命令。输入 /help 查看可用命令。"),
+        ("chat.activity.help_commands", "/cost 查看上下文占用  /compact 手动压缩  /copy 复制最后一条回复  /resume 恢复历史会话  /clear 或 /new 新建会话"),
+        ("chat.footer.help_shown", "可用命令已显示在消息区。"),
+        ("chat.footer.context_usage", "上下文占用 {usage}  ({tokens} / {window})"),
+        ("chat.footer.no_context_usage", "当前还没有上下文占用数据。"),
+        ("chat.footer.copied_last_reply", "已复制最后一条回复到系统剪贴板。"),
+        ("chat.footer.no_reply_to_copy", "当前还没有可复制的 AI 回复。"),
+        ("chat.footer.cannot_clear_while_replying", "当前回复尚未完成，无法新建会话。"),
+        ("chat.footer.cleared_new_message_creates_session", "已清空当前对话，下一条消息会创建新会话。"),
+        ("chat.busy.clearing_session", "正在清理当前会话…"),
+        ("chat.footer.blank_conversation_ready", "已准备新的空白对话。"),
+        ("chat.footer.cannot_resume_while_replying", "当前回复尚未完成，无法恢复历史会话。"),
+        ("chat.busy.loading_history", "正在读取会话历史…"),
+        ("chat.footer.cannot_compact_while_replying", "当前回复尚未完成，无法压缩上下文。"),
+        ("chat.footer.nothing_to_compact", "当前还没有可压缩的对话。"),
+        ("chat.busy.compacting", "正在压缩上下文…"),
+        ("chat.footer.session_ready", "会话已就绪。"),
+        ("chat.footer.approval_required", "需要审批。按 Y 同意，按 N 拒绝。"),
+        ("chat.footer.compact_done", "上下文压缩完成{suffix}。"),
+        ("chat.footer.compact_done_suffix", "，压缩了 {count} 段历史"),
+        ("chat.footer.compacting_attempt", "正在自动压缩上下文（第 {attempt} 次）…"),
+        ("chat.footer.round_done", "本轮回复完成。"),
+        ("chat.footer.no_history", "当前还没有可恢复的历史会话。"),
+        ("chat.footer.history_loaded_more", "已加载更多历史会话。"),
+        ("chat.footer.history_choose", "选择要恢复的历史会话。继续向下可加载更多。"),
+        ("chat.header.account_hidden", "未显示账号"),
+        ("chat.header.context_usage", "上下文 {usage}"),
+        ("chat.header.context_usage_none", "上下文 --"),
+        ("chat.header.mode.following", "跟随输出"),
+        ("chat.header.mode.reviewing", "浏览历史"),
+        ("chat.body.title.following", " 对话 · 跟随输出 "),
+        ("chat.body.title.reviewing", " 对话 · 浏览历史 "),
+        ("chat.input.title.prompt", " 输入 "),
+        ("chat.input.title.prompt_slash", " 输入 · Slash "),
+        ("chat.footer.default.slash", "↑/↓ 选择命令  Tab 补全  Enter 执行  Esc 取消"),
+        ("chat.footer.default.following", "Enter 发送  Ctrl+C 双击退出  鼠标/↑↓/PgUp/PgDn 浏览  /help 命令"),
+        ("chat.footer.default.reviewing", "正在浏览历史消息  Ctrl+End 回到底部继续跟随"),
+        ("chat.approval.needs", "需要审批: {tool}"),
+        ("chat.approval.actions", "按 Y 同意，按 N 拒绝"),
+        ("chat.approval.title", " 审批 "),
+        ("chat.commands.title", " 命令 "),
+        ("chat.resume.title", " 恢复 · 已加载 {count} 条 "),
+        ("chat.resume.loading_more", "{spinner} 正在加载更多历史会话…"),
+        ("chat.resume.more_available", "继续向下浏览可自动加载更多 · Enter 恢复 · Esc 关闭"),
+        ("chat.resume.end", "已到末尾 · Enter 恢复 · Esc 关闭"),
+        ("chat.empty", "还没有消息，直接输入内容开始对话。"),
+        ("chat.tool.searching_clipboard", "正在搜索剪贴板…"),
+        ("chat.tool.searching_clipboard_with_query", "正在搜索剪贴板: {query}"),
+        ("chat.tool.writing_clipboard", "正在写入 Deck 剪贴板…"),
+        ("chat.tool.deleting_clipboard", "正在删除剪贴板项…"),
+        ("chat.tool.running", "正在执行工具: {tool}"),
+        ("chat.tool.rejected", "已拒绝工具调用: {tool}"),
+        ("chat.tool.failed_default", "工具执行失败"),
+        ("chat.tool.failed", "工具 {tool} 执行失败: {error}"),
+        ("chat.tool.finished", "工具执行完成: {tool}"),
+        ("chat.approval.write_text", "将写入以下文本:\n\n{text}"),
+        ("chat.approval.write_text_default", "将写入新的文本内容。"),
+        ("chat.approval.delete_item", "将删除 item_id = {id} 的剪贴板记录。"),
+        ("chat.approval.delete_default", "将删除一条剪贴板记录。"),
+        ("chat.approval.generic", "该工具请求需要你的确认。"),
     ])
+}
+
+fn chat_en() -> Map {
+    HashMap::from([
+        ("chat.slash.cost.description", "View current context usage"),
+        ("chat.slash.compact.description", "Compact the current conversation context"),
+        ("chat.slash.copy.description", "Copy the last AI reply"),
+        ("chat.slash.resume.description", "Open the conversation history list"),
+        ("chat.slash.clear.description", "Start a blank conversation"),
+        ("chat.slash.help.description", "Show available command help"),
+        ("chat.quit_hint", "Press Ctrl+C again to exit"),
+        ("chat.conversation.new", "New Conversation"),
+        ("chat.model.not_started", "Not started"),
+        ("chat.footer.ready", "Deck AI is ready. Type to send directly, or use /help to view commands."),
+        ("chat.footer.generating", "Deck AI is generating a reply…"),
+        ("chat.status.ready", "Ready"),
+        ("chat.status.thinking", "{spinner} Thinking{elapsed}"),
+        ("chat.status.waiting_approval", "{spinner} Waiting approval{elapsed}"),
+        ("chat.meta.thinking", "{spinner} Deck AI is thinking{elapsed}"),
+        ("chat.meta.waiting_approval", "{spinner} A tool call is waiting for your approval{elapsed}"),
+        ("chat.footer.approval_pending", "There is a pending approval. Press Y or N first."),
+        ("chat.footer.tool_approved_continue", "Tool call approved. Continuing…"),
+        ("chat.footer.tool_approved", "Tool call approved."),
+        ("chat.footer.tool_rejected", "Tool call rejected."),
+        ("chat.footer.history_closed", "History list closed."),
+        ("chat.busy.restoring_history", "Restoring conversation history…"),
+        ("chat.footer.interrupting", "Interrupting the current reply…"),
+        ("chat.footer.interrupt_sent", "Interrupt request sent."),
+        ("chat.footer.creating_session", "Creating a session, please wait…"),
+        ("chat.footer.slash_selected", "Selected {command}. Press Enter to run it."),
+        ("chat.footer.busy_wait", "A background action is still running. Please wait."),
+        ("chat.footer.slash_cancelled", "Slash command input cancelled."),
+        ("chat.footer.stopping", "Stopping the current reply…"),
+        ("chat.footer.stop_sent", "Stop request sent."),
+        ("chat.footer.reply_incomplete_stop", "The current reply is not finished yet. Wait, or press ESC to stop it."),
+        ("chat.footer.unknown_command", "Unknown command. Use /help to see available commands."),
+        ("chat.activity.help_commands", "/cost view context usage  /compact compact context manually  /copy copy the last reply  /resume restore a past conversation  /clear or /new start a new chat"),
+        ("chat.footer.help_shown", "Available commands were shown in the message area."),
+        ("chat.footer.context_usage", "Context usage {usage}  ({tokens} / {window})"),
+        ("chat.footer.no_context_usage", "No context usage data is available yet."),
+        ("chat.footer.copied_last_reply", "Copied the last reply to the system clipboard."),
+        ("chat.footer.no_reply_to_copy", "There is no AI reply to copy yet."),
+        ("chat.footer.cannot_clear_while_replying", "The current reply is not finished yet, so a new conversation cannot be created."),
+        ("chat.footer.cleared_new_message_creates_session", "The current conversation was cleared. Your next message will create a new session."),
+        ("chat.busy.clearing_session", "Cleaning up the current session…"),
+        ("chat.footer.blank_conversation_ready", "A fresh blank conversation is ready."),
+        ("chat.footer.cannot_resume_while_replying", "The current reply is not finished yet, so history cannot be restored."),
+        ("chat.busy.loading_history", "Loading conversation history…"),
+        ("chat.footer.cannot_compact_while_replying", "The current reply is not finished yet, so the context cannot be compacted."),
+        ("chat.footer.nothing_to_compact", "There is no conversation to compact yet."),
+        ("chat.busy.compacting", "Compacting context…"),
+        ("chat.footer.session_ready", "Session is ready."),
+        ("chat.footer.approval_required", "Approval required. Press Y to allow, or N to reject."),
+        ("chat.footer.compact_done", "Context compaction finished{suffix}."),
+        ("chat.footer.compact_done_suffix", ", compressed {count} history segments"),
+        ("chat.footer.compacting_attempt", "Compacting context automatically (attempt {attempt})…"),
+        ("chat.footer.round_done", "This reply is complete."),
+        ("chat.footer.no_history", "There is no conversation history to restore yet."),
+        ("chat.footer.history_loaded_more", "Loaded more conversation history."),
+        ("chat.footer.history_choose", "Choose a conversation to restore. Keep scrolling down to load more."),
+        ("chat.header.account_hidden", "Account hidden"),
+        ("chat.header.context_usage", "Context {usage}"),
+        ("chat.header.context_usage_none", "Context --"),
+        ("chat.header.mode.following", "Following"),
+        ("chat.header.mode.reviewing", "Reviewing"),
+        ("chat.body.title.following", " Conversation · Following "),
+        ("chat.body.title.reviewing", " Conversation · Reviewing "),
+        ("chat.input.title.prompt", " Prompt "),
+        ("chat.input.title.prompt_slash", " Prompt · Slash "),
+        ("chat.footer.default.slash", "↑/↓ choose  Tab complete  Enter run  Esc cancel"),
+        ("chat.footer.default.following", "Enter to send  Ctrl+C twice to exit  Mouse/↑↓/PgUp/PgDn to scroll  /help for commands"),
+        ("chat.footer.default.reviewing", "Browsing history  Ctrl+End to jump back to live follow"),
+        ("chat.approval.needs", "Approval required: {tool}"),
+        ("chat.approval.actions", "Press Y to allow, or N to reject"),
+        ("chat.approval.title", " Approval "),
+        ("chat.commands.title", " Commands "),
+        ("chat.resume.title", " Resume · {count} loaded "),
+        ("chat.resume.loading_more", "{spinner} Loading more conversation history…"),
+        ("chat.resume.more_available", "Keep scrolling down to load more · Enter to restore · Esc to close"),
+        ("chat.resume.end", "End reached · Enter to restore · Esc to close"),
+        ("chat.empty", "No messages yet. Type something to start the conversation."),
+        ("chat.tool.searching_clipboard", "Searching the clipboard…"),
+        ("chat.tool.searching_clipboard_with_query", "Searching the clipboard: {query}"),
+        ("chat.tool.writing_clipboard", "Writing to the Deck clipboard…"),
+        ("chat.tool.deleting_clipboard", "Deleting the clipboard item…"),
+        ("chat.tool.running", "Running tool: {tool}"),
+        ("chat.tool.rejected", "Tool call rejected: {tool}"),
+        ("chat.tool.failed_default", "Tool execution failed"),
+        ("chat.tool.failed", "Tool {tool} failed: {error}"),
+        ("chat.tool.finished", "Tool finished: {tool}"),
+        ("chat.approval.write_text", "The following text will be written:\n\n{text}"),
+        ("chat.approval.write_text_default", "New text will be written."),
+        ("chat.approval.delete_item", "The clipboard record with item_id = {id} will be deleted."),
+        ("chat.approval.delete_default", "A clipboard record will be deleted."),
+        ("chat.approval.generic", "This tool request needs your approval."),
+    ])
+}
+
+fn chat_de() -> Map {
+    chat_en()
+}
+
+fn chat_fr() -> Map {
+    chat_en()
+}
+
+fn chat_ja() -> Map {
+    chat_en()
+}
+
+fn chat_ko() -> Map {
+    chat_en()
+}
+
+fn chat_zh_hant() -> Map {
+    HashMap::new()
 }
