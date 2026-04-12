@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseEvent, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags, MouseEvent,
+    MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -736,8 +737,21 @@ impl TerminalGuard {
     fn enter() -> Result<Self> {
         enable_raw_mode().context(i18n::t("err.chat_raw_mode"))?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-            .context(i18n::t("err.chat_enter_screen"))?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )
+        .context(i18n::t("err.chat_enter_screen"))?;
+        let _ = execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+            )
+        );
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend).context(i18n::t("err.chat_terminal_init"))?;
         Ok(Self { terminal })
@@ -752,6 +766,8 @@ impl TerminalGuard {
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = disable_raw_mode();
+        let _ = execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags);
+        let _ = execute!(self.terminal.backend_mut(), DisableBracketedPaste);
         let _ = execute!(
             self.terminal.backend_mut(),
             LeaveAlternateScreen,
@@ -1101,6 +1117,9 @@ fn handle_key_event(
                 return;
             }
             app.backspace();
+        }
+        KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.clear_current_line();
         }
         KeyCode::Delete => {
             if key.modifiers.contains(KeyModifiers::SUPER) {
@@ -1785,7 +1804,16 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut ChatApp) {
         return;
     }
 
-    let chunks = if inner.width > 1 {
+    let chunks = if inner.width > 2 {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(1),
+            ])
+            .split(inner)
+    } else if inner.width > 1 {
         Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -1798,6 +1826,13 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut ChatApp) {
     };
 
     let content_area = chunks[0];
+    let scrollbar_area = if chunks.len() > 2 {
+        Some(chunks[2])
+    } else if chunks.len() > 1 {
+        Some(chunks[1])
+    } else {
+        None
+    };
     let lines = transcript_lines(app, content_area.width as usize);
     let max_scroll = lines.len().saturating_sub(content_area.height as usize);
     if app.auto_scroll {
@@ -1814,10 +1849,10 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut ChatApp) {
     let paragraph = Paragraph::new(lines).scroll((app.scroll as u16, 0));
     frame.render_widget(paragraph, content_area);
 
-    if chunks.len() > 1 {
+    if let Some(scrollbar_area) = scrollbar_area {
         render_scrollbar(
             frame,
-            chunks[1],
+            scrollbar_area,
             total_lines,
             content_area.height as usize,
             app.scroll,
@@ -2316,6 +2351,9 @@ fn render_scrollbar(
 
     let total_lines = total_lines.max(1);
     let visible_lines = visible_lines.max(1).min(total_lines);
+    if total_lines <= visible_lines {
+        return;
+    }
     let height = area.height as usize;
     let max_scroll = total_lines.saturating_sub(visible_lines);
     let thumb_height = ((visible_lines * height) + total_lines.saturating_sub(1)) / total_lines;
@@ -2329,12 +2367,12 @@ fn render_scrollbar(
 
     let lines: Vec<Line<'_>> = (0..height)
         .map(|row| {
-            let color = if row >= thumb_top && row < thumb_top + thumb_height {
-                thumb_color
+            let (symbol, color) = if row >= thumb_top && row < thumb_top + thumb_height {
+                ("█", thumb_color)
             } else {
-                track_color
+                ("│", track_color)
             };
-            Line::from(Span::styled("│", Style::default().fg(color)))
+            Line::from(Span::styled(symbol, Style::default().fg(color)))
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
