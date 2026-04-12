@@ -97,6 +97,7 @@ pub mod cmd {
     pub const LOGIN_OLLAMA_CONFIGURE: &str = "login.ollama.configure";
     pub const AI_CHAT_BOOTSTRAP: &str = "ai.chat.bootstrap";
     pub const AI_CHAT_OPEN: &str = "ai.chat.open";
+    pub const AI_CHAT_CLIPBOARD_READ: &str = "ai.chat.clipboard.read";
     pub const AI_CHAT_SEND: &str = "ai.chat.send";
     pub const AI_CHAT_APPROVAL_RESPOND: &str = "ai.chat.approval.respond";
     pub const AI_CHAT_CANCEL: &str = "ai.chat.cancel";
