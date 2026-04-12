@@ -983,14 +983,17 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = disable_raw_mode();
         let _ = execute!(self.terminal.backend_mut(), PopKeyboardEnhancementFlags);
         let _ = execute!(self.terminal.backend_mut(), DisableBracketedPaste);
         let _ = execute!(
             self.terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
+            DisableMouseCapture,
+            LeaveAlternateScreen
         );
+        while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+            let _ = event::read();
+        }
+        let _ = disable_raw_mode();
         let _ = self.terminal.show_cursor();
     }
 }
