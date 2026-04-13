@@ -311,6 +311,7 @@ struct ApprovalPatchDocument {
 struct ApprovalPatchFile {
     path: String,
     action: ApprovalPatchFileAction,
+    target_path: Option<String>,
     hunks: Vec<ApprovalPatchHunk>,
 }
 
@@ -319,6 +320,7 @@ enum ApprovalPatchFileAction {
     Update,
     Add,
     Delete,
+    Move,
 }
 
 #[derive(Debug, Clone)]
@@ -4914,6 +4916,13 @@ fn approval_content(
                     title: "Patch".to_string(),
                     document,
                 });
+            } else if approval_is_machine_patch(&raw_patch) {
+                content_blocks.push(ApprovalContentBlock::Note {
+                    title: "Patch".to_string(),
+                    text: "Patch preview is temporarily unavailable for this patch shape."
+                        .to_string(),
+                    tone: MetaTone::Warning,
+                });
             } else if !raw_patch.is_empty() {
                 content_blocks.push(ApprovalContentBlock::Code {
                     title: "Patch".to_string(),
@@ -5215,31 +5224,40 @@ fn push_approval_patch_lines(
             ApprovalPatchFileAction::Update => "update",
             ApprovalPatchFileAction::Add => "add",
             ApprovalPatchFileAction::Delete => "delete",
+            ApprovalPatchFileAction::Move => "move",
         };
+        let (added, removed) = approval_patch_file_stats(file);
+        let path_label = file
+            .target_path
+            .as_ref()
+            .map(|target| format!("{} -> {}", file.path, target))
+            .unwrap_or_else(|| file.path.clone());
         lines.push(Line::from(vec![
             Span::raw("  ".to_string()),
             Span::styled(
-                file.path.clone(),
+                path_label,
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("  [{}]", action),
+                format!("  [{}]  +{} -{}", action, added, removed),
                 Style::default().fg(Color::DarkGray),
             ),
         ]));
 
         for hunk in &file.hunks {
-            lines.push(Line::from(vec![
-                Span::raw("  ".to_string()),
-                Span::styled(
-                    hunk.header.clone(),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ]));
+            if let Some(header) = approval_patch_hunk_header(&hunk.header) {
+                lines.push(Line::from(vec![
+                    Span::raw("  ".to_string()),
+                    Span::styled(
+                        header,
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            }
 
             for diff_line in &hunk.lines {
                 match diff_line {
@@ -5287,6 +5305,32 @@ fn push_approval_patch_lines(
             }
         }
     }
+}
+
+fn approval_patch_hunk_header(header: &str) -> Option<String> {
+    let trimmed = header.trim();
+    if trimmed == "@@" {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn approval_patch_file_stats(file: &ApprovalPatchFile) -> (usize, usize) {
+    let mut added = 0usize;
+    let mut removed = 0usize;
+
+    for hunk in &file.hunks {
+        for line in &hunk.lines {
+            match line {
+                ApprovalPatchLine::Add(_) => added += 1,
+                ApprovalPatchLine::Remove(_) => removed += 1,
+                ApprovalPatchLine::Context(_) | ApprovalPatchLine::Note(_) => {}
+            }
+        }
+    }
+
+    (added, removed)
 }
 
 fn push_approval_code_lines(
@@ -5649,9 +5693,22 @@ fn approval_diff_stats(patch: &str) -> (usize, usize, usize) {
     (files, added, removed)
 }
 
+fn approval_is_machine_patch(raw_patch: &str) -> bool {
+    raw_patch
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(|line| line.trim() == "*** Begin Patch")
+}
+
 fn approval_patch_document(raw_patch: &str) -> Option<ApprovalPatchDocument> {
     let normalized = raw_patch.replace("\r\n", "\n");
-    let lines: Vec<&str> = normalized.lines().collect();
+    let mut lines: Vec<&str> = normalized.lines().collect();
+    while lines.first().is_some_and(|line| line.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
     if lines.first()?.trim() != "*** Begin Patch" || lines.last()?.trim() != "*** End Patch" {
         return None;
     }
@@ -5670,6 +5727,14 @@ fn approval_patch_document(raw_patch: &str) -> Option<ApprovalPatchDocument> {
         if let Some(path) = trimmed.strip_prefix("*** Update File: ") {
             let path = path.trim().to_string();
             index += 1;
+            let mut target_path = None;
+            if index < end_index {
+                let move_trimmed = lines[index].trim();
+                if let Some(path) = move_trimmed.strip_prefix("*** Move to: ") {
+                    target_path = Some(path.trim().to_string());
+                    index += 1;
+                }
+            }
             let mut hunks = Vec::new();
 
             while index < end_index {
@@ -5742,7 +5807,12 @@ fn approval_patch_document(raw_patch: &str) -> Option<ApprovalPatchDocument> {
 
             files.push(ApprovalPatchFile {
                 path,
-                action: ApprovalPatchFileAction::Update,
+                action: if target_path.is_some() {
+                    ApprovalPatchFileAction::Move
+                } else {
+                    ApprovalPatchFileAction::Update
+                },
+                target_path,
                 hunks,
             });
             continue;
@@ -5771,6 +5841,7 @@ fn approval_patch_document(raw_patch: &str) -> Option<ApprovalPatchDocument> {
             files.push(ApprovalPatchFile {
                 path,
                 action: ApprovalPatchFileAction::Add,
+                target_path: None,
                 hunks: vec![ApprovalPatchHunk {
                     header: "@@".to_string(),
                     lines: diff_lines,
@@ -5783,6 +5854,7 @@ fn approval_patch_document(raw_patch: &str) -> Option<ApprovalPatchDocument> {
             files.push(ApprovalPatchFile {
                 path: path.trim().to_string(),
                 action: ApprovalPatchFileAction::Delete,
+                target_path: None,
                 hunks: vec![ApprovalPatchHunk {
                     header: "@@".to_string(),
                     lines: vec![ApprovalPatchLine::Note("file deleted".to_string())],
@@ -6130,12 +6202,30 @@ mod tests {
 
         let text = lines_text(overlay.content_lines(64));
 
-        assert!(text.contains("index.js  [update]"));
-        assert!(text.contains("@@"));
+        assert!(text.contains("index.js  [update]  +1 -1"));
         assert!(text.contains("console.log('new')"));
         assert!(!text.contains("*** Begin Patch"));
         assert!(!text.contains("*** End Patch"));
         assert!(!text.contains("*** Update File: index.js"));
+        assert!(!text.contains("\n  @@"));
+    }
+
+    #[test]
+    fn modify_plugin_approval_supports_move_headers() {
+        let mut overlay = ApprovalOverlay::from_tool(&tool_event(
+            "call-move",
+            "modify_script_plugin",
+            serde_json::json!({
+                "plugin_name": "Weather",
+                "plugin_id": "weather.fetch",
+                "patch": "*** Begin Patch\n*** Update File: index.js\n*** Move to: src/index.js\n@@ -1,1 +1,1 @@\n-console.log('old')\n+console.log('new')\n*** End Patch",
+            }),
+        ));
+
+        let text = lines_text(overlay.content_lines(72));
+
+        assert!(text.contains("index.js -> src/index.js  [move]  +1 -1"));
+        assert!(text.contains("@@ -1,1 +1,1 @@"));
     }
 
     #[test]
