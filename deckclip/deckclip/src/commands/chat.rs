@@ -351,6 +351,7 @@ enum ToolLifecycle {
     Finished,
 }
 
+#[derive(Debug, Clone)]
 enum UiEvent {
     SessionOpened(SessionData),
     SessionAttached(SessionData),
@@ -365,6 +366,7 @@ enum UiEvent {
     ToolFinished(ToolEventData),
     ApprovalRequested(ToolEventData),
     Compacting(CompactingEventData),
+    Cancelled,
     Done(DoneEventData),
     HistoryLoaded {
         data: HistoryListData,
@@ -900,14 +902,9 @@ fn handle_key_event(
                 let session_id = app.session_id.clone();
                 app.set_footer(chat_text("chat.footer.interrupting"), MetaTone::Warning);
                 tokio::spawn(async move {
-                    let event = match cancel_stream(&session_id).await {
-                        Ok(()) => UiEvent::FooterMessage(
-                            chat_text("chat.footer.interrupt_sent"),
-                            MetaTone::Warning,
-                        ),
-                        Err(error) => ui_error(error),
-                    };
-                    let _ = ui_tx.send(event);
+                    if let Err(error) = cancel_stream(&session_id).await {
+                        let _ = ui_tx.send(ui_error(error));
+                    }
                 });
             } else {
                 app.set_footer(chat_text("chat.footer.creating_session"), MetaTone::Warning);
@@ -998,14 +995,9 @@ fn handle_key_event(
                     let session_id = app.session_id.clone();
                     app.set_footer(chat_text("chat.footer.stopping"), MetaTone::Warning);
                     tokio::spawn(async move {
-                        let event = match cancel_stream(&session_id).await {
-                            Ok(()) => UiEvent::FooterMessage(
-                                chat_text("chat.footer.stop_sent"),
-                                MetaTone::Warning,
-                            ),
-                            Err(error) => ui_error(error),
-                        };
-                        let _ = ui_tx.send(event);
+                        if let Err(error) = cancel_stream(&session_id).await {
+                            let _ = ui_tx.send(ui_error(error));
+                        }
                     });
                 } else {
                     app.set_footer(chat_text("chat.footer.creating_session"), MetaTone::Warning);
@@ -1563,6 +1555,10 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
                 );
             }
         }
+        UiEvent::Cancelled => {
+            app.finish_send();
+            app.set_footer(chat_text("chat.footer.reply_cancelled"), MetaTone::Warning);
+        }
         UiEvent::Done(done) => {
             app.last_assistant_text = Some(done.text);
             app.finish_send();
@@ -1805,6 +1801,13 @@ async fn cancel_stream(session_id: &str) -> Result<()> {
     Ok(())
 }
 
+fn is_terminal_stream_event(event_name: &str) -> bool {
+    matches!(
+        event_name,
+        chat_event::DONE | chat_event::ERROR | chat_event::CANCELLED
+    )
+}
+
 async fn send_chat_message(
     client: Arc<Mutex<DeckClient>>,
     session_id: &str,
@@ -1822,8 +1825,7 @@ async fn send_chat_message(
     loop {
         match client.recv_chat_frame().await? {
             ChatStreamFrame::Event(event) => {
-                let should_stop =
-                    matches!(event.event.as_str(), chat_event::DONE | chat_event::ERROR);
+                let should_stop = is_terminal_stream_event(event.event.as_str());
                 let ui_event = parse_stream_event(event)?;
                 let _ = ui_tx.send(ui_event);
                 if should_stop {
@@ -1861,6 +1863,7 @@ fn parse_stream_event(event: deckclip_protocol::EventFrame) -> Result<UiEvent> {
             Ok(UiEvent::ApprovalRequested(serde_json::from_value(data)?))
         }
         chat_event::COMPACTING => Ok(UiEvent::Compacting(serde_json::from_value(data)?)),
+        chat_event::CANCELLED => Ok(UiEvent::Cancelled),
         chat_event::DONE => Ok(UiEvent::Done(serde_json::from_value(data)?)),
         chat_event::ERROR => {
             let message = data

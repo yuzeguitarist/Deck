@@ -114,6 +114,7 @@ pub mod event {
     pub const APPROVAL_REQUEST: &str = "approval.request";
     pub const CONVERSATION_UPDATED: &str = "conversation.updated";
     pub const COMPACTING: &str = "compacting";
+    pub const CANCELLED: &str = "cancelled";
     pub const DONE: &str = "done";
     pub const ERROR: &str = "error";
 }

@@ -507,6 +507,31 @@ fn repeated_search_tool_status_matches_app_style() {
 }
 
 #[test]
+fn cancelled_is_terminal_stream_event() {
+    assert!(is_terminal_stream_event(chat_event::CANCELLED));
+    assert!(is_terminal_stream_event(chat_event::DONE));
+    assert!(is_terminal_stream_event(chat_event::ERROR));
+    assert!(!is_terminal_stream_event(chat_event::ASSISTANT_DELTA));
+}
+
+#[test]
+fn cancelled_event_finishes_streaming_state() {
+    let mut app = test_app();
+    app.begin_send();
+    app.set_footer(chat_text("chat.footer.stopping"), MetaTone::Warning);
+
+    handle_ui_event(&mut app, UiEvent::Cancelled);
+
+    assert_eq!(app.mode, ChatMode::Ready);
+    assert_eq!(app.busy_action, None);
+    assert_eq!(app.streaming_text, "");
+    assert_eq!(
+        app.footer_message.as_ref().map(|(text, _)| text.as_str()),
+        Some(chat_text("chat.footer.reply_cancelled").as_str())
+    );
+}
+
+#[test]
 fn quit_hint_footer_uses_trigger_specific_text() {
     let mut app = test_app();
 
