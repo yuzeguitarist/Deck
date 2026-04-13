@@ -337,6 +337,7 @@ dependencies = [
  "anyhow",
  "clap",
  "clap_complete",
+ "core-foundation-sys",
  "crossterm",
  "deckclip-core",
  "deckclip-protocol",

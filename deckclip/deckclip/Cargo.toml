@@ -26,3 +26,6 @@ ratatui = "0.29"
 unicode-width = "0.2"
 rmcp = { version = "1.4", features = ["server", "macros", "transport-io"] }
 schemars = "1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation-sys = "0.8"

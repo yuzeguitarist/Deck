@@ -30,6 +30,8 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
 use tokio::sync::Mutex;
 use unicode_width::UnicodeWidthChar;
 
+use approval_input::ApprovalInputGuard;
+
 use crate::commands::login;
 use crate::{
     i18n,
@@ -492,6 +494,7 @@ struct ChatApp {
     slash_popup_hitboxes: Vec<Rect>,
     history_hitboxes: Vec<Rect>,
     overlay: OverlayState,
+    approval_input_guard: ApprovalInputGuard,
     mode: ChatMode,
     footer_message: Option<(String, MetaTone)>,
     footer_tag: Option<FooterTag>,
@@ -546,6 +549,7 @@ impl ChatApp {
             slash_popup_hitboxes: Vec::new(),
             history_hitboxes: Vec::new(),
             overlay: OverlayState::None,
+            approval_input_guard: ApprovalInputGuard::default(),
             mode: ChatMode::Ready,
             footer_message: None,
             footer_tag: None,
@@ -606,7 +610,7 @@ impl ChatApp {
             self.tool_states.clear();
             self.search_call_count = 0;
             self.streaming_text.clear();
-            self.overlay = OverlayState::None;
+            self.set_overlay(OverlayState::None);
             self.mode = ChatMode::Ready;
             self.mode_started_at = None;
             self.clear_busy_action();
@@ -634,11 +638,24 @@ impl ChatApp {
     }
 
     fn open_model_editor(&mut self) {
-        self.overlay = OverlayState::ModelEditor(ModelEditorOverlay::new(
+        self.set_overlay(OverlayState::ModelEditor(ModelEditorOverlay::new(
             self.provider.clone(),
             self.model.clone(),
-        ));
+        )));
         self.clear_quit_hint();
+    }
+
+    fn set_overlay(&mut self, overlay: OverlayState) {
+        let had_approval = matches!(self.overlay, OverlayState::Approval(_));
+        let will_have_approval = matches!(&overlay, OverlayState::Approval(_));
+
+        if had_approval && !will_have_approval {
+            self.approval_input_guard.deactivate();
+        } else if !had_approval && will_have_approval {
+            self.approval_input_guard.activate();
+        }
+
+        self.overlay = overlay;
     }
 
     fn push_activity(&mut self, text: impl Into<String>, tone: MetaTone) {
@@ -755,7 +772,7 @@ impl ChatApp {
         self.activities.clear();
         self.tool_states.clear();
         self.search_call_count = 0;
-        self.overlay = OverlayState::None;
+        self.set_overlay(OverlayState::None);
         self.auto_scroll = true;
         self.clear_quit_hint();
         self.bump_transcript_revision();
@@ -768,7 +785,7 @@ impl ChatApp {
         self.mode_started_at = None;
         self.search_call_count = 0;
         self.streaming_text.clear();
-        self.overlay = OverlayState::None;
+        self.set_overlay(OverlayState::None);
         self.clear_busy_action();
         self.bump_streaming_revision();
     }
@@ -1202,7 +1219,7 @@ impl ChatApp {
         self.search_call_count = 0;
         self.streaming_text.clear();
         self.last_assistant_text = None;
-        self.overlay = OverlayState::None;
+        self.set_overlay(OverlayState::None);
         self.mode = ChatMode::Ready;
         self.mode_started_at = None;
         self.auto_scroll = true;
@@ -1555,10 +1572,10 @@ fn handle_key_event(
             }
 
             match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => {
+                KeyCode::Char('Y') | KeyCode::Char('y') | KeyCode::Enter => {
                     let session_id = app.session_id.clone();
                     let call_id = overlay.call_id.clone();
-                    app.overlay = OverlayState::None;
+                    app.set_overlay(OverlayState::None);
                     app.mode = ChatMode::Streaming;
                     app.set_footer(
                         chat_text("chat.footer.tool_approved_continue"),
@@ -1575,10 +1592,10 @@ fn handle_key_event(
                         let _ = ui_tx.send(event);
                     });
                 }
-                KeyCode::Char('n') | KeyCode::Esc => {
+                KeyCode::Char('N') | KeyCode::Char('n') | KeyCode::Esc => {
                     let session_id = app.session_id.clone();
                     let call_id = overlay.call_id.clone();
-                    app.overlay = OverlayState::None;
+                    app.set_overlay(OverlayState::None);
                     app.mode = ChatMode::Streaming;
                     app.set_footer(chat_text("chat.footer.tool_rejected"), MetaTone::Warning);
                     tokio::spawn(async move {
@@ -1600,12 +1617,12 @@ fn handle_key_event(
             let mut moved = false;
             match key.code {
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    app.overlay = OverlayState::None;
+                    app.set_overlay(OverlayState::None);
                     app.clear_quit_hint();
                     app.set_footer(chat_text("chat.footer.history_closed"), MetaTone::Dim);
                 }
                 KeyCode::Esc => {
-                    app.overlay = OverlayState::None;
+                    app.set_overlay(OverlayState::None);
                     app.clear_quit_hint();
                     app.set_footer(chat_text("chat.footer.history_closed"), MetaTone::Dim);
                 }
@@ -1640,7 +1657,7 @@ fn handle_key_event(
                 }
                 KeyCode::Enter => {
                     if let Some(item) = overlay.items.get(overlay.selected).cloned() {
-                        app.overlay = OverlayState::None;
+                        app.set_overlay(OverlayState::None);
                         app.set_busy_action(chat_text("chat.busy.restoring_history"));
                         let session_id = if app.has_session() {
                             Some(app.session_id.clone())
@@ -1672,7 +1689,7 @@ fn handle_key_event(
         }
         OverlayState::ModelEditor(overlay) => {
             if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                app.overlay = OverlayState::None;
+                app.set_overlay(OverlayState::None);
                 app.clear_quit_hint();
                 app.set_footer(chat_text("chat.footer.model_cancelled"), MetaTone::Dim);
                 return;
@@ -1680,7 +1697,7 @@ fn handle_key_event(
 
             match key.code {
                 KeyCode::Esc => {
-                    app.overlay = OverlayState::None;
+                    app.set_overlay(OverlayState::None);
                     app.clear_quit_hint();
                     app.set_footer(chat_text("chat.footer.model_cancelled"), MetaTone::Dim);
                 }
@@ -1691,7 +1708,7 @@ fn handle_key_event(
                     };
 
                     let provider = overlay.provider.clone();
-                    app.overlay = OverlayState::None;
+                    app.set_overlay(OverlayState::None);
                     app.clear_quit_hint();
                     app.set_busy_action(chat_text("chat.busy.updating_model"));
                     tokio::spawn(async move {
@@ -2370,11 +2387,11 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
             if app.mode_started_at.is_none() {
                 app.mode_started_at = Some(Instant::now());
             }
-            app.overlay = OverlayState::Approval(ApprovalOverlay {
+            app.set_overlay(OverlayState::Approval(ApprovalOverlay {
                 call_id: tool.call_id.clone(),
                 tool: tool.tool.clone(),
                 preview: approval_preview(&tool),
-            });
+            }));
             app.set_footer(
                 chat_text("chat.footer.approval_required"),
                 MetaTone::Warning,
@@ -2423,14 +2440,14 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
                     app.set_footer(chat_text("chat.footer.history_loaded_more"), MetaTone::Dim);
                 }
             } else {
-                app.overlay = OverlayState::History(HistoryOverlay {
+                app.set_overlay(OverlayState::History(HistoryOverlay {
                     items: data.items,
                     selected: 0,
                     visible_start: 0,
                     next_cursor: data.next_cursor,
                     has_more: data.has_more,
                     loading_more: false,
-                });
+                }));
                 app.set_footer(chat_text("chat.footer.history_choose"), MetaTone::Info);
             }
         }
@@ -2869,12 +2886,11 @@ fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut ChatApp) {
     }
 
     app.update_body_scrollbar_state(scrollbar_area, content_area.height as usize, total_lines);
-    let visible_lines = {
-        let scroll = app.scroll;
-        let lines = app.transcript_lines(content_area.width as usize);
-        let end = (scroll + content_area.height as usize).min(lines.len());
-        lines[scroll..end].to_vec()
-    };
+    let visible_lines = transcript_view_lines(
+        app,
+        content_area.width as usize,
+        content_area.height as usize,
+    );
     let paragraph = Paragraph::new(visible_lines);
     frame.render_widget(paragraph, content_area);
 
@@ -3456,11 +3472,247 @@ fn push_status_entry_lines(
     text: &str,
     style: Style,
 ) {
-    let line_start = lines.len();
-    let prefix = format!("{} ", spinner);
-    push_wrapped_lines(lines, width, &prefix, "  ", text, style);
-    if lines.len() > line_start {
-        lines.push(Line::from(""));
+    let prefix = format!("  {} ", spinner);
+    push_wrapped_lines(lines, width, &prefix, "    ", text, style);
+}
+
+fn transcript_view_lines(app: &mut ChatApp, width: usize, height: usize) -> Vec<Line<'static>> {
+    if height == 0 {
+        return Vec::new();
+    }
+
+    let scroll = app.scroll;
+    let has_status_tail = app.auto_scroll
+        && app.streaming_text.is_empty()
+        && !matches!(app.current_tail_key(), TranscriptTailKey::None);
+    let lines = app.transcript_lines(width);
+    let end = (scroll + height).min(lines.len());
+    let mut visible_lines = lines[scroll..end].to_vec();
+
+    if has_status_tail && visible_lines.len() < height {
+        let mut padded_lines = Vec::with_capacity(height);
+        padded_lines
+            .extend((0..height.saturating_sub(visible_lines.len())).map(|_| Line::from("")));
+        padded_lines.append(&mut visible_lines);
+        return padded_lines;
+    }
+
+    visible_lines
+}
+
+#[cfg(target_os = "macos")]
+mod approval_input {
+    use std::ffi::{c_void, CStr};
+    use std::ptr;
+
+    use core_foundation_sys::array::{CFArrayGetCount, CFArrayGetValueAtIndex, CFArrayRef};
+    use core_foundation_sys::base::{Boolean, CFRelease, CFRetain, CFTypeRef};
+    use core_foundation_sys::dictionary::CFDictionaryRef;
+    use core_foundation_sys::string::{
+        kCFStringEncodingUTF8, CFStringGetCString, CFStringGetLength,
+        CFStringGetMaximumSizeForEncoding, CFStringRef,
+    };
+
+    const APPROVAL_INPUT_SOURCE_IDS: &[&str] =
+        &["com.apple.keylayout.ABC", "com.apple.keylayout.US"];
+
+    type TISInputSourceRef = *const c_void;
+    type OSStatus = i32;
+
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        static kTISPropertyInputSourceID: CFStringRef;
+        fn TISCopyCurrentKeyboardInputSource() -> TISInputSourceRef;
+        fn TISCreateInputSourceList(
+            properties: CFDictionaryRef,
+            include_all_installed: Boolean,
+        ) -> CFArrayRef;
+        fn TISGetInputSourceProperty(
+            input_source: TISInputSourceRef,
+            property_key: CFStringRef,
+        ) -> CFTypeRef;
+        fn TISSelectInputSource(input_source: TISInputSourceRef) -> OSStatus;
+    }
+
+    #[derive(Default)]
+    pub struct ApprovalInputGuard {
+        previous_source: Option<OwnedInputSource>,
+    }
+
+    impl ApprovalInputGuard {
+        pub fn activate(&mut self) {
+            if self.previous_source.is_some() {
+                return;
+            }
+
+            let Some(current_source) = OwnedInputSource::current() else {
+                return;
+            };
+
+            if current_source.matches_any(APPROVAL_INPUT_SOURCE_IDS) {
+                return;
+            }
+
+            let Some(target_source) = find_input_source(APPROVAL_INPUT_SOURCE_IDS) else {
+                return;
+            };
+
+            if target_source.matches_pointer(current_source.as_ptr()) {
+                return;
+            }
+
+            if target_source.select() {
+                self.previous_source = Some(current_source);
+            }
+        }
+
+        pub fn deactivate(&mut self) {
+            let Some(previous_source) = self.previous_source.take() else {
+                return;
+            };
+
+            let _ = previous_source.select();
+        }
+    }
+
+    impl Drop for ApprovalInputGuard {
+        fn drop(&mut self) {
+            self.deactivate();
+        }
+    }
+
+    struct OwnedInputSource {
+        source: TISInputSourceRef,
+    }
+
+    impl OwnedInputSource {
+        fn current() -> Option<Self> {
+            let source = unsafe { TISCopyCurrentKeyboardInputSource() };
+            (!source.is_null()).then_some(Self { source })
+        }
+
+        fn select(&self) -> bool {
+            unsafe { TISSelectInputSource(self.source) == 0 }
+        }
+
+        fn id(&self) -> Option<String> {
+            input_source_id(self.source)
+        }
+
+        fn matches_any(&self, expected_ids: &[&str]) -> bool {
+            self.id()
+                .as_deref()
+                .is_some_and(|id| expected_ids.iter().any(|candidate| *candidate == id))
+        }
+
+        fn matches_pointer(&self, other: TISInputSourceRef) -> bool {
+            self.source == other
+        }
+
+        fn as_ptr(&self) -> TISInputSourceRef {
+            self.source
+        }
+
+        unsafe fn retained(source: TISInputSourceRef) -> Option<Self> {
+            if source.is_null() {
+                return None;
+            }
+
+            unsafe { CFRetain(source as CFTypeRef) };
+            Some(Self { source })
+        }
+    }
+
+    impl Drop for OwnedInputSource {
+        fn drop(&mut self) {
+            unsafe { CFRelease(self.source as CFTypeRef) };
+        }
+    }
+
+    struct OwnedInputSourceList {
+        list: CFArrayRef,
+    }
+
+    impl OwnedInputSourceList {
+        fn all() -> Option<Self> {
+            let list = unsafe { TISCreateInputSourceList(ptr::null(), 0 as Boolean) };
+            (!list.is_null()).then_some(Self { list })
+        }
+
+        fn len(&self) -> isize {
+            unsafe { CFArrayGetCount(self.list) }
+        }
+
+        fn get(&self, index: isize) -> Option<OwnedInputSource> {
+            let source = unsafe { CFArrayGetValueAtIndex(self.list, index) as TISInputSourceRef };
+            unsafe { OwnedInputSource::retained(source) }
+        }
+    }
+
+    impl Drop for OwnedInputSourceList {
+        fn drop(&mut self) {
+            unsafe { CFRelease(self.list as CFTypeRef) };
+        }
+    }
+
+    fn find_input_source(expected_ids: &[&str]) -> Option<OwnedInputSource> {
+        let sources = OwnedInputSourceList::all()?;
+        for index in 0..sources.len() {
+            let Some(source) = sources.get(index) else {
+                continue;
+            };
+
+            if source.matches_any(expected_ids) {
+                return Some(source);
+            }
+        }
+
+        None
+    }
+
+    fn input_source_id(source: TISInputSourceRef) -> Option<String> {
+        let value = unsafe { TISGetInputSourceProperty(source, kTISPropertyInputSourceID) };
+        cf_string_to_string(value as CFStringRef)
+    }
+
+    fn cf_string_to_string(value: CFStringRef) -> Option<String> {
+        if value.is_null() {
+            return None;
+        }
+
+        let length = unsafe { CFStringGetLength(value) };
+        let capacity = (unsafe { CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) }
+            + 1)
+        .max(1) as usize;
+        let mut buffer = vec![0i8; capacity];
+        let copied = unsafe {
+            CFStringGetCString(
+                value,
+                buffer.as_mut_ptr(),
+                capacity as isize,
+                kCFStringEncodingUTF8,
+            ) != 0
+        };
+        if !copied {
+            return None;
+        }
+
+        unsafe { CStr::from_ptr(buffer.as_ptr()) }
+            .to_str()
+            .ok()
+            .map(str::to_owned)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+mod approval_input {
+    #[derive(Default)]
+    pub struct ApprovalInputGuard;
+
+    impl ApprovalInputGuard {
+        pub fn activate(&mut self) {}
+
+        pub fn deactivate(&mut self) {}
     }
 }
 
@@ -4611,6 +4863,43 @@ mod tests {
 
         assert!(text.contains("Thinking"));
         assert!(!text.contains("Deck AI"));
+    }
+
+    #[test]
+    fn thinking_tail_has_right_offset() {
+        let mut app = test_app();
+        app.begin_send();
+
+        let text = lines_text(&build_transcript_tail_lines(&app, 48));
+
+        assert_eq!(text, format!("  {} Thinking", app.spinner_frame()));
+    }
+
+    #[test]
+    fn short_status_tail_stays_at_bottom() {
+        let mut app = test_app();
+        app.begin_send();
+
+        let lines = transcript_view_lines(&mut app, 48, 4);
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            rendered,
+            vec![
+                String::new(),
+                String::new(),
+                String::new(),
+                format!("  {} Thinking", app.spinner_frame()),
+            ]
+        );
     }
 
     #[test]
