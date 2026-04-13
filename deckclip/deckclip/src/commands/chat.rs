@@ -276,6 +276,8 @@ struct ApprovalSummaryItem {
 enum ApprovalCodeMode {
     Plain,
     Diff,
+    Json,
+    JavaScript,
 }
 
 #[derive(Debug, Clone)]
@@ -312,6 +314,7 @@ struct ApprovalOverlay {
     scroll: usize,
     visible_lines: usize,
     total_lines: usize,
+    preview_area: Option<Rect>,
     render_cache: ApprovalRenderCache,
 }
 
@@ -327,6 +330,7 @@ impl ApprovalOverlay {
             scroll: 0,
             visible_lines: 0,
             total_lines: 0,
+            preview_area: None,
             render_cache: ApprovalRenderCache::default(),
         }
     }
@@ -1557,6 +1561,14 @@ impl TerminalGuard {
     }
 
     fn draw(&mut self, app: &mut ChatApp) -> Result<()> {
+        match app.overlay {
+            OverlayState::None | OverlayState::ModelEditor(_) => {
+                let _ = self.terminal.show_cursor();
+            }
+            OverlayState::Approval(_) | OverlayState::History(_) => {
+                let _ = self.terminal.hide_cursor();
+            }
+        }
         self.terminal.draw(|frame| render(frame, app))?;
         Ok(())
     }
@@ -2247,10 +2259,18 @@ fn handle_mouse_event(
                 app.clear_quit_hint();
             }
             OverlayState::Approval(overlay) => {
-                overlay.scroll_up(3);
+                if overlay
+                    .preview_area
+                    .is_some_and(|rect| point_in_rect(mouse.column, mouse.row, rect))
+                {
+                    overlay.scroll_up(3);
+                }
             }
             OverlayState::None => {
-                if !app.slash_matches().is_empty() && app.input_history_index.is_none() {
+                if !app.slash_matches().is_empty()
+                    && app.input_history_index.is_none()
+                    && app.slash_hitbox_index(mouse.column, mouse.row).is_some()
+                {
                     app.select_previous_slash();
                     app.clear_quit_hint();
                 } else {
@@ -2268,10 +2288,18 @@ fn handle_mouse_event(
                 maybe_request_more_history(app, primary_client, ui_tx);
             }
             OverlayState::Approval(overlay) => {
-                overlay.scroll_down(3);
+                if overlay
+                    .preview_area
+                    .is_some_and(|rect| point_in_rect(mouse.column, mouse.row, rect))
+                {
+                    overlay.scroll_down(3);
+                }
             }
             OverlayState::None => {
-                if !app.slash_matches().is_empty() && app.input_history_index.is_none() {
+                if !app.slash_matches().is_empty()
+                    && app.input_history_index.is_none()
+                    && app.slash_hitbox_index(mouse.column, mouse.row).is_some()
+                {
                     app.select_next_slash();
                     app.clear_quit_hint();
                 } else {
@@ -3162,6 +3190,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
 fn render_approval_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &mut ApprovalOverlay) {
     let popup = approval_popup_rect(area);
     frame.render_widget(Clear, popup);
+    overlay.preview_area = None;
 
     let border_color = approval_border_color(&overlay.tool);
     let block = Block::default()
@@ -3230,6 +3259,7 @@ fn render_approval_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &mut Appr
 
         let content_area = preview_chunks[0];
         let scrollbar_area = (preview_chunks.len() > 1).then_some(preview_chunks[1]);
+        overlay.preview_area = Some(content_area);
         let total_lines = overlay.content_lines(content_area.width as usize).len();
         overlay.update_viewport(content_area.height as usize, total_lines);
         let scroll = overlay.scroll.min(overlay.max_scroll());
@@ -3678,6 +3708,8 @@ fn transcript_view_lines(app: &mut ChatApp, width: usize, height: usize) -> Vec<
     let scroll = app.scroll;
     let has_status_tail = app.auto_scroll
         && app.streaming_text.is_empty()
+        && app.conversation_entries.is_empty()
+        && app.activities.is_empty()
         && !matches!(app.current_tail_key(), TranscriptTailKey::None);
     let lines = app.transcript_lines(width);
     let end = (scroll + height).min(lines.len());
@@ -4200,7 +4232,7 @@ fn approval_popup_rect(area: Rect) -> Rect {
     let preferred_height = (area.height.saturating_mul(62) / 100).max(18);
     let width = preferred_width.min(78).min(max_width);
     let height = preferred_height.min(26).min(max_height);
-    let x = area.x + area.width.saturating_sub(width + 2);
+    let x = area.x + area.width.saturating_sub(width);
     let y = area.y + area.height.saturating_sub(height + 1);
 
     Rect {
@@ -4791,12 +4823,12 @@ fn approval_content(
                     ApprovalContentBlock::Code {
                         title: "manifest.json".to_string(),
                         text: manifest,
-                        mode: ApprovalCodeMode::Plain,
+                        mode: ApprovalCodeMode::Json,
                     },
                     ApprovalContentBlock::Code {
                         title: main_file,
                         text: script_code,
-                        mode: ApprovalCodeMode::Plain,
+                        mode: ApprovalCodeMode::JavaScript,
                     },
                 ],
             )
@@ -4918,7 +4950,7 @@ fn approval_content(
                 vec![ApprovalContentBlock::Code {
                     title: "Preview".to_string(),
                     text: preview,
-                    mode: ApprovalCodeMode::Plain,
+                    mode: ApprovalCodeMode::Json,
                 }],
             )
         }
@@ -4965,7 +4997,7 @@ fn approval_content(
             vec![ApprovalContentBlock::Code {
                 title: "Parameters".to_string(),
                 text: approval_pretty_value(&tool.parameters),
-                mode: ApprovalCodeMode::Plain,
+                mode: ApprovalCodeMode::Json,
             }],
         ),
     }
@@ -5086,14 +5118,7 @@ fn build_approval_content_lines(
                     continue;
                 }
 
-                for raw_line in text.lines() {
-                    let style = approval_code_line_style(*mode, raw_line);
-                    if raw_line.is_empty() {
-                        lines.push(Line::from(""));
-                    } else {
-                        push_wrapped_lines(&mut lines, width, "  ", "  ", raw_line, style);
-                    }
-                }
+                push_approval_code_lines(&mut lines, width, text, *mode);
             }
         }
     }
@@ -5118,9 +5143,40 @@ fn push_approval_block_title(lines: &mut Vec<Line<'static>>, title: &str) {
     )]));
 }
 
-fn approval_code_line_style(mode: ApprovalCodeMode, line: &str) -> Style {
+fn push_approval_code_lines(
+    lines: &mut Vec<Line<'static>>,
+    width: usize,
+    text: &str,
+    mode: ApprovalCodeMode,
+) {
+    for raw_line in text.lines() {
+        if raw_line.is_empty() {
+            lines.push(Line::from(""));
+            continue;
+        }
+
+        let highlighted = matches!(mode, ApprovalCodeMode::Json | ApprovalCodeMode::JavaScript)
+            && display_width(raw_line).saturating_add(2) <= width;
+        if highlighted {
+            lines.push(approval_highlighted_code_line(mode, raw_line));
+        } else {
+            push_wrapped_lines(
+                lines,
+                width,
+                "  ",
+                "  ",
+                raw_line,
+                approval_code_fallback_style(mode, raw_line),
+            );
+        }
+    }
+}
+
+fn approval_code_fallback_style(mode: ApprovalCodeMode, line: &str) -> Style {
     match mode {
-        ApprovalCodeMode::Plain => Style::default().fg(Color::Gray),
+        ApprovalCodeMode::Plain | ApprovalCodeMode::Json | ApprovalCodeMode::JavaScript => {
+            Style::default().fg(Color::Gray)
+        }
         ApprovalCodeMode::Diff => {
             if line.starts_with("@@") {
                 Style::default()
@@ -5141,6 +5197,224 @@ fn approval_code_line_style(mode: ApprovalCodeMode, line: &str) -> Style {
             }
         }
     }
+}
+
+fn approval_highlighted_code_line(mode: ApprovalCodeMode, line: &str) -> Line<'static> {
+    match mode {
+        ApprovalCodeMode::Json => approval_highlight_json_line(line),
+        ApprovalCodeMode::JavaScript => approval_highlight_javascript_line(line),
+        _ => Line::from(vec![
+            Span::raw("  ".to_string()),
+            Span::styled(line.to_string(), approval_code_fallback_style(mode, line)),
+        ]),
+    }
+}
+
+fn approval_highlight_json_line(line: &str) -> Line<'static> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut spans = vec![Span::raw("  ".to_string())];
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch.is_whitespace() {
+            let start = index;
+            while index < chars.len() && chars[index].is_whitespace() {
+                index += 1;
+            }
+            spans.push(Span::raw(chars[start..index].iter().collect::<String>()));
+            continue;
+        }
+
+        if matches!(ch, '{' | '}' | '[' | ']' | ':' | ',') {
+            spans.push(Span::styled(
+                ch.to_string(),
+                Style::default().fg(Color::DarkGray),
+            ));
+            index += 1;
+            continue;
+        }
+
+        if ch == '"' {
+            let start = index;
+            index += 1;
+            let mut escaped = false;
+            while index < chars.len() {
+                let current = chars[index];
+                index += 1;
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if current == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if current == '"' {
+                    break;
+                }
+            }
+
+            let token = chars[start..index].iter().collect::<String>();
+            let mut lookahead = index;
+            while lookahead < chars.len() && chars[lookahead].is_whitespace() {
+                lookahead += 1;
+            }
+            let style = if lookahead < chars.len() && chars[lookahead] == ':' {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Green)
+            };
+            spans.push(Span::styled(token, style));
+            continue;
+        }
+
+        let start = index;
+        while index < chars.len()
+            && !chars[index].is_whitespace()
+            && !json_is_delimiter(chars[index])
+        {
+            index += 1;
+        }
+        let token = chars[start..index].iter().collect::<String>();
+        let style = match token.as_str() {
+            "true" | "false" | "null" => Style::default().fg(Color::Yellow),
+            _ if token
+                .chars()
+                .all(|value| value.is_ascii_digit() || matches!(value, '.' | '-')) =>
+            {
+                Style::default().fg(Color::Yellow)
+            }
+            _ => Style::default().fg(Color::Gray),
+        };
+        spans.push(Span::styled(token, style));
+    }
+
+    Line::from(spans)
+}
+
+fn approval_highlight_javascript_line(line: &str) -> Line<'static> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut spans = vec![Span::raw("  ".to_string())];
+    let mut index = 0usize;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch.is_whitespace() {
+            let start = index;
+            while index < chars.len() && chars[index].is_whitespace() {
+                index += 1;
+            }
+            spans.push(Span::raw(chars[start..index].iter().collect::<String>()));
+            continue;
+        }
+
+        if ch == '/' && index + 1 < chars.len() && chars[index + 1] == '/' {
+            spans.push(Span::styled(
+                chars[index..].iter().collect::<String>(),
+                Style::default().fg(Color::DarkGray),
+            ));
+            break;
+        }
+
+        if matches!(ch, '\'' | '"' | '`') {
+            let quote = ch;
+            let start = index;
+            index += 1;
+            let mut escaped = false;
+            while index < chars.len() {
+                let current = chars[index];
+                index += 1;
+                if escaped {
+                    escaped = false;
+                    continue;
+                }
+                if current == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if current == quote {
+                    break;
+                }
+            }
+            spans.push(Span::styled(
+                chars[start..index].iter().collect::<String>(),
+                Style::default().fg(Color::Green),
+            ));
+            continue;
+        }
+
+        if js_is_identifier_start(ch) {
+            let start = index;
+            index += 1;
+            while index < chars.len() && js_is_identifier_continue(chars[index]) {
+                index += 1;
+            }
+            let token = chars[start..index].iter().collect::<String>();
+            let style = if matches!(
+                token.as_str(),
+                "async"
+                    | "await"
+                    | "const"
+                    | "default"
+                    | "else"
+                    | "export"
+                    | "false"
+                    | "function"
+                    | "if"
+                    | "let"
+                    | "null"
+                    | "return"
+                    | "true"
+                    | "var"
+            ) {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            spans.push(Span::styled(token, style));
+            continue;
+        }
+
+        if ch.is_ascii_digit() {
+            let start = index;
+            index += 1;
+            while index < chars.len()
+                && (chars[index].is_ascii_digit() || matches!(chars[index], '.' | '_'))
+            {
+                index += 1;
+            }
+            spans.push(Span::styled(
+                chars[start..index].iter().collect::<String>(),
+                Style::default().fg(Color::Yellow),
+            ));
+            continue;
+        }
+
+        spans.push(Span::styled(
+            ch.to_string(),
+            Style::default().fg(Color::DarkGray),
+        ));
+        index += 1;
+    }
+
+    Line::from(spans)
+}
+
+fn json_is_delimiter(ch: char) -> bool {
+    matches!(ch, '{' | '}' | '[' | ']' | ':' | ',')
+}
+
+fn js_is_identifier_start(ch: char) -> bool {
+    ch == '_' || ch == '$' || ch.is_ascii_alphabetic()
+}
+
+fn js_is_identifier_continue(ch: char) -> bool {
+    js_is_identifier_start(ch) || ch.is_ascii_digit()
 }
 
 fn approval_string_param(tool: &ToolEventData, key: &str) -> Option<String> {
@@ -5619,6 +5893,52 @@ mod tests {
                 format!("  {} Thinking", app.spinner_frame()),
             ]
         );
+    }
+
+    #[test]
+    fn existing_conversation_does_not_shift_down_while_streaming() {
+        let mut app = test_app();
+        app.conversation_entries.push(TranscriptEntry::User {
+            text: "hello".to_string(),
+            attachments: Vec::new(),
+        });
+        app.bump_transcript_revision();
+        app.begin_send();
+
+        let lines = transcript_view_lines(&mut app, 48, 6);
+        let rendered = lines_text(&lines);
+
+        assert!(rendered.starts_with("> hello"));
+    }
+
+    #[test]
+    fn slash_popup_mouse_wheel_requires_hover() {
+        let mut app = test_app();
+        app.input = "/".to_string();
+        app.input_cursor = 1;
+        app.slash_selected = 1;
+        app.slash_popup_hitboxes = vec![Rect {
+            x: 10,
+            y: 10,
+            width: 10,
+            height: 3,
+        }];
+        let client = Arc::new(Mutex::new(DeckClient::new(Config::default())));
+        let (ui_tx, _ui_rx) = unbounded_channel();
+
+        handle_mouse_event(
+            &mut app,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 0,
+                row: 0,
+                modifiers: KeyModifiers::empty(),
+            },
+            client,
+            ui_tx,
+        );
+
+        assert_eq!(app.slash_selected, 1);
     }
 
     #[test]
