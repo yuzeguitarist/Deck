@@ -1,0 +1,476 @@
+diff --git a/deckclip/deckclip/src/commands/chat.rs b/deckclip/deckclip/src/commands/chat.rs
+index 9357cb9..c00d858 100644
+--- a/deckclip/deckclip/src/commands/chat.rs
++++ b/deckclip/deckclip/src/commands/chat.rs
+@@ -296,6 +296,43 @@ enum ApprovalContentBlock {
+         text: String,
+         mode: ApprovalCodeMode,
+     },
++    Patch {
++        title: String,
++        document: ApprovalPatchDocument,
++    },
++}
++
++#[derive(Debug, Clone)]
++struct ApprovalPatchDocument {
++    files: Vec<ApprovalPatchFile>,
++}
++
++#[derive(Debug, Clone)]
++struct ApprovalPatchFile {
++    path: String,
++    action: ApprovalPatchFileAction,
++    hunks: Vec<ApprovalPatchHunk>,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum ApprovalPatchFileAction {
++    Update,
++    Add,
++    Delete,
++}
++
++#[derive(Debug, Clone)]
++struct ApprovalPatchHunk {
++    header: String,
++    lines: Vec<ApprovalPatchLine>,
++}
++
++#[derive(Debug, Clone)]
++enum ApprovalPatchLine {
++    Context(String),
++    Add(String),
++    Remove(String),
++    Note(String),
+ }
+ 
+ #[derive(Debug, Clone, Default)]
+@@ -3748,6 +3785,7 @@ mod approval_input {
+     #[link(name = "Carbon", kind = "framework")]
+     unsafe extern "C" {
+         static kTISPropertyInputSourceID: CFStringRef;
++        fn TISCopyCurrentASCIICapableKeyboardLayoutInputSource() -> TISInputSourceRef;
+         fn TISCopyCurrentKeyboardInputSource() -> TISInputSourceRef;
+         fn TISCreateInputSourceList(
+             properties: CFDictionaryRef,
+@@ -3779,7 +3817,9 @@ mod approval_input {
+                 return;
+             }
+ 
+-            let Some(target_source) = find_input_source(APPROVAL_INPUT_SOURCE_IDS) else {
++            let Some(target_source) = OwnedInputSource::current_ascii_capable()
++                .or_else(|| find_input_source(APPROVAL_INPUT_SOURCE_IDS))
++            else {
+                 return;
+             };
+ 
+@@ -3817,6 +3857,11 @@ mod approval_input {
+             (!source.is_null()).then_some(Self { source })
+         }
+ 
++        fn current_ascii_capable() -> Option<Self> {
++            let source = unsafe { TISCopyCurrentASCIICapableKeyboardLayoutInputSource() };
++            (!source.is_null()).then_some(Self { source })
++        }
++
+         fn select(&self) -> bool {
+             unsafe { TISSelectInputSource(self.source) == 0 }
+         }
+@@ -4842,9 +4887,12 @@ fn approval_content(
+             let raw_patch = approval_string_param(tool, "patch")
+                 .or_else(|| approval_string_param(tool, "patch_preview"))
+                 .unwrap_or_default();
+-            let patch = approval_review_patch(&raw_patch);
+-            let (file_count, added, removed) = approval_diff_stats(&patch);
+-            let diff_summary = if patch.is_empty() {
++            let patch_document = approval_patch_document(&raw_patch);
++            let (file_count, added, removed) = patch_document
++                .as_ref()
++                .map(approval_patch_stats)
++                .unwrap_or_else(|| approval_diff_stats(&raw_patch));
++            let diff_summary = if raw_patch.is_empty() {
+                 format!("{} file(s)", touched_files.len())
+             } else {
+                 format!(
+@@ -4855,16 +4903,21 @@ fn approval_content(
+                 )
+             };
+             let mut content_blocks = Vec::new();
+-            if !touched_files.is_empty() {
++            if patch_document.is_none() && !touched_files.is_empty() {
+                 content_blocks.push(ApprovalContentBlock::List {
+                     title: "Files".to_string(),
+                     items: touched_files,
+                 });
+             }
+-            if !patch.is_empty() {
++            if let Some(document) = patch_document {
++                content_blocks.push(ApprovalContentBlock::Patch {
++                    title: "Patch".to_string(),
++                    document,
++                });
++            } else if !raw_patch.is_empty() {
+                 content_blocks.push(ApprovalContentBlock::Code {
+                     title: "Patch".to_string(),
+-                    text: patch,
++                    text: raw_patch,
+                     mode: ApprovalCodeMode::Diff,
+                 });
+             } else {
+@@ -5121,6 +5174,10 @@ fn build_approval_content_lines(
+ 
+                 push_approval_code_lines(&mut lines, width, text, *mode);
+             }
++            ApprovalContentBlock::Patch { title, document } => {
++                push_approval_block_title(&mut lines, title);
++                push_approval_patch_lines(&mut lines, width, document);
++            }
+         }
+     }
+ 
+@@ -5144,6 +5201,94 @@ fn push_approval_block_title(lines: &mut Vec<Line<'static>>, title: &str) {
+     )]));
+ }
+ 
++fn push_approval_patch_lines(
++    lines: &mut Vec<Line<'static>>,
++    width: usize,
++    document: &ApprovalPatchDocument,
++) {
++    for (file_index, file) in document.files.iter().enumerate() {
++        if file_index > 0 {
++            lines.push(Line::from(""));
++        }
++
++        let action = match file.action {
++            ApprovalPatchFileAction::Update => "update",
++            ApprovalPatchFileAction::Add => "add",
++            ApprovalPatchFileAction::Delete => "delete",
++        };
++        lines.push(Line::from(vec![
++            Span::raw("  ".to_string()),
++            Span::styled(
++                file.path.clone(),
++                Style::default()
++                    .fg(Color::Cyan)
++                    .add_modifier(Modifier::BOLD),
++            ),
++            Span::styled(
++                format!("  [{}]", action),
++                Style::default().fg(Color::DarkGray),
++            ),
++        ]));
++
++        for hunk in &file.hunks {
++            lines.push(Line::from(vec![
++                Span::raw("  ".to_string()),
++                Span::styled(
++                    hunk.header.clone(),
++                    Style::default()
++                        .fg(Color::Yellow)
++                        .add_modifier(Modifier::BOLD),
++                ),
++            ]));
++
++            for diff_line in &hunk.lines {
++                match diff_line {
++                    ApprovalPatchLine::Context(text) => {
++                        push_wrapped_lines(
++                            lines,
++                            width,
++                            "   ",
++                            "   ",
++                            text,
++                            Style::default().fg(Color::Gray),
++                        );
++                    }
++                    ApprovalPatchLine::Add(text) => {
++                        push_wrapped_lines(
++                            lines,
++                            width,
++                            "  +",
++                            "   ",
++                            text,
++                            Style::default().fg(Color::Green),
++                        );
++                    }
++                    ApprovalPatchLine::Remove(text) => {
++                        push_wrapped_lines(
++                            lines,
++                            width,
++                            "  -",
++                            "   ",
++                            text,
++                            Style::default().fg(Color::Red),
++                        );
++                    }
++                    ApprovalPatchLine::Note(text) => {
++                        push_wrapped_lines(
++                            lines,
++                            width,
++                            "  ! ",
++                            "    ",
++                            text,
++                            Style::default().fg(Color::DarkGray),
++                        );
++                    }
++                }
++            }
++        }
++    }
++}
++
+ fn push_approval_code_lines(
+     lines: &mut Vec<Line<'static>>,
+     width: usize,
+@@ -5504,98 +5649,172 @@ fn approval_diff_stats(patch: &str) -> (usize, usize, usize) {
+     (files, added, removed)
+ }
+ 
+-fn approval_review_patch(raw_patch: &str) -> String {
++fn approval_patch_document(raw_patch: &str) -> Option<ApprovalPatchDocument> {
+     let normalized = raw_patch.replace("\r\n", "\n");
+-    let first_line = normalized
+-        .lines()
+-        .find(|line| !line.trim().is_empty())
+-        .map(str::trim)
+-        .unwrap_or("");
+-    if first_line != "*** Begin Patch" {
+-        return normalized;
++    let lines: Vec<&str> = normalized.lines().collect();
++    if lines.first()?.trim() != "*** Begin Patch" || lines.last()?.trim() != "*** End Patch" {
++        return None;
+     }
+ 
+-    let mut rendered = Vec::new();
+-    let mut has_hunk_header = false;
++    let mut files = Vec::new();
++    let mut index = 1usize;
++    let end_index = lines.len().saturating_sub(1);
+ 
+-    for line in normalized.lines() {
+-        let trimmed = line.trim();
++    while index < end_index {
++        let trimmed = lines[index].trim();
+         if trimmed.is_empty() {
+-            continue;
+-        }
+-
+-        if matches!(
+-            trimmed,
+-            "*** Begin Patch" | "*** End Patch" | "*** End of File"
+-        ) {
++            index += 1;
+             continue;
+         }
+ 
+         if let Some(path) = trimmed.strip_prefix("*** Update File: ") {
+-            push_review_patch_header(&mut rendered, path.trim(), false);
+-            has_hunk_header = false;
++            let path = path.trim().to_string();
++            index += 1;
++            let mut hunks = Vec::new();
++
++            while index < end_index {
++                let current = lines[index];
++                let current_trimmed = current.trim();
++                if current_trimmed.starts_with("*** ") {
++                    break;
++                }
++                if current_trimmed.is_empty() {
++                    index += 1;
++                    continue;
++                }
++
++                let header = if current_trimmed == "@@" || current_trimmed.starts_with("@@ ") {
++                    index += 1;
++                    current_trimmed.to_string()
++                } else {
++                    "@@".to_string()
++                };
++
++                let mut diff_lines = Vec::new();
++                while index < end_index {
++                    let diff_line = lines[index];
++                    let diff_trimmed = diff_line.trim();
++                    if matches!(diff_trimmed, "*** End of File") {
++                        index += 1;
++                        break;
++                    }
++                    if diff_line.starts_with("*** ")
++                        || diff_trimmed == "@@"
++                        || diff_trimmed.starts_with("@@ ")
++                    {
++                        break;
++                    }
++                    if diff_line == "\\ No newline at end of file" {
++                        index += 1;
++                        continue;
++                    }
++                    if diff_line.is_empty() {
++                        diff_lines.push(ApprovalPatchLine::Context(String::new()));
++                        index += 1;
++                        continue;
++                    }
++
++                    let marker = diff_line.chars().next()?;
++                    let payload = diff_line[marker.len_utf8()..].to_string();
++                    let parsed = match marker {
++                        ' ' => ApprovalPatchLine::Context(payload),
++                        '+' => ApprovalPatchLine::Add(payload),
++                        '-' => ApprovalPatchLine::Remove(payload),
++                        _ => return None,
++                    };
++                    diff_lines.push(parsed);
++                    index += 1;
++                }
++
++                if diff_lines.is_empty() {
++                    return None;
++                }
++
++                hunks.push(ApprovalPatchHunk {
++                    header,
++                    lines: diff_lines,
++                });
++            }
++
++            if hunks.is_empty() {
++                return None;
++            }
++
++            files.push(ApprovalPatchFile {
++                path,
++                action: ApprovalPatchFileAction::Update,
++                hunks,
++            });
+             continue;
+         }
+ 
+         if let Some(path) = trimmed.strip_prefix("*** Add File: ") {
+-            push_review_patch_header(&mut rendered, path.trim(), true);
+-            has_hunk_header = false;
+-            continue;
+-        }
++            let path = path.trim().to_string();
++            index += 1;
++            let mut diff_lines = Vec::new();
++            while index < end_index {
++                let current = lines[index];
++                if current.starts_with("*** ") {
++                    break;
++                }
++                if !current.starts_with('+') {
++                    return None;
++                }
++                diff_lines.push(ApprovalPatchLine::Add(current[1..].to_string()));
++                index += 1;
++            }
+ 
+-        if let Some(path) = trimmed.strip_prefix("*** Delete File: ") {
+-            if !rendered.is_empty() {
+-                rendered.push(String::new());
++            if diff_lines.is_empty() {
++                return None;
+             }
+-            let path = path.trim();
+-            rendered.push(format!("diff --git a/{path} b/{path}"));
+-            rendered.push(format!("--- a/{path}"));
+-            rendered.push("+++ /dev/null".to_string());
+-            rendered.push("@@".to_string());
+-            rendered.push("-[file deleted]".to_string());
+-            has_hunk_header = true;
+-            continue;
+-        }
+ 
+-        if trimmed.starts_with("*** Move to:") {
++            files.push(ApprovalPatchFile {
++                path,
++                action: ApprovalPatchFileAction::Add,
++                hunks: vec![ApprovalPatchHunk {
++                    header: "@@".to_string(),
++                    lines: diff_lines,
++                }],
++            });
+             continue;
+         }
+ 
+-        if trimmed == "@@" || trimmed.starts_with("@@ ") {
+-            rendered.push(trimmed.to_string());
+-            has_hunk_header = true;
++        if let Some(path) = trimmed.strip_prefix("*** Delete File: ") {
++            files.push(ApprovalPatchFile {
++                path: path.trim().to_string(),
++                action: ApprovalPatchFileAction::Delete,
++                hunks: vec![ApprovalPatchHunk {
++                    header: "@@".to_string(),
++                    lines: vec![ApprovalPatchLine::Note("file deleted".to_string())],
++                }],
++            });
++            index += 1;
+             continue;
+         }
+ 
+-        if line.starts_with(' ') || line.starts_with('+') || line.starts_with('-') {
+-            if !has_hunk_header {
+-                rendered.push("@@".to_string());
+-                has_hunk_header = true;
+-            }
+-            rendered.push(line.to_string());
+-        }
++        return None;
+     }
+ 
+-    let review = rendered.join("\n");
+-    if review.trim().is_empty() {
+-        normalized
+-    } else {
+-        review
+-    }
++    (!files.is_empty()).then_some(ApprovalPatchDocument { files })
+ }
+ 
+-fn push_review_patch_header(rendered: &mut Vec<String>, path: &str, added_file: bool) {
+-    if !rendered.is_empty() {
+-        rendered.push(String::new());
+-    }
++fn approval_patch_stats(document: &ApprovalPatchDocument) -> (usize, usize, usize) {
++    let mut added = 0usize;
++    let mut removed = 0usize;
+ 
+-    rendered.push(format!("diff --git a/{path} b/{path}"));
+-    if added_file {
+-        rendered.push("--- /dev/null".to_string());
+-    } else {
+-        rendered.push(format!("--- a/{path}"));
++    for file in &document.files {
++        for hunk in &file.hunks {
++            for line in &hunk.lines {
++                match line {
++                    ApprovalPatchLine::Add(_) => added += 1,
++                    ApprovalPatchLine::Remove(_) => removed += 1,
++                    ApprovalPatchLine::Context(_) | ApprovalPatchLine::Note(_) => {}
++                }
++            }
++        }
+     }
+-    rendered.push(format!("+++ b/{path}"));
++
++    (document.files.len(), added, removed)
+ }
+ 
+ fn last_assistant_from_messages(messages: &[ConversationMessageData]) -> Option<String> {
+@@ -5911,9 +6130,9 @@ mod tests {
+ 
+         let text = lines_text(overlay.content_lines(64));
+ 
+-        assert!(text.contains("diff --git a/index.js b/index.js"));
+-        assert!(text.contains("--- a/index.js"));
+-        assert!(text.contains("+++ b/index.js"));
++        assert!(text.contains("index.js  [update]"));
++        assert!(text.contains("@@"));
++        assert!(text.contains("console.log('new')"));
+         assert!(!text.contains("*** Begin Patch"));
+         assert!(!text.contains("*** End Patch"));
+         assert!(!text.contains("*** Update File: index.js"));
