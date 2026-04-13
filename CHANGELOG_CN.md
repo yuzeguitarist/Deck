@@ -4,6 +4,41 @@
 
 <!-- release-changelog-bot:auto -->
 
+<!-- release-changelog-bot:tag:v1.4.1 -->
+## v1.4.1 — v1.4.1 | contrite
+
+- **Tag:** `v1.4.1`
+- **Published:** 2026-04-13T03:38:10Z
+
+### Release notes
+
+<p align="center">
+  <a href="https://deckclip.app/download" rel="noopener noreferrer" target="_blank">
+    <img width="1525" height="896" alt="Deck" src="https://github.com/yuzeguitarist/Deck/raw/main/photos/Deck.webp" style="max-width: 100%; height: auto;" />
+  </a>
+</p>
+
+---
+
+## 更新说明 v1.4.1
+
+### 新增
+
+- **Deck CLI AI 聊天模型切换**  
+  在 `deckclip chat` 中新增 `/model`，可直接打开当前 Provider 的模型编辑区并修改模型名称；保存后，下一条消息会立即使用新模型。也可以按 `Ctrl+O` 直接打开模型编辑区。  
+
+### 修复
+
+- **Deck CLI AI 聊天 slash 命令列表**  
+  当 slash 命令超过当前可见行数时，命令列表现在会跟随选择滚动，键盘上下键、滚轮和鼠标点击都能稳定选中所有命令。  
+
+- **Deck CLI 安装器 Shell PATH 写入**  
+  CLI 安装器现在只会对现有且可写的 shell 启动文件做安全追加；如果 `.zshrc` 只读，会自动回退到可写的 `.zprofile`；只有文件不存在时才会新建，不再覆盖用户已有的 shell 配置文件。
+
+### Assets
+
+- [`Deck.dmg`](https://github.com/yuzeguitarist/Deck/releases/download/v1.4.1/Deck.dmg)
+
 <!-- release-changelog-bot:tag:v1.4.0 -->
 ## v1.4.0 — v1.4.0 | vinculum
 

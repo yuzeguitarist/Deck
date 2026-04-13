@@ -4,6 +4,38 @@ This file is auto-generated from GitHub Releases by [release-changelog-bot](.git
 
 <!-- release-changelog-bot:auto -->
 
+<!-- release-changelog-bot:tag:v1.4.1 -->
+## v1.4.1 — v1.4.1 | contrite
+
+- **Tag:** `v1.4.1`
+- **Published:** 2026-04-13T03:38:10Z
+
+### Release notes
+
+<p align="center">
+  <a href="https://deckclip.app/download" rel="noopener noreferrer" target="_blank">
+    <img width="1525" height="896" alt="Deck" src="https://github.com/yuzeguitarist/Deck/raw/main/photos/Deck.webp" style="max-width: 100%; height: auto;" />
+  </a>
+</p>
+
+---
+
+## Release Notes v1.4.1
+
+### Added
+
+-   Add `/model` to `deckclip chat` to open the current provider’s model editor and change the model name directly; after saving, the next message uses the new model immediately. You can also press `Ctrl+O` to open the model editor directly.  
+
+### Fixes
+
+-   When the slash command list exceeds the visible rows, it now scrolls with the current selection so every command remains reachable via arrow keys, mouse wheel, and mouse clicks.  
+
+-   The CLI installer now safely appends only to existing writable shell startup files; if `.zshrc` is read-only, it falls back to a writable `.zprofile`; missing files are created only when needed, and existing shell config files are no longer overwritten.
+
+### Assets
+
+- [`Deck.dmg`](https://github.com/yuzeguitarist/Deck/releases/download/v1.4.1/Deck.dmg)
+
 <!-- release-changelog-bot:tag:v1.4.0 -->
 ## v1.4.0 — v1.4.0 | vinculum
 
