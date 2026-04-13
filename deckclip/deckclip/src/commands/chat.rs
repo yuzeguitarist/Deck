@@ -279,10 +279,68 @@ struct HistoryOverlay {
 }
 
 #[derive(Debug, Clone)]
+struct ModelEditorOverlay {
+    provider: String,
+    current_model: String,
+    draft: String,
+    cursor: usize,
+    error: Option<String>,
+}
+
+impl ModelEditorOverlay {
+    fn new(provider: String, current_model: String) -> Self {
+        let cursor = char_count(&current_model);
+        Self {
+            provider,
+            current_model: current_model.clone(),
+            draft: current_model,
+            cursor,
+            error: None,
+        }
+    }
+
+    fn normalized_model(&self) -> Option<String> {
+        let trimmed = self.draft.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    }
+
+    fn clear_error(&mut self) {
+        self.error = None;
+    }
+
+    fn set_error(&mut self, message: String) {
+        self.error = Some(message);
+    }
+
+    fn clear(&mut self) {
+        self.draft.clear();
+        self.cursor = 0;
+        self.clear_error();
+    }
+
+    fn move_left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    fn move_right(&mut self) {
+        self.cursor = (self.cursor + 1).min(char_count(&self.draft));
+    }
+
+    fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn move_end(&mut self) {
+        self.cursor = char_count(&self.draft);
+    }
+}
+
+#[derive(Debug, Clone)]
 enum OverlayState {
     None,
     Approval(ApprovalOverlay),
     History(HistoryOverlay),
+    ModelEditor(ModelEditorOverlay),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,6 +353,7 @@ enum UiEvent {
     SessionOpened(SessionData),
     SessionAttached(SessionData),
     ConversationUpdated(SessionData),
+    ModelUpdated(BootstrapData),
     AssistantDelta(String),
     TerminalPasteResolved {
         pasted_text: String,
@@ -340,6 +399,11 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         name: "/resume",
         aliases: &[],
         description: "chat.slash.resume.description",
+    },
+    SlashCommand {
+        name: "/model",
+        aliases: &[],
+        description: "chat.slash.model.description",
     },
     SlashCommand {
         name: "/clear",
@@ -544,6 +608,25 @@ impl ChatApp {
 
     fn conversation_updated(&mut self, session: SessionData) {
         self.replace_session(session, false);
+    }
+
+    fn apply_bootstrap(&mut self, bootstrap: BootstrapData) {
+        if let Some(provider) = bootstrap.provider {
+            self.provider = provider;
+        }
+        if let Some(model) = bootstrap.model {
+            self.model = model;
+        }
+        self.account = bootstrap.account;
+        self.context_usage = None;
+    }
+
+    fn open_model_editor(&mut self) {
+        self.overlay = OverlayState::ModelEditor(ModelEditorOverlay::new(
+            self.provider.clone(),
+            self.model.clone(),
+        ));
+        self.clear_quit_hint();
     }
 
     fn push_activity(&mut self, text: impl Into<String>, tone: MetaTone) {
@@ -1533,6 +1616,87 @@ fn handle_key_event(
             }
             return;
         }
+        OverlayState::ModelEditor(overlay) => {
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                app.overlay = OverlayState::None;
+                app.clear_quit_hint();
+                app.set_footer(chat_text("chat.footer.model_cancelled"), MetaTone::Dim);
+                return;
+            }
+
+            match key.code {
+                KeyCode::Esc => {
+                    app.overlay = OverlayState::None;
+                    app.clear_quit_hint();
+                    app.set_footer(chat_text("chat.footer.model_cancelled"), MetaTone::Dim);
+                }
+                KeyCode::Enter => {
+                    let Some(model) = overlay.normalized_model() else {
+                        overlay.set_error(chat_text("chat.model.error.empty"));
+                        return;
+                    };
+
+                    let provider = overlay.provider.clone();
+                    app.overlay = OverlayState::None;
+                    app.clear_quit_hint();
+                    app.set_busy_action(chat_text("chat.busy.updating_model"));
+                    tokio::spawn(async move {
+                        let event = match update_current_provider_model(
+                            primary_client.clone(),
+                            &provider,
+                            &model,
+                        )
+                        .await
+                        {
+                            Ok(bootstrap) => UiEvent::ModelUpdated(bootstrap),
+                            Err(error) => ui_error(error),
+                        };
+                        let _ = ui_tx.send(event);
+                    });
+                }
+                KeyCode::Backspace => {
+                    if key.modifiers.contains(KeyModifiers::SUPER) {
+                        overlay.clear();
+                        return;
+                    }
+                    overlay.clear_error();
+                    delete_before_cursor(&mut overlay.draft, &mut overlay.cursor);
+                }
+                KeyCode::Delete => {
+                    if key.modifiers.contains(KeyModifiers::SUPER) {
+                        overlay.clear();
+                        return;
+                    }
+                    overlay.clear_error();
+                    delete_at_cursor(&mut overlay.draft, overlay.cursor);
+                }
+                KeyCode::Left => {
+                    overlay.move_left();
+                }
+                KeyCode::Right => {
+                    overlay.move_right();
+                }
+                KeyCode::Home => {
+                    overlay.move_home();
+                }
+                KeyCode::End => {
+                    overlay.move_end();
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    overlay.clear();
+                }
+                KeyCode::Char(ch)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT)
+                        && !key.modifiers.contains(KeyModifiers::SUPER) =>
+                {
+                    overlay.clear_error();
+                    insert_char_at(&mut overlay.draft, &mut overlay.cursor, ch);
+                }
+                _ => {}
+            }
+            return;
+        }
         OverlayState::None => {}
     }
 
@@ -1795,6 +1959,18 @@ fn handle_paste(
     primary_client: Arc<Mutex<DeckClient>>,
     ui_tx: UnboundedSender<UiEvent>,
 ) {
+    if let OverlayState::ModelEditor(overlay) = &mut app.overlay {
+        let sanitized: String = text
+            .chars()
+            .filter(|ch| *ch != '\n' && *ch != '\r')
+            .collect();
+        if !sanitized.is_empty() {
+            overlay.clear_error();
+            insert_text_at(&mut overlay.draft, &mut overlay.cursor, &sanitized);
+        }
+        return;
+    }
+
     if !matches!(app.overlay, OverlayState::None) {
         return;
     }
@@ -1870,7 +2046,7 @@ fn handle_mouse_event(
                 app.clear_quit_hint();
             }
             OverlayState::None => app.scroll_up(3),
-            OverlayState::Approval(_) => {}
+            OverlayState::Approval(_) | OverlayState::ModelEditor(_) => {}
         },
         MouseEventKind::ScrollDown => match &mut app.overlay {
             OverlayState::History(overlay) => {
@@ -1881,7 +2057,7 @@ fn handle_mouse_event(
                 maybe_request_more_history(app, primary_client, ui_tx);
             }
             OverlayState::None => app.scroll_down(3),
-            OverlayState::Approval(_) => {}
+            OverlayState::Approval(_) | OverlayState::ModelEditor(_) => {}
         },
         _ => {}
     }
@@ -1905,6 +2081,22 @@ fn handle_slash_command(
         "/help" => {
             app.push_activity(chat_text("chat.activity.help_commands"), MetaTone::Dim);
             app.set_footer(chat_text("chat.footer.help_shown"), MetaTone::Dim);
+        }
+        "/model" => {
+            if app.mode != ChatMode::Ready {
+                app.set_footer(
+                    chat_text("chat.footer.cannot_model_while_replying"),
+                    MetaTone::Warning,
+                );
+                return;
+            }
+
+            if app.busy_action.is_some() {
+                app.set_footer(chat_text("chat.footer.busy_wait"), MetaTone::Warning);
+                return;
+            }
+
+            app.open_model_editor();
         }
         "/cost" => {
             if let Some(usage) = &app.context_usage {
@@ -2029,6 +2221,17 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
         }
         UiEvent::ConversationUpdated(session) => {
             app.conversation_updated(session);
+        }
+        UiEvent::ModelUpdated(bootstrap) => {
+            app.clear_busy_action();
+            app.apply_bootstrap(bootstrap);
+            app.set_footer(
+                chat_format(
+                    "chat.footer.model_updated",
+                    &[("{model}", app.model.clone())],
+                ),
+                MetaTone::Success,
+            );
         }
         UiEvent::AssistantDelta(delta) => {
             app.streaming_text.push_str(&delta);
@@ -2259,6 +2462,54 @@ async fn fetch_bootstrap(client: Arc<Mutex<DeckClient>>) -> Result<BootstrapData
     response_data(response)
 }
 
+async fn update_current_provider_model(
+    client: Arc<Mutex<DeckClient>>,
+    provider: &str,
+    model: &str,
+) -> Result<BootstrapData> {
+    let provider = provider.to_string();
+    let model = model.trim().to_string();
+    tokio::task::spawn_blocking(move || persist_current_provider_model(&provider, &model))
+        .await
+        .context(i18n::t("err.chat_unexpected_stream_response"))??;
+    fetch_bootstrap(client).await
+}
+
+fn persist_current_provider_model(provider: &str, model: &str) -> Result<()> {
+    const DECK_PREFS_DOMAIN: &str = "com.yuzeguitar.Deck";
+
+    let key = deck_model_defaults_key(provider)
+        .ok_or_else(|| anyhow!(chat_text("chat.model.error.unsupported_provider")))?;
+    if model.trim().is_empty() {
+        bail!(chat_text("chat.model.error.empty"));
+    }
+
+    let output = Command::new("/usr/bin/defaults")
+        .args(["write", DECK_PREFS_DOMAIN, key, "-string", model])
+        .output()
+        .context(chat_text("chat.model.error.write_failed"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            bail!(chat_text("chat.model.error.write_failed"));
+        }
+        bail!(stderr);
+    }
+
+    Ok(())
+}
+
+fn deck_model_defaults_key(provider: &str) -> Option<&'static str> {
+    match provider {
+        "chatgpt" => Some("aiChatGPTModel"),
+        "openai_api" => Some("aiOpenAIModel"),
+        "anthropic" => Some("aiAnthropicModel"),
+        "ollama" => Some("aiOllamaModel"),
+        _ => None,
+    }
+}
+
 async fn open_chat_session(
     client: Arc<Mutex<DeckClient>>,
     session_id: Option<&str>,
@@ -2434,6 +2685,7 @@ fn render(frame: &mut Frame<'_>, app: &mut ChatApp) {
         OverlayState::History(overlay) => {
             render_history_overlay(frame, area, overlay, &mut app.history_hitboxes)
         }
+        OverlayState::ModelEditor(overlay) => render_model_overlay(frame, area, overlay),
         OverlayState::None => render_slash_popup(frame, layout[2], app),
     }
 }
@@ -2731,6 +2983,109 @@ fn render_approval_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &Approval
                 .borders(Borders::ALL),
         ),
         popup,
+    );
+}
+
+fn render_model_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &ModelEditorOverlay) {
+    let popup = centered_rect(68, 34, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(chat_text("chat.model.title"))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+
+    let provider_label = provider_display_name(&overlay.provider);
+    let provider_line = Line::from(vec![
+        Span::styled(
+            format!("{} ", chat_text("chat.model.provider")),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            provider_label,
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(provider_line), layout[0]);
+
+    let current_line = Line::from(vec![
+        Span::styled(
+            format!("{} ", chat_text("chat.model.current")),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            overlay.current_model.clone(),
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(current_line), layout[1]);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            chat_text("chat.model.subtitle"),
+            Style::default().fg(Color::DarkGray),
+        ))),
+        layout[2],
+    );
+
+    let input_block = Block::default()
+        .title(chat_text("chat.model.input.title"))
+        .borders(Borders::ALL)
+        .border_style(if overlay.error.is_some() {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default().fg(Color::Cyan)
+        });
+    let input_inner = input_block.inner(layout[3]);
+    frame.render_widget(input_block, layout[3]);
+
+    if input_inner.width > 0 && input_inner.height > 0 {
+        let view =
+            single_line_input_view(&overlay.draft, overlay.cursor, input_inner.width as usize);
+        let line = if overlay.draft.is_empty() {
+            Line::from(Span::styled(
+                chat_text("chat.model.input.placeholder"),
+                Style::default().fg(Color::DarkGray),
+            ))
+        } else {
+            Line::from(Span::raw(view.visible_text))
+        };
+        frame.render_widget(Paragraph::new(line), input_inner);
+        frame.set_cursor_position((input_inner.x + view.cursor_col as u16, input_inner.y));
+    }
+
+    let status_text = overlay
+        .error
+        .clone()
+        .unwrap_or_else(|| chat_text("chat.model.hint"));
+    let status_style = if overlay.error.is_some() {
+        Style::default().fg(Color::Red)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(status_text, status_style))),
+        layout[4],
     );
 }
 
@@ -3255,6 +3610,55 @@ fn centered_rect(percent_x: u16, percent_y: u16, rect: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(vertical[1])[1]
+}
+
+struct SingleLineInputView {
+    visible_text: String,
+    cursor_col: usize,
+}
+
+fn single_line_input_view(text: &str, cursor: usize, width: usize) -> SingleLineInputView {
+    let width = width.max(1);
+    let cursor = cursor.min(char_count(text));
+    let chars: Vec<char> = text.chars().collect();
+
+    let max_cursor_width = width.saturating_sub(1);
+    let mut start = 0usize;
+    let mut cursor_width = 0usize;
+
+    for (index, ch) in chars.iter().enumerate().take(cursor) {
+        cursor_width += char_display_width(*ch);
+        while cursor_width > max_cursor_width && start <= index {
+            cursor_width = cursor_width.saturating_sub(char_display_width(chars[start]));
+            start += 1;
+        }
+    }
+
+    let mut used = 0usize;
+    let mut visible_text = String::new();
+    for ch in chars.iter().skip(start) {
+        let ch_width = char_display_width(*ch);
+        if used + ch_width > width {
+            break;
+        }
+        visible_text.push(*ch);
+        used += ch_width;
+    }
+
+    SingleLineInputView {
+        visible_text,
+        cursor_col: cursor_width.min(used),
+    }
+}
+
+fn provider_display_name(provider: &str) -> &str {
+    match provider {
+        "chatgpt" => "ChatGPT",
+        "openai_api" => "OpenAI API",
+        "anthropic" => "Anthropic API",
+        "ollama" => "Ollama",
+        _ => provider,
+    }
 }
 
 struct WrappedInputRow {
@@ -4109,5 +4513,22 @@ mod tests {
             }
             other => panic!("unexpected transcript entry: {other:?}"),
         }
+    }
+
+    #[test]
+    fn slash_command_normalizes_model_alias() {
+        assert_eq!(normalize_slash_command("/model"), Some("/model"));
+    }
+
+    #[test]
+    fn defaults_key_maps_current_provider_model_keys() {
+        assert_eq!(deck_model_defaults_key("chatgpt"), Some("aiChatGPTModel"));
+        assert_eq!(deck_model_defaults_key("openai_api"), Some("aiOpenAIModel"));
+        assert_eq!(
+            deck_model_defaults_key("anthropic"),
+            Some("aiAnthropicModel")
+        );
+        assert_eq!(deck_model_defaults_key("ollama"), Some("aiOllamaModel"));
+        assert_eq!(deck_model_defaults_key("unknown"), None);
     }
 }
