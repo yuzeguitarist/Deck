@@ -160,7 +160,9 @@ struct ToolEventData {
     call_id: String,
     tool: String,
     parameters: Value,
+    #[allow(dead_code)]
     approved: Option<bool>,
+    #[allow(dead_code)]
     result: Option<Value>,
 }
 
@@ -226,7 +228,7 @@ struct AnimationState {
     quit_hint_active: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 enum TranscriptTailKey {
     #[default]
     None,
@@ -237,6 +239,7 @@ enum TranscriptTailKey {
         mode: ChatMode,
         spinner_frame: usize,
         elapsed_seconds: u64,
+        busy_action: Option<String>,
     },
 }
 
@@ -422,6 +425,7 @@ const MAX_INPUT_VISIBLE_LINES: usize = 6;
 const MAX_PENDING_ATTACHMENTS: usize = 2;
 const ATTACHMENT_CARD_HEIGHT: u16 = 3;
 const MIN_TWO_COLUMN_ATTACHMENT_WIDTH: u16 = 56;
+const MIN_TOOL_STATUS_DISPLAY: Duration = Duration::from_millis(450);
 
 fn chat_text(key: &str) -> String {
     i18n::t(key)
@@ -493,12 +497,15 @@ struct ChatApp {
     footer_tag: Option<FooterTag>,
     busy_action: Option<String>,
     busy_started_at: Option<Instant>,
+    busy_action_release_at: Option<Instant>,
+    busy_call_id: Option<String>,
     streaming_text: String,
     transcript_revision: u64,
     streaming_revision: u64,
     transcript_cache: TranscriptRenderCache,
     last_assistant_text: Option<String>,
     tool_states: HashMap<String, ToolLifecycle>,
+    search_call_count: usize,
     mode_started_at: Option<Instant>,
     auto_scroll: bool,
     scroll: usize,
@@ -544,12 +551,15 @@ impl ChatApp {
             footer_tag: None,
             busy_action: None,
             busy_started_at: None,
+            busy_action_release_at: None,
+            busy_call_id: None,
             streaming_text: String::new(),
             transcript_revision: 0,
             streaming_revision: 0,
             transcript_cache: TranscriptRenderCache::default(),
             last_assistant_text: None,
             tool_states: HashMap::new(),
+            search_call_count: 0,
             mode_started_at: None,
             auto_scroll: true,
             scroll: 0,
@@ -594,6 +604,7 @@ impl ChatApp {
         if clear_ephemeral {
             self.activities.clear();
             self.tool_states.clear();
+            self.search_call_count = 0;
             self.streaming_text.clear();
             self.overlay = OverlayState::None;
             self.mode = ChatMode::Ready;
@@ -656,11 +667,45 @@ impl ChatApp {
     fn set_busy_action(&mut self, text: impl Into<String>) {
         self.busy_action = Some(text.into());
         self.busy_started_at = Some(Instant::now());
+        self.busy_action_release_at = None;
+        self.busy_call_id = None;
     }
 
     fn clear_busy_action(&mut self) {
         self.busy_action = None;
         self.busy_started_at = None;
+        self.busy_action_release_at = None;
+        self.busy_call_id = None;
+    }
+
+    fn show_tool_status(&mut self, tool: &ToolEventData) {
+        if tool.tool == "search_clipboard" {
+            self.search_call_count += 1;
+        }
+
+        self.busy_action = Some(tool_status_text(tool, self.search_call_count));
+        self.busy_started_at = Some(Instant::now());
+        self.busy_action_release_at = None;
+        self.busy_call_id = Some(tool.call_id.clone());
+    }
+
+    fn finish_tool_status(&mut self, call_id: &str) {
+        if self.busy_call_id.as_deref() != Some(call_id) {
+            return;
+        }
+
+        let Some(started_at) = self.busy_started_at else {
+            self.clear_busy_action();
+            return;
+        };
+
+        let visible_until = started_at + MIN_TOOL_STATUS_DISPLAY;
+        if visible_until <= Instant::now() {
+            self.clear_busy_action();
+            return;
+        }
+
+        self.busy_action_release_at = Some(visible_until);
     }
 
     fn bump_transcript_revision(&mut self) {
@@ -709,6 +754,7 @@ impl ChatApp {
         self.streaming_text.clear();
         self.activities.clear();
         self.tool_states.clear();
+        self.search_call_count = 0;
         self.overlay = OverlayState::None;
         self.auto_scroll = true;
         self.clear_quit_hint();
@@ -720,6 +766,7 @@ impl ChatApp {
     fn finish_send(&mut self) {
         self.mode = ChatMode::Ready;
         self.mode_started_at = None;
+        self.search_call_count = 0;
         self.streaming_text.clear();
         self.overlay = OverlayState::None;
         self.clear_busy_action();
@@ -732,13 +779,7 @@ impl ChatApp {
         }
         match self.mode {
             ChatMode::Ready => chat_text("chat.status.ready"),
-            ChatMode::Streaming => chat_format(
-                "chat.status.thinking",
-                &[
-                    ("{spinner}", self.spinner_frame().to_string()),
-                    ("{elapsed}", self.elapsed_suffix()),
-                ],
-            ),
+            ChatMode::Streaming => format!("{} Thinking", self.spinner_frame()),
             ChatMode::AwaitingApproval => chat_format(
                 "chat.status.waiting_approval",
                 &[
@@ -811,8 +852,23 @@ impl ChatApp {
                     .or(self.busy_started_at)
                     .map(|started_at| started_at.elapsed().as_secs())
                     .unwrap_or(0),
+                busy_action: self.busy_action.clone(),
             },
-            ChatMode::Ready => TranscriptTailKey::None,
+            ChatMode::Ready => {
+                if self.busy_action.is_some() {
+                    TranscriptTailKey::Meta {
+                        mode: self.mode,
+                        spinner_frame: self.spinner_frame_index(),
+                        elapsed_seconds: self
+                            .busy_started_at
+                            .map(|started_at| started_at.elapsed().as_secs())
+                            .unwrap_or(0),
+                        busy_action: self.busy_action.clone(),
+                    }
+                } else {
+                    TranscriptTailKey::None
+                }
+            }
         }
     }
 
@@ -1143,6 +1199,7 @@ impl ChatApp {
         self.context_usage = None;
         self.conversation_entries.clear();
         self.activities.clear();
+        self.search_call_count = 0;
         self.streaming_text.clear();
         self.last_assistant_text = None;
         self.overlay = OverlayState::None;
@@ -1332,6 +1389,14 @@ impl ChatApp {
     }
 
     fn tick(&mut self) -> bool {
+        if self
+            .busy_action_release_at
+            .is_some_and(|deadline| deadline <= Instant::now())
+        {
+            self.clear_busy_action();
+            return true;
+        }
+
         if self
             .quit_hint_until
             .is_some_and(|deadline| deadline <= Instant::now())
@@ -2287,7 +2352,7 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
             }
             app.tool_states
                 .insert(tool.call_id.clone(), ToolLifecycle::Started);
-            app.push_activity(describe_tool_started(&tool), MetaTone::Info);
+            app.show_tool_status(&tool);
         }
         UiEvent::ToolFinished(tool) => {
             if matches!(
@@ -2298,7 +2363,7 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
             }
             app.tool_states
                 .insert(tool.call_id.clone(), ToolLifecycle::Finished);
-            app.push_activity(describe_tool_finished(&tool), tool_finish_tone(&tool));
+            app.finish_tool_status(&tool.call_id);
         }
         UiEvent::ApprovalRequested(tool) => {
             app.mode = ChatMode::AwaitingApproval;
@@ -3346,35 +3411,57 @@ fn build_transcript_tail_lines(app: &ChatApp, width: usize) -> Vec<Line<'static>
         return lines;
     }
 
+    if let Some(action) = &app.busy_action {
+        push_status_entry_lines(
+            &mut lines,
+            width,
+            app.spinner_frame(),
+            action,
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::ITALIC),
+        );
+        return lines;
+    }
+
     match app.mode {
-        ChatMode::Streaming => push_meta_entry_lines(
+        ChatMode::Streaming => push_status_entry_lines(
             &mut lines,
             width,
-            &chat_format(
-                "chat.meta.thinking",
-                &[
-                    ("{spinner}", app.spinner_frame().to_string()),
-                    ("{elapsed}", app.elapsed_suffix()),
-                ],
-            ),
-            MetaTone::Dim,
+            app.spinner_frame(),
+            "Thinking",
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::ITALIC),
         ),
-        ChatMode::AwaitingApproval => push_meta_entry_lines(
+        ChatMode::AwaitingApproval => push_status_entry_lines(
             &mut lines,
             width,
-            &chat_format(
-                "chat.meta.waiting_approval",
-                &[
-                    ("{spinner}", app.spinner_frame().to_string()),
-                    ("{elapsed}", app.elapsed_suffix()),
-                ],
-            ),
-            MetaTone::Warning,
+            app.spinner_frame(),
+            "Waiting approval",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::ITALIC),
         ),
         ChatMode::Ready => {}
     }
 
     lines
+}
+
+fn push_status_entry_lines(
+    lines: &mut Vec<Line<'static>>,
+    width: usize,
+    spinner: &str,
+    text: &str,
+    style: Style,
+) {
+    let line_start = lines.len();
+    let prefix = format!("{} ", spinner);
+    push_wrapped_lines(lines, width, &prefix, "  ", text, style);
+    if lines.len() > line_start {
+        lines.push(Line::from(""));
+    }
 }
 
 fn push_transcript_entry_lines(
@@ -3449,7 +3536,8 @@ fn push_wrapped_lines(
     text: &str,
     style: Style,
 ) {
-    let available_width = width.max(first_prefix.len() + 4);
+    let prefix_width = display_width(first_prefix).max(display_width(next_prefix));
+    let available_width = width.max(prefix_width + 4);
     let options = Options::new(available_width)
         .initial_indent(first_prefix)
         .subsequent_indent(next_prefix)
@@ -4168,74 +4256,41 @@ fn spaced_line(
     ])
 }
 
-fn describe_tool_started(tool: &ToolEventData) -> String {
+fn tool_status_text(tool: &ToolEventData, search_call_count: usize) -> String {
+    if tool.tool == "search_clipboard" {
+        let query = tool
+            .parameters
+            .get("query")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or("");
+        let display_query = if query.is_empty() { "(empty)" } else { query };
+        let suffix = if search_call_count > 1 {
+            format!(" +{}", search_call_count - 1)
+        } else {
+            String::new()
+        };
+        return format!("Searching \"{}\"{}", display_query, suffix);
+    }
+
     match tool.tool.as_str() {
-        "search_clipboard" => {
-            let query = tool
-                .parameters
-                .get("query")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            if query.is_empty() {
-                chat_text("chat.tool.searching_clipboard")
-            } else {
-                chat_format(
-                    "chat.tool.searching_clipboard_with_query",
-                    &[("{query}", query.to_string())],
-                )
-            }
-        }
-        "write_clipboard" => chat_text("chat.tool.writing_clipboard"),
-        "delete_clipboard" => chat_text("chat.tool.deleting_clipboard"),
-        _ => chat_format("chat.tool.running", &[("{tool}", tool.tool.clone())]),
+        "write_clipboard" => "Writing to clipboard...".to_string(),
+        "delete_clipboard" => "Deleting...".to_string(),
+        "list_script_plugins" => "Listing plugins...".to_string(),
+        "read_script_plugin" => "Reading plugin...".to_string(),
+        "read_skill_detail" => "Reading skill...".to_string(),
+        "record_memory" => "Saving memory...".to_string(),
+        "delete_memory" => "Deleting memory...".to_string(),
+        "save_session_context" => "Saving session context...".to_string(),
+        "read_session_context" => "Reading session context...".to_string(),
+        "delete_session_context" => "Deleting session context...".to_string(),
+        "run_script_transform" => "Running script plugin...".to_string(),
+        "generate_script_plugin" => "Creating script plugin...".to_string(),
+        "modify_script_plugin" => "Modifying script plugin...".to_string(),
+        "delete_script_plugin" => "Deleting script plugin...".to_string(),
+        "generate_smart_rule" => "Creating smart rule...".to_string(),
+        _ => format!("Running {}...", tool.tool),
     }
-}
-
-fn describe_tool_finished(tool: &ToolEventData) -> String {
-    if tool.approved == Some(false) {
-        return chat_format("chat.tool.rejected", &[("{tool}", tool.tool.clone())]);
-    }
-
-    if let Some(result) = &tool.result {
-        if result
-            .get("ok")
-            .and_then(Value::as_bool)
-            .is_some_and(|ok| !ok)
-        {
-            let default_error = chat_text("chat.tool.failed_default");
-            let error = result
-                .get("error")
-                .and_then(Value::as_str)
-                .unwrap_or(default_error.as_str());
-            return chat_format(
-                "chat.tool.failed",
-                &[
-                    ("{tool}", tool.tool.clone()),
-                    ("{error}", error.to_string()),
-                ],
-            );
-        }
-    }
-
-    chat_format("chat.tool.finished", &[("{tool}", tool.tool.clone())])
-}
-
-fn tool_finish_tone(tool: &ToolEventData) -> MetaTone {
-    if tool.approved == Some(false) {
-        return MetaTone::Warning;
-    }
-
-    if let Some(result) = &tool.result {
-        if result
-            .get("ok")
-            .and_then(Value::as_bool)
-            .is_some_and(|ok| !ok)
-        {
-            return MetaTone::Error;
-        }
-    }
-
-    MetaTone::Success
 }
 
 fn approval_preview(tool: &ToolEventData) -> String {
@@ -4522,6 +4577,99 @@ mod tests {
 
         assert_eq!(app.input, "hello\n\n");
         assert_eq!(app.input_cursor, char_count("hello\n\n"));
+    }
+
+    fn lines_text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn tool_event(call_id: &str, tool: &str, parameters: Value) -> ToolEventData {
+        ToolEventData {
+            call_id: call_id.to_string(),
+            tool: tool.to_string(),
+            parameters,
+            approved: None,
+            result: None,
+        }
+    }
+
+    #[test]
+    fn streaming_tail_uses_plain_thinking_label() {
+        let mut app = test_app();
+        app.begin_send();
+
+        let text = lines_text(&build_transcript_tail_lines(&app, 48));
+
+        assert!(text.contains("Thinking"));
+        assert!(!text.contains("Deck AI"));
+    }
+
+    #[test]
+    fn tool_events_replace_thinking_without_appending_activity() {
+        let mut app = test_app();
+        app.begin_send();
+
+        handle_ui_event(
+            &mut app,
+            UiEvent::ToolStarted(tool_event(
+                "call-1",
+                "record_memory",
+                serde_json::json!({"memory": "Sam Altman"}),
+            )),
+        );
+
+        assert_eq!(app.activities.len(), 0);
+        assert_eq!(app.busy_action.as_deref(), Some("Saving memory..."));
+        assert!(app.status_text().contains("Saving memory..."));
+
+        handle_ui_event(
+            &mut app,
+            UiEvent::ToolFinished(ToolEventData {
+                call_id: "call-1".to_string(),
+                tool: "record_memory".to_string(),
+                parameters: serde_json::json!({"memory": "Sam Altman"}),
+                approved: Some(true),
+                result: Some(serde_json::json!({"ok": true})),
+            }),
+        );
+
+        assert_eq!(app.activities.len(), 0);
+        assert!(app.busy_action_release_at.is_some());
+    }
+
+    #[test]
+    fn repeated_search_tool_status_matches_app_style() {
+        let mut app = test_app();
+        app.begin_send();
+
+        handle_ui_event(
+            &mut app,
+            UiEvent::ToolStarted(tool_event(
+                "search-1",
+                "search_clipboard",
+                serde_json::json!({"query": "hello"}),
+            )),
+        );
+        assert_eq!(app.busy_action.as_deref(), Some("Searching \"hello\""));
+
+        handle_ui_event(
+            &mut app,
+            UiEvent::ToolStarted(tool_event(
+                "search-2",
+                "search_clipboard",
+                serde_json::json!({"query": "hello"}),
+            )),
+        );
+        assert_eq!(app.busy_action.as_deref(), Some("Searching \"hello\" +1"));
     }
 
     #[test]
