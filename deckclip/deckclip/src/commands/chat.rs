@@ -485,6 +485,7 @@ struct ChatApp {
     input_visual_width: u16,
     input_text_area: Option<Rect>,
     slash_selected: usize,
+    slash_popup_visible_start: usize,
     slash_popup_hitboxes: Vec<Rect>,
     history_hitboxes: Vec<Rect>,
     overlay: OverlayState,
@@ -535,6 +536,7 @@ impl ChatApp {
             input_visual_width: 1,
             input_text_area: None,
             slash_selected: 0,
+            slash_popup_visible_start: 0,
             slash_popup_hitboxes: Vec::new(),
             history_hitboxes: Vec::new(),
             overlay: OverlayState::None,
@@ -671,6 +673,7 @@ impl ChatApp {
     }
 
     fn clear_popup_hitboxes(&mut self) {
+        self.slash_popup_visible_start = 0;
         self.slash_popup_hitboxes.clear();
         self.history_hitboxes.clear();
     }
@@ -1729,6 +1732,11 @@ fn handle_key_event(
         return;
     }
 
+    if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        open_model_editor_if_available(app);
+        return;
+    }
+
     if !app.slash_matches().is_empty() && app.input_history_index.is_none() {
         match key.code {
             KeyCode::Up => {
@@ -2010,7 +2018,12 @@ fn handle_mouse_event(
             }
 
             if let Some(index) = app.slash_hitbox_index(mouse.column, mouse.row) {
-                app.slash_selected = index;
+                let matches_len = app.slash_matches().len();
+                if matches_len == 0 {
+                    return;
+                }
+                app.slash_selected =
+                    (app.slash_popup_visible_start + index).min(matches_len.saturating_sub(1));
                 if let Some(command) = app.complete_selected_slash() {
                     app.set_tagged_footer(
                         chat_format(
@@ -2045,7 +2058,14 @@ fn handle_mouse_event(
                 }
                 app.clear_quit_hint();
             }
-            OverlayState::None => app.scroll_up(3),
+            OverlayState::None => {
+                if !app.slash_matches().is_empty() && app.input_history_index.is_none() {
+                    app.select_previous_slash();
+                    app.clear_quit_hint();
+                } else {
+                    app.scroll_up(3);
+                }
+            }
             OverlayState::Approval(_) | OverlayState::ModelEditor(_) => {}
         },
         MouseEventKind::ScrollDown => match &mut app.overlay {
@@ -2056,7 +2076,14 @@ fn handle_mouse_event(
                 app.clear_quit_hint();
                 maybe_request_more_history(app, primary_client, ui_tx);
             }
-            OverlayState::None => app.scroll_down(3),
+            OverlayState::None => {
+                if !app.slash_matches().is_empty() && app.input_history_index.is_none() {
+                    app.select_next_slash();
+                    app.clear_quit_hint();
+                } else {
+                    app.scroll_down(3);
+                }
+            }
             OverlayState::Approval(_) | OverlayState::ModelEditor(_) => {}
         },
         _ => {}
@@ -2083,20 +2110,7 @@ fn handle_slash_command(
             app.set_footer(chat_text("chat.footer.help_shown"), MetaTone::Dim);
         }
         "/model" => {
-            if app.mode != ChatMode::Ready {
-                app.set_footer(
-                    chat_text("chat.footer.cannot_model_while_replying"),
-                    MetaTone::Warning,
-                );
-                return;
-            }
-
-            if app.busy_action.is_some() {
-                app.set_footer(chat_text("chat.footer.busy_wait"), MetaTone::Warning);
-                return;
-            }
-
-            app.open_model_editor();
+            open_model_editor_if_available(app);
         }
         "/cost" => {
             if let Some(usage) = &app.context_usage {
@@ -3089,15 +3103,39 @@ fn render_model_overlay(frame: &mut Frame<'_>, area: Rect, overlay: &ModelEditor
     );
 }
 
+fn open_model_editor_if_available(app: &mut ChatApp) {
+    if app.mode != ChatMode::Ready {
+        app.set_footer(
+            chat_text("chat.footer.cannot_model_while_replying"),
+            MetaTone::Warning,
+        );
+        return;
+    }
+
+    if app.busy_action.is_some() {
+        app.set_footer(chat_text("chat.footer.busy_wait"), MetaTone::Warning);
+        return;
+    }
+
+    app.open_model_editor();
+}
+
 fn render_slash_popup(frame: &mut Frame<'_>, input_area: Rect, app: &mut ChatApp) {
     let matches = app.slash_matches();
     if matches.is_empty() {
         return;
     }
 
-    let height = (matches.len().min(5) as u16)
-        .saturating_mul(2)
-        .saturating_add(2);
+    let max_visible = slash_popup_max_visible(input_area);
+    let (visible_start, visible_count) =
+        visible_list_window(app.slash_selected, matches.len(), max_visible);
+    if visible_count == 0 {
+        return;
+    }
+
+    app.slash_popup_visible_start = visible_start;
+
+    let height = (visible_count as u16).saturating_mul(2).saturating_add(2);
     let popup_width = input_area.width.min(60);
     let popup = Rect {
         x: input_area.x,
@@ -3113,7 +3151,8 @@ fn render_slash_popup(frame: &mut Frame<'_>, input_area: Rect, app: &mut ChatApp
 
     let items: Vec<ListItem<'_>> = matches
         .iter()
-        .take(5)
+        .skip(visible_start)
+        .take(visible_count)
         .map(|command| {
             let alias = if command.aliases.is_empty() {
                 String::new()
@@ -3136,8 +3175,8 @@ fn render_slash_popup(frame: &mut Frame<'_>, input_area: Rect, app: &mut ChatApp
     let mut state = ListState::default();
     state.select(Some(
         app.slash_selected
-            .min(matches.len().saturating_sub(1))
-            .min(4),
+            .saturating_sub(visible_start)
+            .min(visible_count.saturating_sub(1)),
     ));
     let list = List::new(items)
         .block(block)
@@ -3149,7 +3188,7 @@ fn render_slash_popup(frame: &mut Frame<'_>, input_area: Rect, app: &mut ChatApp
         .highlight_symbol("› ");
     frame.render_stateful_widget(list, popup, &mut state);
 
-    for index in 0..matches.len().min(5) {
+    for index in 0..visible_count {
         let y = inner.y.saturating_add((index as u16).saturating_mul(2));
         let height = inner
             .height
@@ -3165,6 +3204,28 @@ fn render_slash_popup(frame: &mut Frame<'_>, input_area: Rect, app: &mut ChatApp
             height,
         });
     }
+}
+
+fn slash_popup_max_visible(input_area: Rect) -> usize {
+    input_area.y.saturating_sub(2) as usize / 2
+}
+
+fn visible_list_window(selected: usize, total_items: usize, max_visible: usize) -> (usize, usize) {
+    if total_items == 0 || max_visible == 0 {
+        return (0, 0);
+    }
+
+    let visible_count = total_items.min(max_visible);
+    let selected = selected.min(total_items.saturating_sub(1));
+    let visible_start = if total_items <= visible_count {
+        0
+    } else {
+        selected
+            .saturating_sub(visible_count.saturating_sub(1))
+            .min(total_items.saturating_sub(visible_count))
+    };
+
+    (visible_start, visible_count)
 }
 
 fn render_history_overlay(
@@ -4530,5 +4591,29 @@ mod tests {
         );
         assert_eq!(deck_model_defaults_key("ollama"), Some("aiOllamaModel"));
         assert_eq!(deck_model_defaults_key("unknown"), None);
+    }
+
+    #[test]
+    fn visible_list_window_keeps_selected_slash_item_visible() {
+        assert_eq!(visible_list_window(0, 6, 6), (0, 6));
+        assert_eq!(visible_list_window(5, 6, 5), (1, 5));
+        assert_eq!(visible_list_window(4, 8, 5), (0, 5));
+        assert_eq!(visible_list_window(7, 8, 5), (3, 5));
+    }
+
+    #[test]
+    fn ctrl_o_opens_model_editor() {
+        let mut app = test_app();
+        let client = Arc::new(Mutex::new(DeckClient::new(Config::default())));
+        let (ui_tx, _ui_rx) = unbounded_channel();
+
+        handle_key_event(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL),
+            client,
+            ui_tx,
+        );
+
+        assert!(matches!(app.overlay, OverlayState::ModelEditor(_)));
     }
 }
