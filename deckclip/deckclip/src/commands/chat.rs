@@ -1951,6 +1951,10 @@ fn tool_status_text(tool: &ToolEventData, search_call_count: usize) -> String {
         "modify_script_plugin" => "Modifying script plugin...".to_string(),
         "delete_script_plugin" => "Deleting script plugin...".to_string(),
         "generate_smart_rule" => "Creating smart rule...".to_string(),
+        "list_smart_rules" => "Listing smart rules...".to_string(),
+        "read_smart_rule" => "Reading smart rule...".to_string(),
+        "modify_smart_rule" => "Modifying smart rule...".to_string(),
+        "delete_smart_rule" => "Deleting smart rule...".to_string(),
         _ => format!("Running {}...", tool.tool),
     }
 }

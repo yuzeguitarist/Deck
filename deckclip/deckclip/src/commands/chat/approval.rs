@@ -461,6 +461,73 @@ fn approval_content(
                 }],
             )
         }
+        "modify_smart_rule" => {
+            let rule_name = approval_string_param(tool, "rule_name")
+                .unwrap_or_else(|| "Untitled rule".to_string());
+            let rule_id = approval_string_param(tool, "rule_id").unwrap_or_else(|| "-".to_string());
+            let previous_rule_name =
+                approval_string_param(tool, "existing_rule_name").unwrap_or_default();
+            let change_summary = approval_string_array_param(tool, "smart_rule_change_summary");
+            let preview = tool
+                .parameters
+                .get("smart_rule_preview")
+                .map(approval_pretty_value)
+                .unwrap_or_else(|| approval_pretty_value(&tool.parameters));
+
+            let mut content_blocks = Vec::new();
+            if !change_summary.is_empty() {
+                content_blocks.push(ApprovalContentBlock::List {
+                    title: "Changes".to_string(),
+                    items: change_summary,
+                });
+            }
+            content_blocks.push(ApprovalContentBlock::Code {
+                title: "Preview".to_string(),
+                text: preview,
+                mode: ApprovalCodeMode::Json,
+            });
+
+            let mut summary = vec![
+                approval_summary_item("Rule", rule_name.clone()),
+                approval_summary_item("ID", rule_id),
+            ];
+            if !previous_rule_name.is_empty() && previous_rule_name != rule_name {
+                summary.push(approval_summary_item("Previous", previous_rule_name));
+            }
+
+            ("Modify smart rule".to_string(), summary, content_blocks)
+        }
+        "delete_smart_rule" => {
+            let rule_name = approval_string_param(tool, "rule_name")
+                .unwrap_or_else(|| "Untitled rule".to_string());
+            let rule_id = approval_string_param(tool, "rule_id").unwrap_or_else(|| "-".to_string());
+            let preview = tool
+                .parameters
+                .get("smart_rule_preview")
+                .map(approval_pretty_value)
+                .unwrap_or_else(|| approval_pretty_value(&tool.parameters));
+
+            (
+                "Delete smart rule".to_string(),
+                vec![
+                    approval_summary_item("Rule", rule_name),
+                    approval_summary_item("ID", rule_id),
+                ],
+                vec![
+                    ApprovalContentBlock::Note {
+                        title: "Warning".to_string(),
+                        text: "This permanently removes the rule and cannot be undone."
+                            .to_string(),
+                        tone: MetaTone::Warning,
+                    },
+                    ApprovalContentBlock::Code {
+                        title: "Preview".to_string(),
+                        text: preview,
+                        mode: ApprovalCodeMode::Json,
+                    },
+                ],
+            )
+        }
         "write_clipboard" => {
             let text = approval_string_param(tool, "text")
                 .unwrap_or_else(|| chat_text("chat.approval.write_text_default"));
@@ -578,8 +645,8 @@ fn approval_footer_line(overlay: &ApprovalOverlay, allow_color: Color) -> Line<'
 
 fn approval_border_color(tool: &str) -> Color {
     match tool {
-        "delete_clipboard" | "delete_script_plugin" => Color::Red,
-        "modify_script_plugin" => Color::Yellow,
+        "delete_clipboard" | "delete_script_plugin" | "delete_smart_rule" => Color::Red,
+        "modify_script_plugin" | "modify_smart_rule" => Color::Yellow,
         "generate_script_plugin" | "generate_smart_rule" => Color::Cyan,
         "write_clipboard" => Color::Green,
         _ => Color::LightYellow,
