@@ -452,10 +452,10 @@ fn approval_content(
                 .unwrap_or_else(|| approval_pretty_value(&tool.parameters));
 
             (
-                "Create smart rule".to_string(),
+                chat_text("chat.approval.smart_rule.create_title"),
                 vec![approval_summary_item("Rule", rule_name)],
                 vec![ApprovalContentBlock::Code {
-                    title: "Preview".to_string(),
+                    title: chat_text("chat.approval.smart_rule.preview"),
                     text: preview,
                     mode: ApprovalCodeMode::Json,
                 }],
@@ -477,12 +477,12 @@ fn approval_content(
             let mut content_blocks = Vec::new();
             if !change_summary.is_empty() {
                 content_blocks.push(ApprovalContentBlock::List {
-                    title: "Changes".to_string(),
+                    title: chat_text("chat.approval.smart_rule.changes"),
                     items: change_summary,
                 });
             }
             content_blocks.push(ApprovalContentBlock::Code {
-                title: "Preview".to_string(),
+                title: chat_text("chat.approval.smart_rule.preview"),
                 text: preview,
                 mode: ApprovalCodeMode::Json,
             });
@@ -495,7 +495,11 @@ fn approval_content(
                 summary.push(approval_summary_item("Previous", previous_rule_name));
             }
 
-            ("Modify smart rule".to_string(), summary, content_blocks)
+            (
+                chat_text("chat.approval.smart_rule.modify_title"),
+                summary,
+                content_blocks,
+            )
         }
         "delete_smart_rule" => {
             let rule_name = approval_string_param(tool, "rule_name")
@@ -508,20 +512,19 @@ fn approval_content(
                 .unwrap_or_else(|| approval_pretty_value(&tool.parameters));
 
             (
-                "Delete smart rule".to_string(),
+                chat_text("chat.approval.smart_rule.delete_title"),
                 vec![
                     approval_summary_item("Rule", rule_name),
                     approval_summary_item("ID", rule_id),
                 ],
                 vec![
                     ApprovalContentBlock::Note {
-                        title: "Warning".to_string(),
-                        text: "This permanently removes the rule and cannot be undone."
-                            .to_string(),
+                        title: chat_text("chat.approval.smart_rule.warning"),
+                        text: chat_text("chat.approval.smart_rule.delete_warning"),
                         tone: MetaTone::Warning,
                     },
                     ApprovalContentBlock::Code {
-                        title: "Preview".to_string(),
+                        title: chat_text("chat.approval.smart_rule.preview"),
                         text: preview,
                         mode: ApprovalCodeMode::Json,
                     },

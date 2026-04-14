@@ -1926,36 +1926,43 @@ fn tool_status_text(tool: &ToolEventData, search_call_count: usize) -> String {
             .and_then(Value::as_str)
             .map(str::trim)
             .unwrap_or("");
-        let display_query = if query.is_empty() { "(empty)" } else { query };
+        let base = if query.is_empty() {
+            chat_text("chat.tool.searching_clipboard")
+        } else {
+            chat_format(
+                "chat.tool.searching_clipboard_with_query",
+                &[("{query}", query.to_string())],
+            )
+        };
         let suffix = if search_call_count > 1 {
             format!(" +{}", search_call_count - 1)
         } else {
             String::new()
         };
-        return format!("Searching \"{}\"{}", display_query, suffix);
+        return format!("{}{}", base, suffix);
     }
 
     match tool.tool.as_str() {
-        "write_clipboard" => "Writing to clipboard...".to_string(),
-        "delete_clipboard" => "Deleting...".to_string(),
-        "list_script_plugins" => "Listing plugins...".to_string(),
-        "read_script_plugin" => "Reading plugin...".to_string(),
-        "read_skill_detail" => "Reading skill...".to_string(),
-        "record_memory" => "Saving memory...".to_string(),
-        "delete_memory" => "Deleting memory...".to_string(),
-        "save_session_context" => "Saving session context...".to_string(),
-        "read_session_context" => "Reading session context...".to_string(),
-        "delete_session_context" => "Deleting session context...".to_string(),
-        "run_script_transform" => "Running script plugin...".to_string(),
-        "generate_script_plugin" => "Creating script plugin...".to_string(),
-        "modify_script_plugin" => "Modifying script plugin...".to_string(),
-        "delete_script_plugin" => "Deleting script plugin...".to_string(),
-        "generate_smart_rule" => "Creating smart rule...".to_string(),
-        "list_smart_rules" => "Listing smart rules...".to_string(),
-        "read_smart_rule" => "Reading smart rule...".to_string(),
-        "modify_smart_rule" => "Modifying smart rule...".to_string(),
-        "delete_smart_rule" => "Deleting smart rule...".to_string(),
-        _ => format!("Running {}...", tool.tool),
+        "write_clipboard" => chat_text("chat.tool.writing_clipboard"),
+        "delete_clipboard" => chat_text("chat.tool.deleting_clipboard"),
+        "list_script_plugins" => chat_text("chat.tool.listing_plugins"),
+        "read_script_plugin" => chat_text("chat.tool.reading_plugin"),
+        "read_skill_detail" => chat_text("chat.tool.reading_skill"),
+        "record_memory" => chat_text("chat.tool.saving_memory"),
+        "delete_memory" => chat_text("chat.tool.deleting_memory"),
+        "save_session_context" => chat_text("chat.tool.saving_session_context"),
+        "read_session_context" => chat_text("chat.tool.reading_session_context"),
+        "delete_session_context" => chat_text("chat.tool.deleting_session_context"),
+        "run_script_transform" => chat_text("chat.tool.running_script_plugin"),
+        "generate_script_plugin" => chat_text("chat.tool.creating_script_plugin"),
+        "modify_script_plugin" => chat_text("chat.tool.modifying_script_plugin"),
+        "delete_script_plugin" => chat_text("chat.tool.deleting_script_plugin"),
+        "generate_smart_rule" => chat_text("chat.tool.creating_smart_rule"),
+        "list_smart_rules" => chat_text("chat.tool.listing_smart_rules"),
+        "read_smart_rule" => chat_text("chat.tool.reading_smart_rule"),
+        "modify_smart_rule" => chat_text("chat.tool.modifying_smart_rule"),
+        "delete_smart_rule" => chat_text("chat.tool.deleting_smart_rule"),
+        _ => chat_format("chat.tool.running", &[("{tool}", tool.tool.clone())]),
     }
 }
 
