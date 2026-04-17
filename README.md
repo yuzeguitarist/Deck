@@ -2,6 +2,12 @@
     <img width="1024" alt="The modern, native, privacy-first clipboard manager for macOS." src="photos/Deck.webp">
 </a>
 
+> [!WARNING]
+> **Temporary Notice (2026-04-17)**  
+> Please **do not download Deck for now** — the current macOS release package is being blocked by system security checks, so downloading it is likely unusable for now.  
+> If your existing installed copy is **still working**, please **do not update** and **do not use in-app auto update** for now. Existing installs that have not been updated can still keep working.  
+> We are working on a fix and will post an update here as soon as possible.
+
 <p align="center">
   <a href="#features">Features</a> ·
   <a href="#install">Install</a> ·
@@ -84,6 +90,8 @@
 
 ## Install
 
+> **Temporary notice:** Please do not download or update Deck right now. If your current installed version still works, keep using it and do not use in-app auto update until further notice.
+
 ### Homebrew
 
 ```bash
@@ -102,11 +110,11 @@ brew install --cask deckclip
 
 ### First Launch
 
-On the first launch, macOS will show **"Deck" can't be opened because Apple cannot check it for malicious software.** This is because the app is not notarized via Apple's paid Developer Program — the app is source-available and safe to use.
+Under normal circumstances, macOS may show **"Deck" can't be opened because Apple cannot check it for malicious software."** This is because the app is not notarized via Apple's paid Developer Program — the app is source-available and safe to use.
 
-To resolve this: go to **System Settings → Privacy & Security**, scroll down to find the blocked message for Deck, and click **Open Anyway**.
+Under normal circumstances, you can resolve this by going to **System Settings → Privacy & Security**, scrolling down to find the blocked message for Deck, and clicking **Open Anyway**.
 
-This is a one-time step. All subsequent updates are delivered automatically within the app itself.
+**Temporary exception:** because of the current packaging issue noted above, new downloads or updates may still fail right now. If your existing installed copy is still working, please keep using it as-is and **do not use in-app auto update for now**.
 
 > Source code is public for reference only. Please use the official compiled app from Releases.
 
