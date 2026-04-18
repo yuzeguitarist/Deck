@@ -86,6 +86,19 @@ struct HistoryListView: View {
     // MARK: - Enhanced Vim Mode (dd delete)
     private let vimDoubleKeyInterval: TimeInterval = 0.5  // Time window for dd command
     private let bottomBarHeight: CGFloat = 50
+    private let verticalBottomPreFadeHeight: CGFloat = 56
+
+    private var verticalBottomOverlayHeight: CGFloat {
+        bottomBarHeight + verticalBottomPreFadeHeight
+    }
+
+    private var verticalBottomToolbarStartLocation: CGFloat {
+        verticalBottomPreFadeHeight / verticalBottomOverlayHeight
+    }
+
+    private var verticalListBottomInset: CGFloat {
+        bottomBarHeight
+    }
 
     private var quickPasteNumberShortcutText: String {
         "\(DeckUserDefaults.quickPasteNumberModifier.symbol)1-9"
@@ -136,30 +149,25 @@ struct HistoryListView: View {
     }
     
     var body: some View {
-        VStack(spacing: 0) {
-            Group {
-                if shouldShowInitialLoadingState {
-                    initialLoadingView
-                } else if dataStore.items.isEmpty {
-                    emptyStateView
-                } else {
-                    scrollContent
-                }
-            }
-            
+        Group {
             // Bottom bar:
             // - Vertical mode: queue bar and action bar are mutually exclusive (same slot)
             // - Horizontal mode: queue bar has priority, otherwise ambient bar
             if vm.layoutMode == .vertical {
-                if pasteQueue.isQueueMode {
-                    queueStatusBar
-                } else {
-                    verticalActionBar
+                contentSection
+                    .overlay(alignment: .bottom) {
+                        verticalBottomOverlay
+                    }
+            } else {
+                VStack(spacing: 0) {
+                    contentSection
+
+                    if pasteQueue.isQueueMode {
+                        queueStatusBar
+                    } else if !dataStore.items.isEmpty && DeckUserDefaults.showAmbientBar {
+                        ASCIIArtBarView()
+                    }
                 }
-            } else if pasteQueue.isQueueMode {
-                queueStatusBar
-            } else if !dataStore.items.isEmpty && DeckUserDefaults.showAmbientBar {
-                ASCIIArtBarView()
             }
         }
         .onAppear {
@@ -203,6 +211,17 @@ struct HistoryListView: View {
             }
             // Close preview when panel disappears
             resetPreviewState()
+        }
+    }
+
+    @ViewBuilder
+    private var contentSection: some View {
+        if shouldShowInitialLoadingState {
+            initialLoadingView
+        } else if dataStore.items.isEmpty {
+            emptyStateView
+        } else {
+            scrollContent
         }
     }
     
@@ -252,6 +271,125 @@ struct HistoryListView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     
+    private var verticalBottomOverlay: some View {
+        ZStack(alignment: .bottom) {
+            verticalBottomToolbarBackground
+                .allowsHitTesting(false)
+
+            if pasteQueue.isQueueMode {
+                verticalQueueStatusBar
+            } else {
+                verticalActionBar
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: verticalBottomOverlayHeight)
+    }
+
+    private var verticalBottomToolbarBackground: some View {
+        let toolbarTop = verticalBottomToolbarStartLocation
+
+        return ZStack {
+            Rectangle()
+                .fill(.regularMaterial)
+                .mask {
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0.0),
+                            .init(color: .black.opacity(0.012), location: toolbarTop * 0.22),
+                            .init(color: .black.opacity(0.06), location: toolbarTop * 0.58),
+                            .init(color: .black.opacity(0.22), location: toolbarTop),
+                            .init(color: .black.opacity(0.58), location: min(0.86, toolbarTop + 0.22)),
+                            .init(color: .black.opacity(0.82), location: 1.0)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
+
+            Rectangle()
+                .fill(.thickMaterial)
+                .mask {
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0.0),
+                            .init(color: .clear, location: toolbarTop * 0.34),
+                            .init(color: .black.opacity(0.05), location: toolbarTop * 0.72),
+                            .init(color: .black.opacity(0.22), location: toolbarTop + 0.02),
+                            .init(color: .black.opacity(0.64), location: min(0.88, toolbarTop + 0.24)),
+                            .init(color: .black.opacity(0.96), location: 1.0)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
+
+            Rectangle()
+                .fill(.ultraThickMaterial)
+                .mask {
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0.0),
+                            .init(color: .clear, location: toolbarTop * 0.68),
+                            .init(color: .black.opacity(0.06), location: toolbarTop * 0.92),
+                            .init(color: .black.opacity(0.22), location: toolbarTop + 0.08),
+                            .init(color: .black.opacity(0.62), location: min(0.9, toolbarTop + 0.26)),
+                            .init(color: .black, location: 1.0)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
+
+            Rectangle()
+                .fill(Const.panelOverlay.opacity(0.9))
+                .mask {
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0.0),
+                            .init(color: .clear, location: toolbarTop * 0.76),
+                            .init(color: .black.opacity(0.08), location: toolbarTop + 0.04),
+                            .init(color: .black.opacity(0.3), location: toolbarTop + 0.16),
+                            .init(color: .black.opacity(0.66), location: min(0.9, toolbarTop + 0.3)),
+                            .init(color: .black, location: 1.0)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                }
+        }
+        .frame(maxWidth: .infinity)
+        .frame(height: verticalBottomOverlayHeight)
+    }
+
+    private var verticalQueueStatusBar: some View {
+        HStack(spacing: Const.space8) {
+            HStack(spacing: 6) {
+                Image(systemName: "list.number")
+                Text(NSLocalizedString("队列模式", comment: "Queue mode"))
+                    .fontWeight(.medium)
+            }
+            .foregroundStyle(.orange)
+            .padding(.leading, Const.space12)
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: Const.space4) {
+                OverlayToolbarTextButton(title: NSLocalizedString("清空", comment: "Clear")) {
+                    pasteQueue.clearQueue()
+                }
+
+                OverlayToolbarTextButton(title: NSLocalizedString("退出", comment: "Exit")) {
+                    pasteQueue.toggleQueueMode()
+                }
+            }
+            .padding(.trailing, Const.space12)
+        }
+        .font(.system(size: 12))
+        .padding(.horizontal, Const.space8)
+        .frame(height: bottomBarHeight)
+    }
+
     private var queueStatusBar: some View {
         HStack(spacing: Const.space12) {
             HStack(spacing: Const.space12) {
@@ -303,7 +441,7 @@ struct HistoryListView: View {
         }
         .font(.system(size: 12))
         .padding(.horizontal, Const.space12)
-        .frame(height: vm.layoutMode == .horizontal ? 33 : bottomBarHeight)
+        .frame(height: 33)
     }
 
     private var verticalActionBar: some View {
@@ -391,6 +529,10 @@ struct HistoryListView: View {
                 ForEach(IndexedCollection(displayItems), id: \.element.id) { index, item in
                     verticalRow(for: item, at: index)
                 }
+
+                Color.clear
+                    .frame(height: verticalListBottomInset)
+                    .allowsHitTesting(false)
             }
             .padding(.horizontal, Const.space8)
             .padding(.vertical, Const.space4)
@@ -1185,7 +1327,7 @@ struct HistoryListView: View {
             if id == first {
                 anchor = .top
             } else if id == last {
-                anchor = .bottom
+                anchor = UnitPoint(x: 0.5, y: 0.74)
             } else {
                 anchor = .center
             }
@@ -1600,6 +1742,32 @@ private struct EnclosingScrollViewFinder: NSViewRepresentable {
             guard scrollView !== lastResolved else { return }
             lastResolved = scrollView
             onResolve(scrollView)
+        }
+    }
+}
+
+private struct OverlayToolbarTextButton: View {
+    let title: String
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 3)
+                .background {
+                    Capsule()
+                        .fill(isHovered ? Const.adaptiveGray(0.08, darkOpacity: 0.15) : Color.clear)
+                }
+        }
+        .buttonStyle(.plain)
+        .contentShape(Capsule())
+        .onHover { hovering in
+            isHovered = hovering
         }
     }
 }
