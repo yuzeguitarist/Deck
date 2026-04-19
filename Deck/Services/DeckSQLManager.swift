@@ -687,18 +687,24 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     /// Backfill cache for legacy rows with empty unique_id values.
     /// Keeps a stable generated UUID per row until the DB update succeeds.
     private var pendingUniqueIdBackfill: [Int64: String] = [:]
+    private var hasConfiguredSensitiveCacheObservation = false
 
     /// 单例初始化（设置队列检测机制）
     /// - Note: 设置 `dbQueueKey` 用于检测当前是否在 dbQueue 上执行
-    override private init() {
+    nonisolated override private init() {
         super.init()
         // 两个队列 target 到同一串行队列，因此三者都设置 specific key，保证死锁检测可靠。
         dbSerialQueue.setSpecific(key: dbQueueKey, value: ())
         dbQueue.setSpecific(key: dbQueueKey, value: ())
         dbBackgroundQueue.setSpecific(key: dbQueueKey, value: ())
         errorStateQueue.setSpecific(key: errorStateQueueKey, value: ())
+    }
 
-        // Security mode keeps some plaintext in memory caches (lowercased search strings). Clear them when inactive.
+    @MainActor
+    func configureSensitiveCacheObservation() {
+        guard !hasConfiguredSensitiveCacheObservation else { return }
+        hasConfiguredSensitiveCacheObservation = true
+
         NotificationCenter.default.addObserver(self, selector: #selector(handleSensitiveCacheInvalidation), name: NSApplication.willResignActiveNotification, object: nil)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(handleSensitiveCacheInvalidation), name: NSWorkspace.sessionDidResignActiveNotification, object: nil)
     }

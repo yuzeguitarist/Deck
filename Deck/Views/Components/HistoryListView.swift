@@ -12,7 +12,7 @@ import Foundation
 import AppKit
 import Carbon
 
-private struct IndexedCollection<Base: RandomAccessCollection>: RandomAccessCollection {
+private nonisolated struct IndexedCollection<Base: RandomAccessCollection>: RandomAccessCollection {
     typealias Index = Base.Index
     typealias Element = (index: Base.Index, element: Base.Element)
 
@@ -1552,11 +1552,13 @@ struct HistoryListView: View {
            !reordered.contains(where: { $0.id == current }) {
             selectedId = reordered.first?.id
         }
+
     }
-    
+
     private func observeFrontmostAppChanges() {
         guard workspaceObserver == nil else { return }
-        
+        let deckBundleIdentifier = Bundle.main.bundleIdentifier
+
         workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
@@ -1565,17 +1567,19 @@ struct HistoryListView: View {
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
                 return
             }
-            // Ignore Deck itself
-            if app.bundleIdentifier == Bundle.main.bundleIdentifier {
+            let appBundleIdentifier = app.bundleIdentifier
+            if appBundleIdentifier == deckBundleIdentifier {
                 return
             }
-            guard DeckUserDefaults.contextAwareEnabled else { return }
-            let types = ContextAwareService.shared.getPreferredTypes(for: app)
-            refreshDisplayItems(preferredTypesOverride: types)
-            resetInitialSelection(force: true)
+            MainActor.assumeIsolated {
+                guard DeckUserDefaults.contextAwareEnabled else { return }
+                let types = ContextAwareService.shared.getPreferredTypes(forBundleIdentifier: appBundleIdentifier)
+                refreshDisplayItems(preferredTypesOverride: types)
+                resetInitialSelection(force: true)
+            }
         }
     }
-    
+
     private func makePreviewBinding(for id: ClipboardItem.ID?) -> Binding<Bool> {
         Binding(
             get: { isPreviewOpen && showPreviewId == id },
