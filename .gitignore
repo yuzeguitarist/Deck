@@ -98,3 +98,7 @@ __pycache__/
 
 # DeckClip (Rust CLI)
 deckclip/target/
+
+# source code git
+Deck/.git
+Deck/.gitignore
