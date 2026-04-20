@@ -149,7 +149,7 @@ fn run_default_setup(output: OutputMode) -> Result<()> {
         SetupWizardResult::Submit(clients) => {
             let entries = run_setup_clients(&clients, None, &command, true)?;
             let json_output = serde_json::to_value(&entries)?;
-            output.print_data(&render_setup_entries(&entries), &json_output);
+            output.print_data(&render_auto_setup_entries(&entries), &json_output);
             Ok(())
         }
     }
@@ -679,6 +679,49 @@ fn render_setup_entries(entries: &[SetupEntry]) -> String {
         }
         lines.push(i18n::t("mcp.setup.label.snippet"));
         lines.push(entry.snippet.clone());
+
+        if !entry.notes.is_empty() {
+            lines.push(i18n::t("mcp.setup.label.notes"));
+            for note in &entry.notes {
+                lines.push(format!("  - {}", note));
+            }
+        }
+
+        if index + 1 < entries.len() {
+            lines.push(String::new());
+        }
+    }
+
+    lines.join("\n")
+}
+
+fn render_auto_setup_entries(entries: &[SetupEntry]) -> String {
+    let mut lines = vec![i18n::t("mcp.setup.title"), String::new()];
+
+    for (index, entry) in entries.iter().enumerate() {
+        lines.push(format!(
+            "{} {}",
+            i18n::t("mcp.setup.label.client"),
+            entry.client
+        ));
+        lines.push(format!(
+            "{} {}",
+            i18n::t("mcp.setup.label.mode"),
+            entry.mode
+        ));
+        lines.push(format!(
+            "{} {}",
+            i18n::t("mcp.setup.label.path"),
+            entry.path
+        ));
+
+        if let Some(backup_path) = &entry.backup_path {
+            lines.push(format!(
+                "{} {}",
+                i18n::t("mcp.setup.label.backup"),
+                backup_path
+            ));
+        }
 
         if !entry.notes.is_empty() {
             lines.push(i18n::t("mcp.setup.label.notes"));
