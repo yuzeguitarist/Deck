@@ -1,9 +1,22 @@
 use std::borrow::Cow;
 use std::env;
 use std::fs;
+use std::io::{stdout, IsTerminal, Stdout, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Result};
+use crossterm::cursor::{Hide, MoveTo, Show};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::execute;
+use crossterm::queue;
+use crossterm::style::{
+    Attribute, Color, ResetColor, SetAttribute, SetForegroundColor,
+};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen,
+    LeaveAlternateScreen,
+};
 use deckclip_core::config::{default_socket_path, default_token_path};
 use deckclip_core::{Config, DeckClient};
 use deckclip_protocol::Response;
@@ -18,6 +31,8 @@ use rmcp::{tool, tool_handler, tool_router};
 use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use textwrap::Options;
+use unicode_width::UnicodeWidthStr;
 
 use crate::cli::{McpAction, McpCommand, McpSetupArgs, McpSetupClient};
 use crate::i18n;
@@ -34,10 +49,11 @@ const TOOL_TRANSFORM_TEXT: &str = "deck_transform_clipboard_text";
 
 pub async fn run(command: McpCommand, output: OutputMode) -> Result<()> {
     match command.action {
-        McpAction::Serve => serve().await,
-        McpAction::Tools => run_tools(output),
-        McpAction::Doctor => run_doctor(output).await,
-        McpAction::Setup(args) => run_setup(args, output),
+        Some(McpAction::Serve) => serve().await,
+        Some(McpAction::Tools) => run_tools(output),
+        Some(McpAction::Doctor) => run_doctor(output).await,
+        Some(McpAction::Setup(args)) => run_setup_entry(args, output),
+        None => run_default_setup(output),
     }
 }
 
@@ -100,32 +116,82 @@ async fn run_doctor(output: OutputMode) -> Result<()> {
     Ok(())
 }
 
-fn run_setup(args: McpSetupArgs, output: OutputMode) -> Result<()> {
+fn run_default_setup(output: OutputMode) -> Result<()> {
+    if matches!(output, OutputMode::Json)
+        || !std::io::stdin().is_terminal()
+        || !std::io::stdout().is_terminal()
+    {
+        bail!("{}", i18n::t("err.mcp_setup_wizard_requires_terminal"));
+    }
+
+    let command = resolve_command(None);
+    let detected = detect_setup_clients()?;
+
+    if detected.is_empty() {
+        let message = render_empty_setup_wizard();
+        let json_output = json!({
+            "message": i18n::t("mcp.setup.wizard.none_detected"),
+            "detected_clients": [],
+        });
+        output.print_data(&message, &json_output);
+        return Ok(());
+    }
+
+    match run_setup_wizard(&detected)? {
+        SetupWizardResult::Cancelled => {
+            output.print_success(&i18n::t("mcp.setup.wizard.cancelled"));
+            Ok(())
+        }
+        SetupWizardResult::Submit(clients) if clients.is_empty() => {
+            output.print_success(&i18n::t("mcp.setup.wizard.no_selection"));
+            Ok(())
+        }
+        SetupWizardResult::Submit(clients) => {
+            let entries = run_setup_clients(&clients, None, &command, true)?;
+            let json_output = serde_json::to_value(&entries)?;
+            output.print_data(&render_setup_entries(&entries), &json_output);
+            Ok(())
+        }
+    }
+}
+
+fn run_setup_entry(args: McpSetupArgs, output: OutputMode) -> Result<()> {
     if args.path.is_some() && args.client == McpSetupClient::All {
         bail!("{}", i18n::t("err.mcp_setup_path_requires_single_client"));
     }
 
     let command = resolve_command(args.command.as_deref());
     let clients = selected_clients(args.client);
-    let mut entries = Vec::with_capacity(clients.len());
-
-    for client in clients {
-        let plan = build_setup_plan(client, args.path.as_deref(), &command)?;
-        let mode = if args.write {
-            match write_setup_plan(&plan)? {
-                SetupWriteOutcome::Written => SetupMode::Written,
-                SetupWriteOutcome::AlreadyPresent => SetupMode::AlreadyPresent,
-            }
-        } else {
-            SetupMode::Preview
-        };
-
-        entries.push(plan.into_output(mode, &command));
-    }
+    let entries = run_setup_clients(&clients, args.path.as_deref(), &command, args.write)?;
 
     let json_output = serde_json::to_value(&entries)?;
     output.print_data(&render_setup_entries(&entries), &json_output);
     Ok(())
+}
+
+fn run_setup_clients(
+    clients: &[McpSetupClient],
+    path_override: Option<&Path>,
+    command: &str,
+    write: bool,
+) -> Result<Vec<SetupEntry>> {
+    let mut entries = Vec::with_capacity(clients.len());
+
+    for client in clients.iter().copied() {
+        let plan = build_setup_plan(client, path_override, command)?;
+        let (mode, backup_path) = if write {
+            match write_setup_plan(&plan)? {
+                SetupWriteOutcome::Written { backup_path } => (SetupMode::Written, backup_path),
+                SetupWriteOutcome::AlreadyPresent => (SetupMode::AlreadyPresent, None),
+            }
+        } else {
+            (SetupMode::Preview, None)
+        };
+
+        entries.push(plan.into_output(mode, command, backup_path));
+    }
+
+    Ok(entries)
 }
 
 fn selected_clients(client: McpSetupClient) -> Vec<McpSetupClient> {
@@ -137,6 +203,111 @@ fn selected_clients(client: McpSetupClient) -> Vec<McpSetupClient> {
             McpSetupClient::Opencode,
         ],
         client => vec![client],
+    }
+}
+
+fn client_label_key(client: McpSetupClient) -> &'static str {
+    match client {
+        McpSetupClient::ClaudeDesktop => "mcp.client.claude_desktop",
+        McpSetupClient::Cursor => "mcp.client.cursor",
+        McpSetupClient::Codex => "mcp.client.codex",
+        McpSetupClient::Opencode => "mcp.client.opencode",
+        McpSetupClient::All => unreachable!(),
+    }
+}
+
+fn detect_setup_clients() -> Result<Vec<DetectedSetupClient>> {
+    let mut detected = Vec::new();
+
+    for client in selected_clients(McpSetupClient::All) {
+        if is_client_installed(client) {
+            let path = default_target_path(client)?;
+            let inspection = inspect_target_config(client, &path);
+            detected.push(DetectedSetupClient {
+                client,
+                label: i18n::t(client_label_key(client)),
+                path: path_to_string(&path),
+                status: inspection.status,
+                selected: true,
+            });
+        }
+    }
+
+    Ok(detected)
+}
+
+fn is_client_installed(client: McpSetupClient) -> bool {
+    if default_target_path(client)
+        .map(|path| path.exists())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    match client {
+        McpSetupClient::ClaudeDesktop => {
+            app_bundle_exists(&["/Applications/Claude.app", "/Applications/Claude Desktop.app"], &["Claude.app", "Claude Desktop.app"])
+        }
+        McpSetupClient::Cursor => app_bundle_exists(&["/Applications/Cursor.app"], &["Cursor.app"]),
+        McpSetupClient::Codex => find_command_in_path("codex").is_some(),
+        McpSetupClient::Opencode => find_command_in_path("opencode").is_some(),
+        McpSetupClient::All => false,
+    }
+}
+
+fn app_bundle_exists(system_paths: &[&str], user_app_names: &[&str]) -> bool {
+    if system_paths.iter().any(|path| Path::new(path).exists()) {
+        return true;
+    }
+
+    home_dir()
+        .map(|home| {
+            user_app_names
+                .iter()
+                .map(|name| home.join("Applications").join(name))
+                .any(|path| path.exists())
+        })
+        .unwrap_or(false)
+}
+
+fn render_empty_setup_wizard() -> String {
+    [
+        i18n::t("mcp.setup.wizard.title"),
+        String::new(),
+        i18n::t("mcp.setup.wizard.none_detected"),
+        i18n::t("mcp.setup.wizard.none_detected_hint"),
+    ]
+    .join("\n")
+}
+
+fn run_setup_wizard(detected: &[DetectedSetupClient]) -> Result<SetupWizardResult> {
+    let mut terminal = SetupWizardTerminal::enter()?;
+    let mut state = SetupWizardState::new(detected);
+
+    loop {
+        terminal.draw(&state)?;
+
+        match event::read()? {
+            Event::Key(key) => {
+                if matches!(key.kind, KeyEventKind::Release) {
+                    continue;
+                }
+
+                match key.code {
+                    KeyCode::Up => state.move_up(),
+                    KeyCode::Down => state.move_down(),
+                    KeyCode::Char(' ') => state.toggle(),
+                    KeyCode::Enter => {
+                        return Ok(SetupWizardResult::Submit(state.selected_clients()));
+                    }
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        return Ok(SetupWizardResult::Cancelled);
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -169,6 +340,245 @@ fn render_tool_catalog(tools: &[ToolDescriptor]) -> String {
 
     lines.push(i18n::t("mcp.tools.footer"));
     lines.join("\n")
+}
+
+struct SetupWizardTerminal {
+    stdout: Stdout,
+}
+
+#[derive(Clone, Copy)]
+struct SetupWizardLayout {
+    terminal_height: u16,
+    content_width: usize,
+}
+
+#[derive(Clone, Copy)]
+enum SetupWizardTextStyle {
+    Plain,
+    Bold,
+    Dim,
+    Highlight,
+}
+
+struct SetupWizardScreenWriter<'a> {
+    stdout: &'a mut Stdout,
+    layout: SetupWizardLayout,
+    row: u16,
+}
+
+impl SetupWizardLayout {
+    fn detect() -> Self {
+        let (width, height) = size().unwrap_or((80, 24));
+        let terminal_width = width.max(1) as usize;
+
+        Self {
+            terminal_height: height.max(1),
+            content_width: terminal_width.saturating_sub(1).max(1),
+        }
+    }
+}
+
+impl<'a> SetupWizardScreenWriter<'a> {
+    fn new(stdout: &'a mut Stdout, layout: SetupWizardLayout, start_row: u16) -> Self {
+        Self {
+            stdout,
+            layout,
+            row: start_row,
+        }
+    }
+
+    fn blank_line(&mut self) -> Result<()> {
+        self.clear_current_line()?;
+        self.row = self.row.saturating_add(1);
+        Ok(())
+    }
+
+    fn clear_current_line(&mut self) -> Result<()> {
+        if self.row >= self.layout.terminal_height {
+            return Ok(());
+        }
+
+        queue!(
+            self.stdout,
+            MoveTo(0, self.row),
+            Clear(ClearType::CurrentLine)
+        )?;
+        Ok(())
+    }
+
+    fn write_line(&mut self, line: &str, style: SetupWizardTextStyle) -> Result<()> {
+        if self.row >= self.layout.terminal_height {
+            return Ok(());
+        }
+
+        self.clear_current_line()?;
+        queue!(self.stdout, MoveTo(0, self.row))?;
+
+        match style {
+            SetupWizardTextStyle::Plain => {}
+            SetupWizardTextStyle::Bold => {
+                queue!(self.stdout, SetAttribute(Attribute::Bold))?;
+            }
+            SetupWizardTextStyle::Dim => {
+                queue!(self.stdout, SetForegroundColor(Color::DarkGrey))?;
+            }
+            SetupWizardTextStyle::Highlight => {
+                queue!(
+                    self.stdout,
+                    SetForegroundColor(Color::Yellow),
+                    SetAttribute(Attribute::Bold)
+                )?;
+            }
+        }
+
+        write!(self.stdout, "{line}")?;
+        queue!(self.stdout, ResetColor, SetAttribute(Attribute::Reset))?;
+        self.row = self.row.saturating_add(1);
+        Ok(())
+    }
+
+    fn write_wrapped(
+        &mut self,
+        initial_indent: &str,
+        subsequent_indent: &str,
+        text: &str,
+        style: SetupWizardTextStyle,
+    ) -> Result<()> {
+        let options = Options::new(self.layout.content_width)
+            .initial_indent(initial_indent)
+            .subsequent_indent(subsequent_indent)
+            .break_words(true)
+            .word_splitter(textwrap::WordSplitter::NoHyphenation);
+
+        for line in textwrap::wrap(text, &options) {
+            self.write_line(line.as_ref(), style)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl SetupWizardTerminal {
+    fn enter() -> Result<Self> {
+        enable_raw_mode()?;
+        let mut stdout = stdout();
+        execute!(stdout, EnterAlternateScreen, Hide)?;
+        Ok(Self { stdout })
+    }
+
+    fn draw(&mut self, state: &SetupWizardState) -> Result<()> {
+        queue!(self.stdout, MoveTo(0, 0), Clear(ClearType::All))?;
+        let layout = SetupWizardLayout::detect();
+        let mut screen = SetupWizardScreenWriter::new(&mut self.stdout, layout, 0);
+
+        screen.write_wrapped(
+            "",
+            "",
+            &i18n::t("mcp.setup.wizard.title"),
+            SetupWizardTextStyle::Bold,
+        )?;
+        screen.blank_line()?;
+        screen.write_wrapped(
+            "",
+            "",
+            &i18n::t("mcp.setup.wizard.detected"),
+            SetupWizardTextStyle::Plain,
+        )?;
+        screen.write_wrapped(
+            "",
+            "",
+            &i18n::t("mcp.setup.wizard.hint"),
+            SetupWizardTextStyle::Dim,
+        )?;
+        screen.blank_line()?;
+
+        for (index, item) in state.items.iter().enumerate() {
+            let cursor_prefix = if index == state.cursor { ">" } else { " " };
+            let mark = if item.selected { "[x]" } else { "[ ]" };
+            let title_prefix = format!("{cursor_prefix} {mark} ");
+            let title_indent = " ".repeat(title_prefix.width());
+            let title_style = if index == state.cursor {
+                SetupWizardTextStyle::Highlight
+            } else {
+                SetupWizardTextStyle::Plain
+            };
+
+            screen.write_wrapped(&title_prefix, &title_indent, &item.label, title_style)?;
+
+            let path_prefix = format!("    {} ", i18n::t("mcp.setup.label.path"));
+            let path_indent = " ".repeat(path_prefix.width());
+            screen.write_wrapped(
+                &path_prefix,
+                &path_indent,
+                &item.path,
+                SetupWizardTextStyle::Plain,
+            )?;
+
+            let status_prefix = format!("    {} ", i18n::t("mcp.setup.wizard.label.status"));
+            let status_indent = " ".repeat(status_prefix.width());
+            screen.write_wrapped(
+                &status_prefix,
+                &status_indent,
+                &item.status,
+                SetupWizardTextStyle::Plain,
+            )?;
+
+            if index + 1 < state.items.len() {
+                screen.blank_line()?;
+            }
+        }
+
+        self.stdout.flush()?;
+        Ok(())
+    }
+}
+
+impl Drop for SetupWizardTerminal {
+    fn drop(&mut self) {
+        let _ = execute!(self.stdout, Show, LeaveAlternateScreen);
+        let _ = disable_raw_mode();
+    }
+}
+
+struct SetupWizardState {
+    items: Vec<DetectedSetupClient>,
+    cursor: usize,
+}
+
+impl SetupWizardState {
+    fn new(detected: &[DetectedSetupClient]) -> Self {
+        Self {
+            items: detected.to_vec(),
+            cursor: 0,
+        }
+    }
+
+    fn move_up(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    fn move_down(&mut self) {
+        self.cursor = (self.cursor + 1).min(self.items.len().saturating_sub(1));
+    }
+
+    fn toggle(&mut self) {
+        if let Some(item) = self.items.get_mut(self.cursor) {
+            item.selected = !item.selected;
+        }
+    }
+
+    fn selected_clients(&self) -> Vec<McpSetupClient> {
+        self.items
+            .iter()
+            .filter(|item| item.selected)
+            .map(|item| item.client)
+            .collect()
+    }
+}
+
+enum SetupWizardResult {
+    Cancelled,
+    Submit(Vec<McpSetupClient>),
 }
 
 fn render_doctor_report(report: &DoctorReport) -> String {
@@ -260,6 +670,13 @@ fn render_setup_entries(entries: &[SetupEntry]) -> String {
             i18n::t("mcp.setup.label.command"),
             entry.command
         ));
+        if let Some(backup_path) = &entry.backup_path {
+            lines.push(format!(
+                "{} {}",
+                i18n::t("mcp.setup.label.backup"),
+                backup_path
+            ));
+        }
         lines.push(i18n::t("mcp.setup.label.snippet"));
         lines.push(entry.snippet.clone());
 
@@ -511,8 +928,9 @@ fn write_json_mcp_config(
 
     section_object.insert(MCP_SERVER_KEY.to_string(), server_value.clone());
     let rendered = format!("{}\n", serde_json::to_string_pretty(&root)?);
+    let backup_path = create_backup_if_needed(path)?;
     fs::write(path, rendered)?;
-    Ok(SetupWriteOutcome::Written)
+    Ok(SetupWriteOutcome::Written { backup_path })
 }
 
 fn write_codex_config(path: &Path, snippet: &str) -> Result<SetupWriteOutcome> {
@@ -536,8 +954,9 @@ fn write_codex_config(path: &Path, snippet: &str) -> Result<SetupWriteOutcome> {
         rendered.push('\n');
     }
     rendered.push_str(snippet);
+    let backup_path = create_backup_if_needed(path)?;
     fs::write(path, rendered)?;
-    Ok(SetupWriteOutcome::Written)
+    Ok(SetupWriteOutcome::Written { backup_path })
 }
 
 fn write_opencode_config(path: &Path, server_value: &Value) -> Result<SetupWriteOutcome> {
@@ -587,8 +1006,9 @@ fn write_opencode_config(path: &Path, server_value: &Value) -> Result<SetupWrite
 
     section_object.insert(MCP_SERVER_KEY.to_string(), server_value.clone());
     let rendered = format!("{}\n", serde_json::to_string_pretty(&root)?);
+    let backup_path = create_backup_if_needed(path)?;
     fs::write(path, rendered)?;
-    Ok(SetupWriteOutcome::Written)
+    Ok(SetupWriteOutcome::Written { backup_path })
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
@@ -596,6 +1016,35 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     Ok(())
+}
+
+fn create_backup_if_needed(path: &Path) -> Result<Option<PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let mut backup_path = parent.join(format!("{}.deckclip.bak.{}", file_name, timestamp));
+    let mut suffix = 1;
+
+    while backup_path.exists() {
+        backup_path = parent.join(format!(
+            "{}.deckclip.bak.{}.{}",
+            file_name, timestamp, suffix
+        ));
+        suffix += 1;
+    }
+
+    fs::copy(path, &backup_path)?;
+    Ok(Some(backup_path))
 }
 
 fn default_target_path(client: McpSetupClient) -> Result<PathBuf> {
@@ -1006,15 +1455,7 @@ struct DoctorTarget {
 
 impl DoctorTarget {
     fn new(client: McpSetupClient) -> Self {
-        let key = match client {
-            McpSetupClient::ClaudeDesktop => "mcp.client.claude_desktop",
-            McpSetupClient::Cursor => "mcp.client.cursor",
-            McpSetupClient::Codex => "mcp.client.codex",
-            McpSetupClient::Opencode => "mcp.client.opencode",
-            McpSetupClient::All => unreachable!(),
-        };
-
-        let client_label = i18n::t(key);
+        let client_label = i18n::t(client_label_key(client));
 
         match default_target_path(client) {
             Ok(path) => {
@@ -1142,12 +1583,18 @@ struct SetupPlan {
 }
 
 impl SetupPlan {
-    fn into_output(self, mode: SetupMode, command: &str) -> SetupEntry {
+    fn into_output(
+        self,
+        mode: SetupMode,
+        command: &str,
+        backup_path: Option<PathBuf>,
+    ) -> SetupEntry {
         SetupEntry {
             client: i18n::t(self.client_label_key),
             mode: i18n::t(mode.key()),
             path: path_to_string(self.path),
             command: command.to_string(),
+            backup_path: backup_path.map(|path| path_to_string(&path)),
             snippet: self.snippet,
             notes: self.note_keys.into_iter().map(i18n::t).collect(),
         }
@@ -1166,7 +1613,7 @@ enum SetupPlanKind {
 }
 
 enum SetupWriteOutcome {
-    Written,
+    Written { backup_path: Option<PathBuf> },
     AlreadyPresent,
 }
 
@@ -1192,8 +1639,18 @@ struct SetupEntry {
     mode: String,
     path: String,
     command: String,
+    backup_path: Option<String>,
     snippet: String,
     notes: Vec<String>,
+}
+
+#[derive(Clone)]
+struct DetectedSetupClient {
+    client: McpSetupClient,
+    label: String,
+    path: String,
+    status: String,
+    selected: bool,
 }
 
 #[cfg(test)]
@@ -1278,7 +1735,14 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(outcome, SetupWriteOutcome::Written));
+        let backup_path = match outcome {
+            SetupWriteOutcome::Written { backup_path } => backup_path,
+            SetupWriteOutcome::AlreadyPresent => panic!("expected config write"),
+        };
+        match backup_path.as_ref() {
+            Some(path) => assert!(path.exists()),
+            None => panic!("expected backup path"),
+        }
 
         let updated: Value =
             serde_json::from_str(&fs::read_to_string(&file_path).unwrap()).unwrap();
@@ -1299,7 +1763,14 @@ mod tests {
 
         let snippet = build_codex_snippet("deckclip");
         let outcome = write_codex_config(&file_path, &snippet).unwrap();
-        assert!(matches!(outcome, SetupWriteOutcome::Written));
+        let backup_path = match outcome {
+            SetupWriteOutcome::Written { backup_path } => backup_path,
+            SetupWriteOutcome::AlreadyPresent => panic!("expected config write"),
+        };
+        match backup_path.as_ref() {
+            Some(path) => assert!(path.exists()),
+            None => panic!("expected backup path"),
+        }
 
         let second = write_codex_config(&file_path, &snippet).unwrap();
         assert!(matches!(second, SetupWriteOutcome::AlreadyPresent));
@@ -1350,7 +1821,14 @@ mod tests {
 
         let outcome =
             write_opencode_config(&file_path, &opencode_server_value("deckclip")).unwrap();
-        assert!(matches!(outcome, SetupWriteOutcome::Written));
+        let backup_path = match outcome {
+            SetupWriteOutcome::Written { backup_path } => backup_path,
+            SetupWriteOutcome::AlreadyPresent => panic!("expected config write"),
+        };
+        match backup_path.as_ref() {
+            Some(path) => assert!(path.exists()),
+            None => panic!("expected backup path"),
+        }
 
         let updated: Value =
             serde_json::from_str(&fs::read_to_string(&file_path).unwrap()).unwrap();

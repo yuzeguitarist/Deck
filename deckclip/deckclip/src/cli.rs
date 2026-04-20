@@ -135,15 +135,16 @@ pub enum AiAction {
 #[derive(clap::Args)]
 pub struct McpCommand {
     #[command(subcommand)]
-    pub action: McpAction,
+    pub action: Option<McpAction>,
 }
 
 #[derive(Subcommand)]
 pub enum McpAction {
+    #[command(hide = true)]
     /// 以前台 stdio 方式运行 Deck MCP bridge
     Serve,
 
-    /// 列出首发 MCP tools
+    /// 列出 MCP tools 与参数
     Tools,
 
     /// 检查 Deck MCP 运行与配置环境

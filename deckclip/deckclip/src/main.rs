@@ -147,7 +147,7 @@ fn localize_command(cmd: clap::Command) -> clap::Command {
         .mut_subcommand("login", |s| s.about(t("cmd.login")))
         .mut_subcommand("mcp", |s| {
             s.about(t("cmd.mcp"))
-                .mut_subcommand("serve", |ss| ss.about(t("cmd.mcp.serve")))
+                .mut_subcommand("serve", |ss| ss.hide(true).about(t("cmd.mcp.serve")))
                 .mut_subcommand("tools", |ss| ss.about(t("cmd.mcp.tools")))
                 .mut_subcommand("doctor", |ss| ss.about(t("cmd.mcp.doctor")))
                 .mut_subcommand("setup", |ss| {
