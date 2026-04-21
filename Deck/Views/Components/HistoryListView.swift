@@ -48,6 +48,7 @@ private final class HistoryListInteractionState {
     var accumulatedScrollDelta: CGFloat = 0
     var lastScrollTime: Date = .distantPast
     var scrollTask: Task<Void, Never>?
+    var pendingSelectionScrollDelay: TimeInterval?
     var lastVimKeyCode: UInt16 = 0
     var lastVimKeyTime: Date = .distantPast
 }
@@ -1386,10 +1387,15 @@ struct HistoryListView: View {
 
         let shouldAnimate = !interaction.lastSelectionWasRepeating
         interaction.lastSelectionWasRepeating = false
+        let scrollDelay = interaction.pendingSelectionScrollDelay
+        interaction.pendingSelectionScrollDelay = nil
 
         interaction.scrollTask?.cancel()
         interaction.scrollTask = Task { @MainActor in
             await Task.yield()
+            if let scrollDelay {
+                try? await Task.sleep(nanoseconds: UInt64(scrollDelay * 1_000_000_000))
+            }
             guard !Task.isCancelled, selectedId == id else { return }
             if shouldAnimate {
                 withAnimation(.easeOut(duration: 0.2)) {
@@ -1600,6 +1606,21 @@ struct HistoryListView: View {
         if vm.focusArea != .history {
             vm.focusArea = .history
         }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let isDoubleTap = interaction.lastTapId == item.id &&
+            now - interaction.lastTapTime <= doubleTapInterval
+
+        if isDoubleTap {
+            interaction.scrollTask?.cancel()
+            interaction.pendingSelectionScrollDelay = nil
+            vm.pasteItem(item)
+            interaction.lastTapId = nil
+            interaction.lastTapTime = 0
+            return
+        }
+
+        interaction.pendingSelectionScrollDelay = doubleTapInterval
         
         if selectedId != item.id {
             selectedId = item.id
@@ -1610,19 +1631,9 @@ struct HistoryListView: View {
         if isPreviewOpen, selectedId == item.id {
             updatePreviewNow(for: item.id)
         }
-        
-        let now = ProcessInfo.processInfo.systemUptime
-        
-        if let lastId = interaction.lastTapId, lastId == item.id,
-           now - interaction.lastTapTime <= doubleTapInterval {
-            // Double tap - paste
-            vm.pasteItem(item)
-            interaction.lastTapId = nil
-            interaction.lastTapTime = 0
-        } else {
-            interaction.lastTapId = item.id
-            interaction.lastTapTime = now
-        }
+
+        interaction.lastTapId = item.id
+        interaction.lastTapTime = now
     }
     
     private func shouldLoadMore(at index: Int) -> Bool {
