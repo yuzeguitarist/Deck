@@ -866,6 +866,34 @@ fn yolo_ready_status_stays_plain_because_header_badge_shows_mode() {
 }
 
 #[test]
+fn sound_slash_toggles_completion_sound_for_current_chat() {
+    let mut app = test_app();
+    let client = Arc::new(Mutex::new(DeckClient::new(Config::default())));
+    let (ui_tx, _ui_rx) = unbounded_channel();
+
+    assert!(app.completion_sound_enabled);
+
+    handle_slash_command(
+        &mut app,
+        "/sound".to_string(),
+        client.clone(),
+        ui_tx.clone(),
+    );
+    assert!(!app.completion_sound_enabled);
+    assert_eq!(
+        app.footer_message.as_ref().map(|(text, _)| text.as_str()),
+        Some(chat_text("chat.footer.sound_off").as_str())
+    );
+
+    handle_slash_command(&mut app, "/sound".to_string(), client, ui_tx);
+    assert!(app.completion_sound_enabled);
+    assert_eq!(
+        app.footer_message.as_ref().map(|(text, _)| text.as_str()),
+        Some(chat_text("chat.footer.sound_on").as_str())
+    );
+}
+
+#[test]
 fn yolo_thinking_status_stays_plain_without_tool_call() {
     let mut app = test_app();
     app.begin_send();

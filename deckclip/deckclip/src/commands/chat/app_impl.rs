@@ -54,6 +54,7 @@ impl ChatApp {
             created_at: Instant::now(),
             quit_hint_until: None,
             pending_login_request: false,
+            completion_sound_enabled: true,
             should_quit: false,
         }
     }

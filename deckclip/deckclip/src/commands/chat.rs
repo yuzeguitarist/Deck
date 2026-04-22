@@ -450,6 +450,11 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "chat.slash.clear.description",
     },
     SlashCommand {
+        name: "/sound",
+        aliases: &[],
+        description: "chat.slash.sound.description",
+    },
+    SlashCommand {
         name: "/help",
         aliases: &[],
         description: "chat.slash.help.description",
@@ -594,6 +599,7 @@ struct ChatApp {
     created_at: Instant,
     quit_hint_until: Option<Instant>,
     pending_login_request: bool,
+    completion_sound_enabled: bool,
     should_quit: bool,
 }
 
@@ -1555,6 +1561,15 @@ fn handle_slash_command(
                 });
             }
         }
+        "/sound" => {
+            app.completion_sound_enabled = !app.completion_sound_enabled;
+            let key = if app.completion_sound_enabled {
+                "chat.footer.sound_on"
+            } else {
+                "chat.footer.sound_off"
+            };
+            app.set_footer(chat_text(key), MetaTone::Success);
+        }
         "/resume" => {
             if app.mode != ChatMode::Ready {
                 app.set_footer(
@@ -1847,7 +1862,9 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) -> Option<ApprovalDispatch
             app.last_assistant_text = Some(done.text);
             app.finish_send();
             app.set_footer(chat_text("chat.footer.round_done"), MetaTone::Success);
-            crate::completion_sound::play();
+            if app.completion_sound_enabled {
+                crate::completion_sound::play();
+            }
         }
         UiEvent::HistoryLoaded { data, append } => {
             app.clear_busy_action();
