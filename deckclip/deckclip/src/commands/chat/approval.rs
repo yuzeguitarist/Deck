@@ -82,7 +82,7 @@ struct ApprovalRenderCache {
 #[derive(Debug, Clone)]
 pub(super) struct ApprovalOverlay {
     pub(super) call_id: String,
-    tool: String,
+    pub(super) tool: String,
     title: String,
     summary: Vec<ApprovalSummaryItem>,
     content_blocks: Vec<ApprovalContentBlock>,
@@ -638,6 +638,13 @@ fn approval_footer_line(overlay: &ApprovalOverlay, allow_color: Color) -> Line<'
         Span::styled(
             "N reject",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            "⇧Tab YOLO",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled("Up/Down scroll", Style::default().fg(Color::DarkGray)),

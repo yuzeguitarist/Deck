@@ -64,13 +64,23 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
     };
     let left_title = format!("Deck AI · {}", app.conversation_title);
     let left_meta = format!("{} / {} · {}", app.provider, app.model, account);
+    let header_right = vec![
+        Span::styled(
+            format!(" {} ", app.execution_mode_label()),
+            app.execution_mode_badge_style(),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            app.status_text(),
+            app.status_tone().style().add_modifier(Modifier::BOLD),
+        ),
+    ];
 
     frame.render_widget(
-        Paragraph::new(spaced_line(
+        Paragraph::new(spaced_line_with_right_spans(
             &left_title,
             Style::default().add_modifier(Modifier::BOLD),
-            &app.status_text(),
-            app.status_tone().style().add_modifier(Modifier::BOLD),
+            header_right,
             rows[0].width as usize,
         )),
         rows[0],
@@ -176,7 +186,8 @@ fn render_input(frame: &mut Frame<'_>, area: Rect, app: &mut ChatApp) {
 
     let attachment_height =
         pending_attachment_preview_height(inner.width, app.pending_attachment_count());
-    let pending_paste_height = pending_attachment_preview_height(inner.width, app.pending_paste_count());
+    let pending_paste_height =
+        pending_attachment_preview_height(inner.width, app.pending_paste_count());
     let sections = if attachment_height > 0 && pending_paste_height > 0 {
         Layout::default()
             .direction(Direction::Vertical)
@@ -815,12 +826,7 @@ fn push_assistant_entry_lines(lines: &mut Vec<Line<'static>>, width: usize, text
     }
 }
 
-fn push_meta_entry_lines(
-    lines: &mut Vec<Line<'static>>,
-    width: usize,
-    text: &str,
-    tone: MetaTone,
-) {
+fn push_meta_entry_lines(lines: &mut Vec<Line<'static>>, width: usize, text: &str, tone: MetaTone) {
     let line_start = lines.len();
     push_wrapped_lines(lines, width, "· ", "  ", text, tone.style());
     if lines.len() > line_start {
@@ -1036,7 +1042,11 @@ fn pending_paste_preview_text(paste: &PendingPasteData) -> String {
             }
         }
     };
-    let normalized = paste.full_text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = paste
+        .full_text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     if normalized.is_empty() {
         summary
     } else {
@@ -1609,4 +1619,36 @@ pub(super) fn spaced_line(
         Span::raw(padding),
         Span::styled(right.to_string(), right_style),
     ])
+}
+
+fn spans_display_width(spans: &[Span<'_>]) -> usize {
+    spans
+        .iter()
+        .map(|span| display_width(span.content.as_ref()))
+        .sum()
+}
+
+pub(super) fn spaced_line_with_right_spans(
+    left: &str,
+    left_style: Style,
+    right_spans: Vec<Span<'static>>,
+    width: usize,
+) -> Line<'static> {
+    let right_width = spans_display_width(&right_spans);
+    let left_budget = if right_spans.is_empty() || width <= right_width + 1 {
+        width
+    } else {
+        width.saturating_sub(right_width + 1)
+    };
+    let left = truncate_display(left, left_budget);
+    let left_width = display_width(&left);
+    let padding = if right_spans.is_empty() || width <= right_width + left_width {
+        String::new()
+    } else {
+        " ".repeat(width.saturating_sub(left_width + right_width))
+    };
+
+    let mut spans = vec![Span::styled(left, left_style), Span::raw(padding)];
+    spans.extend(right_spans);
+    Line::from(spans)
 }

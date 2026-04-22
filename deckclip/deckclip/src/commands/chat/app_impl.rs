@@ -29,6 +29,7 @@ impl ChatApp {
             overlay: OverlayState::None,
             approval_input_guard: ApprovalInputGuard::default(),
             mode: ChatMode::Ready,
+            execution_mode: ExecutionMode::Agent,
             footer_message: None,
             footer_tag: None,
             busy_action: None,
@@ -121,6 +122,26 @@ impl ChatApp {
             self.model.clone(),
         )));
         self.clear_quit_hint();
+    }
+
+    fn execution_mode_label(&self) -> String {
+        chat_text(match self.execution_mode {
+            ExecutionMode::Agent => "chat.execution.agent",
+            ExecutionMode::Yolo => "chat.execution.yolo",
+        })
+    }
+
+    fn execution_mode_badge_style(&self) -> Style {
+        match self.execution_mode {
+            ExecutionMode::Agent => Style::default()
+                .fg(Color::White)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+            ExecutionMode::Yolo => Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        }
     }
 
     fn set_overlay(&mut self, overlay: OverlayState) {
@@ -290,7 +311,10 @@ impl ChatApp {
             return MetaTone::Info;
         }
         match self.mode {
-            ChatMode::Ready => MetaTone::Success,
+            ChatMode::Ready => match self.execution_mode {
+                ExecutionMode::Agent => MetaTone::Success,
+                ExecutionMode::Yolo => MetaTone::Warning,
+            },
             ChatMode::Streaming => MetaTone::Info,
             ChatMode::AwaitingApproval => MetaTone::Warning,
         }
@@ -620,11 +644,7 @@ impl ChatApp {
             input: submitted.to_string(),
             pending_pastes: self.pending_pastes.clone(),
         };
-        if self
-            .input_history
-            .last()
-            .is_some_and(|last| last == &entry)
-        {
+        if self.input_history.last().is_some_and(|last| last == &entry) {
             self.input_history_index = None;
             self.input_history_draft = ComposerHistoryEntry::default();
             return;

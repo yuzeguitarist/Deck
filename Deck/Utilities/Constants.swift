@@ -216,8 +216,6 @@ enum Const {
     static let largeBlobThreshold: Int = 512 * 1024 // 512KB threshold for offloading binary payloads
     static let maxBase64ImageBytes: Int = 2 * 1024 * 1024 // 2MB cap for base64 image preview
     static let pageSize: Int = 50
-    static let customTitleMaxLength: Int = 12
-
     // Script safety
     static let scriptExecutionTimeout: TimeInterval = 5.0  // 5 seconds timeout
     static let scriptMaxInputLength: Int = 100_000         // 100KB max input

@@ -774,3 +774,74 @@ fn ctrl_o_opens_model_editor() {
 
     assert!(matches!(app.overlay, OverlayState::ModelEditor(_)));
 }
+
+#[test]
+fn shift_tab_toggles_execution_mode() {
+    let mut app = test_app();
+    let client = Arc::new(Mutex::new(DeckClient::new(Config::default())));
+    let (ui_tx, _ui_rx) = unbounded_channel();
+
+    handle_key_event(
+        &mut app,
+        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+        client.clone(),
+        ui_tx.clone(),
+    );
+
+    assert_eq!(app.execution_mode, ExecutionMode::Yolo);
+    assert_eq!(
+        app.footer_message.as_ref().map(|(text, _)| text.as_str()),
+        Some(chat_text("chat.footer.execution.yolo").as_str())
+    );
+
+    handle_key_event(
+        &mut app,
+        KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT),
+        client,
+        ui_tx,
+    );
+
+    assert_eq!(app.execution_mode, ExecutionMode::Agent);
+    assert_eq!(
+        app.footer_message.as_ref().map(|(text, _)| text.as_str()),
+        Some(chat_text("chat.footer.execution.agent").as_str())
+    );
+}
+
+#[test]
+fn yolo_auto_approves_without_overlay() {
+    let mut app = test_app();
+    app.begin_send();
+    app.session_id = "session-1".to_string();
+    app.execution_mode = ExecutionMode::Yolo;
+
+    let dispatch = handle_ui_event(
+        &mut app,
+        UiEvent::ApprovalRequested(tool_event(
+            "call-1",
+            "write_clipboard",
+            serde_json::json!({"text": "hello"}),
+        )),
+    )
+    .expect("expected auto approval dispatch");
+
+    assert_eq!(dispatch.session_id, "session-1");
+    assert_eq!(dispatch.call_id, "call-1");
+    assert!(dispatch.approved);
+    assert_eq!(dispatch.completion_tone, MetaTone::Warning);
+    assert_eq!(app.mode, ChatMode::Streaming);
+    assert!(matches!(app.overlay, OverlayState::None));
+    let expected_footer = chat_format(
+        "chat.footer.execution.auto_approved",
+        &[("{tool}", chat_text("chat.tool.writing_clipboard"))],
+    );
+    assert_eq!(
+        app.footer_message.as_ref().map(|(text, _)| text.as_str()),
+        Some(expected_footer.as_str())
+    );
+    assert!(matches!(
+        app.activities.last(),
+        Some(TranscriptEntry::Meta { text, tone: MetaTone::Warning })
+            if text.contains(&chat_text("chat.tool.writing_clipboard"))
+    ));
+}

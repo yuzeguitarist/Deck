@@ -73,6 +73,159 @@ private enum ClipItemCardCache {
     }()
 }
 
+final class TitleEditorTextField: NoSelectTextField {
+    override func becomeFirstResponder() -> Bool {
+        let result = super.becomeFirstResponder()
+        guard result, shouldMoveCursorToEnd else { return result }
+
+        let existingLength = (stringValue as NSString).length
+        guard existingLength > 0 else { return result }
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  let editor = self.currentEditor() as? NSTextView,
+                  !editor.hasMarkedText() else { return }
+            editor.setSelectedRange(NSRange(location: existingLength, length: 0))
+            editor.scrollRangeToVisible(NSRange(location: existingLength, length: 0))
+        }
+
+        return result
+    }
+}
+
+struct InlineTitleEditorField: NSViewRepresentable {
+    @Binding var text: String
+    @Binding var isFocused: Bool
+    let placeholder: String
+    let fontSize: CGFloat
+    let alignment: NSTextAlignment
+    let onSubmit: () -> Void
+    let onCancel: () -> Void
+
+    func makeNSView(context: Context) -> TitleEditorTextField {
+        let textField = TitleEditorTextField()
+        textField.delegate = context.coordinator
+        textField.isBordered = false
+        textField.isBezeled = false
+        textField.drawsBackground = false
+        textField.backgroundColor = .clear
+        textField.focusRingType = .none
+        textField.font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        textField.textColor = .labelColor
+        textField.alignment = alignment
+        textField.placeholderString = placeholder
+        textField.cell?.usesSingleLineMode = true
+        textField.cell?.lineBreakMode = .byTruncatingTail
+        textField.cell?.isScrollable = true
+        return textField
+    }
+
+    func updateNSView(_ nsView: TitleEditorTextField, context: Context) {
+        context.coordinator.parent = self
+        nsView.font = NSFont.systemFont(ofSize: fontSize, weight: .semibold)
+        nsView.alignment = alignment
+        nsView.placeholderString = placeholder
+
+        if nsView.stringValue != text {
+            context.coordinator.isProgrammaticUpdate = true
+            nsView.discardMarkedTextIfNeeded()
+            nsView.stringValue = text
+            if let editor = nsView.currentEditor() {
+                let length = (text as NSString).length
+                editor.selectedRange = NSRange(location: length, length: 0)
+                context.coordinator.ensureEditorSelectionVisible(in: editor)
+            }
+            context.coordinator.isProgrammaticUpdate = false
+        }
+
+        if isFocused {
+            nsView.shouldMoveCursorToEnd = !text.isEmpty
+            if !context.coordinator.isEditing {
+                DispatchQueue.main.async { [weak nsView] in
+                    guard let nsView else { return }
+                    nsView.window?.makeFirstResponder(nsView)
+                }
+            }
+        } else {
+            nsView.shouldMoveCursorToEnd = false
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: InlineTitleEditorField
+        var isProgrammaticUpdate = false
+        var isEditing = false
+
+        init(_ parent: InlineTitleEditorField) {
+            self.parent = parent
+        }
+
+        func controlTextDidBeginEditing(_ obj: Notification) {
+            isEditing = true
+            if let textField = obj.object as? NSTextField,
+               let editor = textField.currentEditor() as? NSTextView {
+                let caretLocation = (parent.text as NSString).length
+                if !editor.hasMarkedText() {
+                    editor.setSelectedRange(NSRange(location: caretLocation, length: 0))
+                }
+                ensureEditorSelectionVisible(in: editor)
+            }
+            if !parent.isFocused {
+                parent.isFocused = true
+            }
+        }
+
+        func controlTextDidChange(_ obj: Notification) {
+            guard !isProgrammaticUpdate, let textField = obj.object as? NSTextField else { return }
+            let newValue = textField.stringValue
+            if let editor = textField.currentEditor() {
+                ensureEditorSelectionVisible(in: editor)
+            }
+            if parent.text != newValue {
+                parent.text = newValue
+            }
+        }
+
+        func controlTextDidEndEditing(_ obj: Notification) {
+            isEditing = false
+            if parent.isFocused {
+                parent.isFocused = false
+            }
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                if textView.hasMarkedText() {
+                    return false
+                }
+                parent.onSubmit()
+                return true
+            }
+
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                parent.onCancel()
+                return true
+            }
+
+            return false
+        }
+
+        func ensureEditorSelectionVisible(in editor: NSText) {
+            guard let textView = editor as? NSTextView else { return }
+            let markedRange = textView.markedRange()
+            if markedRange.location != NSNotFound, markedRange.length > 0 {
+                textView.scrollRangeToVisible(markedRange)
+            } else {
+                textView.scrollRangeToVisible(textView.selectedRange())
+            }
+        }
+    }
+}
+
 struct ClipItemCardView: View {
     @Bindable var item: ClipboardItem
     let isSelected: Bool
@@ -89,7 +242,7 @@ struct ClipItemCardView: View {
     @State private var contextMenuID = UUID()
     @State private var isEditingTitle = false
     @State private var titleDraft = ""
-    @FocusState private var titleFieldFocused: Bool
+    @State private var titleFieldFocused = false
     @Environment(\.colorScheme) private var colorScheme
 
     // 缩略图（后台解码/降采样，避免滚动时主线程卡顿）
@@ -395,11 +548,11 @@ struct ClipItemCardView: View {
         vm.isEditingItemTitle = false
     }
 
-    private func enforceTitleLimit(_ value: String) {
-        var cleaned = value.replacingOccurrences(of: "\n", with: " ")
-        if cleaned.count > Const.customTitleMaxLength {
-            cleaned = String(cleaned.prefix(Const.customTitleMaxLength))
-        }
+    private func sanitizeTitleDraft(_ value: String) {
+        let cleaned = value
+            .replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
         if cleaned != value {
             titleDraft = cleaned
         }
@@ -510,34 +663,34 @@ struct ClipItemCardView: View {
             .font(.system(size: 15, weight: .semibold))
             .foregroundStyle(.primary)
             .lineLimit(1)
-            .minimumScaleFactor(0.6)
-            .allowsTightening(true)
+            .truncationMode(.tail)
             .frame(maxWidth: .infinity, alignment: .center)
     }
 
     private var titleEditorHeader: some View {
-        TextField(String(localized: "输入标题"), text: $titleDraft)
-            .textFieldStyle(.plain)
-            .font(.system(size: 15, weight: .semibold))
-            .multilineTextAlignment(.center)
-            .lineLimit(1)
-            .padding(.horizontal, Const.space8)
-            .padding(.vertical, 4)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(Const.elementBackground)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .strokeBorder(Const.adaptiveGray(0.35, darkOpacity: 0.5), lineWidth: 0.6)
-            )
-            .focused($titleFieldFocused)
-            .onSubmit { commitTitleEdit() }
-            .onExitCommand { cancelTitleEdit() }
-            .onChange(of: titleDraft) { _, newValue in
-                enforceTitleLimit(newValue)
-            }
-            .frame(maxWidth: .infinity, alignment: .center)
+        InlineTitleEditorField(
+            text: $titleDraft,
+            isFocused: $titleFieldFocused,
+            placeholder: String(localized: "输入标题"),
+            fontSize: 15,
+            alignment: .left,
+            onSubmit: commitTitleEdit,
+            onCancel: cancelTitleEdit
+        )
+        .onChange(of: titleDraft) { _, newValue in
+            sanitizeTitleDraft(newValue)
+        }
+        .padding(.horizontal, Const.space8)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Const.elementBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .strokeBorder(Const.adaptiveGray(0.35, darkOpacity: 0.5), lineWidth: 0.6)
+        )
+        .frame(maxWidth: .infinity, alignment: .center)
     }
     
     // MARK: - Content

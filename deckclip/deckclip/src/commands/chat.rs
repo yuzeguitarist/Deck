@@ -21,8 +21,8 @@ use ratatui_core::style::{Color, Modifier, Style};
 use ratatui_core::terminal::{Frame, Terminal};
 use ratatui_core::text::{Line, Span};
 use ratatui_crossterm::CrosstermBackend;
-use ratatui_widgets::borders::Borders;
 use ratatui_widgets::block::Block;
+use ratatui_widgets::borders::Borders;
 use ratatui_widgets::clear::Clear;
 use ratatui_widgets::list::{List, ListItem, ListState};
 use ratatui_widgets::paragraph::Paragraph;
@@ -244,6 +244,21 @@ enum ChatMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionMode {
+    Agent,
+    Yolo,
+}
+
+impl ExecutionMode {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Agent => Self::Yolo,
+            Self::Yolo => Self::Agent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AnimationState {
     spinner_frame: usize,
     elapsed_seconds: u64,
@@ -288,7 +303,6 @@ enum FooterTag {
 
 #[derive(Debug, Clone)]
 struct HistoryOverlay {
-
     items: Vec<HistoryItemData>,
     selected: usize,
     visible_start: usize,
@@ -550,6 +564,7 @@ struct ChatApp {
     overlay: OverlayState,
     approval_input_guard: ApprovalInputGuard,
     mode: ChatMode,
+    execution_mode: ExecutionMode,
     footer_message: Option<(String, MetaTone)>,
     footer_tag: Option<FooterTag>,
     busy_action: Option<String>,
@@ -576,10 +591,18 @@ struct ChatApp {
     should_quit: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ApprovalDispatch {
+    session_id: String,
+    call_id: String,
+    approved: bool,
+    completion_message: String,
+    completion_tone: MetaTone,
+}
+
 include!("chat/app_impl.rs");
 
 struct TerminalGuard {
-
     terminal: Terminal<CrosstermBackend<Stdout>>,
 }
 
@@ -670,7 +693,9 @@ pub async fn run(output: OutputMode) -> Result<()> {
         needs_redraw |= app.tick();
 
         while let Ok(message) = ui_rx.try_recv() {
-            handle_ui_event(&mut app, message);
+            if let Some(dispatch) = handle_ui_event(&mut app, message) {
+                spawn_approval_dispatch(dispatch, ui_tx.clone());
+            }
             needs_redraw = true;
         }
 
@@ -715,6 +740,11 @@ pub async fn run(output: OutputMode) -> Result<()> {
     Ok(())
 }
 
+fn is_mode_cycle_key(key: KeyEvent) -> bool {
+    matches!(key.code, KeyCode::BackTab)
+        || (matches!(key.code, KeyCode::Tab) && key.modifiers.contains(KeyModifiers::SHIFT))
+}
+
 fn handle_key_event(
     app: &mut ChatApp,
     key: KeyEvent,
@@ -722,6 +752,13 @@ fn handle_key_event(
     ui_tx: UnboundedSender<UiEvent>,
 ) {
     if matches!(key.kind, KeyEventKind::Release) {
+        return;
+    }
+
+    if is_mode_cycle_key(key) && !matches!(app.overlay, OverlayState::ModelEditor(_)) {
+        if let Some(dispatch) = toggle_execution_mode(app) {
+            spawn_approval_dispatch(dispatch, ui_tx);
+        }
         return;
     }
 
@@ -760,16 +797,16 @@ fn handle_key_event(
                         chat_text("chat.footer.tool_approved_continue"),
                         MetaTone::Info,
                     );
-                    tokio::spawn(async move {
-                        let event = match respond_to_approval(&session_id, &call_id, true).await {
-                            Ok(()) => UiEvent::FooterMessage(
-                                chat_text("chat.footer.tool_approved"),
-                                MetaTone::Info,
-                            ),
-                            Err(error) => ui_error(error),
-                        };
-                        let _ = ui_tx.send(event);
-                    });
+                    spawn_approval_dispatch(
+                        ApprovalDispatch {
+                            session_id,
+                            call_id,
+                            approved: true,
+                            completion_message: chat_text("chat.footer.tool_approved"),
+                            completion_tone: MetaTone::Info,
+                        },
+                        ui_tx,
+                    );
                 }
                 KeyCode::Char('N') | KeyCode::Char('n') | KeyCode::Esc => {
                     let session_id = app.session_id.clone();
@@ -777,16 +814,16 @@ fn handle_key_event(
                     app.set_overlay(OverlayState::None);
                     app.mode = ChatMode::Streaming;
                     app.set_footer(chat_text("chat.footer.tool_rejected"), MetaTone::Warning);
-                    tokio::spawn(async move {
-                        let event = match respond_to_approval(&session_id, &call_id, false).await {
-                            Ok(()) => UiEvent::FooterMessage(
-                                chat_text("chat.footer.tool_rejected"),
-                                MetaTone::Warning,
-                            ),
-                            Err(error) => ui_error(error),
-                        };
-                        let _ = ui_tx.send(event);
-                    });
+                    spawn_approval_dispatch(
+                        ApprovalDispatch {
+                            session_id,
+                            call_id,
+                            approved: false,
+                            completion_message: chat_text("chat.footer.tool_rejected"),
+                            completion_tone: MetaTone::Warning,
+                        },
+                        ui_tx,
+                    );
                 }
                 _ => {}
             }
@@ -1483,7 +1520,107 @@ fn handle_slash_command(
     }
 }
 
-fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
+fn tool_display_text_by_name(tool: &str) -> String {
+    match tool {
+        "write_clipboard" => chat_text("chat.tool.writing_clipboard"),
+        "delete_clipboard" => chat_text("chat.tool.deleting_clipboard"),
+        "list_script_plugins" => chat_text("chat.tool.listing_plugins"),
+        "read_script_plugin" => chat_text("chat.tool.reading_plugin"),
+        "read_skill_detail" => chat_text("chat.tool.reading_skill"),
+        "record_memory" => chat_text("chat.tool.saving_memory"),
+        "delete_memory" => chat_text("chat.tool.deleting_memory"),
+        "save_session_context" => chat_text("chat.tool.saving_session_context"),
+        "read_session_context" => chat_text("chat.tool.reading_session_context"),
+        "delete_session_context" => chat_text("chat.tool.deleting_session_context"),
+        "run_script_transform" => chat_text("chat.tool.running_script_plugin"),
+        "generate_script_plugin" => chat_text("chat.tool.creating_script_plugin"),
+        "modify_script_plugin" => chat_text("chat.tool.modifying_script_plugin"),
+        "delete_script_plugin" => chat_text("chat.tool.deleting_script_plugin"),
+        "generate_smart_rule" => chat_text("chat.tool.creating_smart_rule"),
+        "list_smart_rules" => chat_text("chat.tool.listing_smart_rules"),
+        "read_smart_rule" => chat_text("chat.tool.reading_smart_rule"),
+        "modify_smart_rule" => chat_text("chat.tool.modifying_smart_rule"),
+        "delete_smart_rule" => chat_text("chat.tool.deleting_smart_rule"),
+        _ => chat_format("chat.tool.running", &[("{tool}", tool.to_string())]),
+    }
+}
+
+fn auto_approve_tool_call(
+    app: &mut ChatApp,
+    call_id: String,
+    tool: &str,
+    footer_key: &str,
+) -> ApprovalDispatch {
+    let tool_text = tool_display_text_by_name(tool);
+    let footer_message = chat_format(footer_key, &[("{tool}", tool_text.clone())]);
+    app.set_overlay(OverlayState::None);
+    app.mode = ChatMode::Streaming;
+    if app.mode_started_at.is_none() {
+        app.mode_started_at = Some(Instant::now());
+    }
+    app.push_activity(
+        chat_format("chat.activity.auto_approved", &[("{tool}", tool_text)]),
+        MetaTone::Warning,
+    );
+    app.set_footer(footer_message.clone(), MetaTone::Warning);
+
+    ApprovalDispatch {
+        session_id: app.session_id.clone(),
+        call_id,
+        approved: true,
+        completion_message: footer_message,
+        completion_tone: MetaTone::Warning,
+    }
+}
+
+fn toggle_execution_mode(app: &mut ChatApp) -> Option<ApprovalDispatch> {
+    app.execution_mode = app.execution_mode.toggle();
+    app.clear_quit_hint();
+
+    match app.execution_mode {
+        ExecutionMode::Agent => {
+            app.set_footer(chat_text("chat.footer.execution.agent"), MetaTone::Dim);
+            None
+        }
+        ExecutionMode::Yolo => {
+            let pending_approval = match &app.overlay {
+                OverlayState::Approval(overlay) => {
+                    Some((overlay.call_id.clone(), overlay.tool.clone()))
+                }
+                _ => None,
+            };
+
+            if let Some((call_id, tool)) = pending_approval {
+                Some(auto_approve_tool_call(
+                    app,
+                    call_id,
+                    &tool,
+                    "chat.footer.execution.yolo_current",
+                ))
+            } else {
+                app.set_footer(chat_text("chat.footer.execution.yolo"), MetaTone::Warning);
+                None
+            }
+        }
+    }
+}
+
+fn spawn_approval_dispatch(dispatch: ApprovalDispatch, ui_tx: UnboundedSender<UiEvent>) {
+    tokio::spawn(async move {
+        let event =
+            match respond_to_approval(&dispatch.session_id, &dispatch.call_id, dispatch.approved)
+                .await
+            {
+                Ok(()) => {
+                    UiEvent::FooterMessage(dispatch.completion_message, dispatch.completion_tone)
+                }
+                Err(error) => ui_error(error),
+            };
+        let _ = ui_tx.send(event);
+    });
+}
+
+fn handle_ui_event(app: &mut ChatApp, event: UiEvent) -> Option<ApprovalDispatch> {
     match event {
         UiEvent::SessionOpened(session) => {
             app.replace_session(session, true);
@@ -1536,7 +1673,10 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
                     }
                 } else if !pasted_text.is_empty() && !pasted_text_is_path_payload {
                     if app.insert_paste_text(&pasted_text) {
-                        app.set_footer(chat_text("chat.footer.clipboard_text_compact"), MetaTone::Success);
+                        app.set_footer(
+                            chat_text("chat.footer.clipboard_text_compact"),
+                            MetaTone::Success,
+                        );
                     }
                 } else if pasted_text_is_path_payload {
                     if let Some(text) = data.text.filter(|text| !text.is_empty()) {
@@ -1569,7 +1709,7 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
         },
         UiEvent::ToolStarted(tool) => {
             if app.tool_states.contains_key(&tool.call_id) {
-                return;
+                return None;
             }
             app.tool_states
                 .insert(tool.call_id.clone(), ToolLifecycle::Started);
@@ -1580,13 +1720,24 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
                 app.tool_states.get(&tool.call_id),
                 Some(ToolLifecycle::Finished)
             ) {
-                return;
+                return None;
             }
             app.tool_states
                 .insert(tool.call_id.clone(), ToolLifecycle::Finished);
             app.finish_tool_status(&tool.call_id);
         }
         UiEvent::ApprovalRequested(tool) => {
+            if app.execution_mode == ExecutionMode::Yolo {
+                let call_id = tool.call_id;
+                let tool_name = tool.tool;
+                return Some(auto_approve_tool_call(
+                    app,
+                    call_id,
+                    &tool_name,
+                    "chat.footer.execution.auto_approved",
+                ));
+            }
+
             app.mode = ChatMode::AwaitingApproval;
             if app.mode_started_at.is_none() {
                 app.mode_started_at = Some(Instant::now());
@@ -1669,6 +1820,8 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) {
             app.set_footer(message, MetaTone::Error);
         }
     }
+
+    None
 }
 
 fn maybe_request_more_history(
@@ -2009,28 +2162,7 @@ fn tool_status_text(tool: &ToolEventData, search_call_count: usize) -> String {
         return format!("{}{}", base, suffix);
     }
 
-    match tool.tool.as_str() {
-        "write_clipboard" => chat_text("chat.tool.writing_clipboard"),
-        "delete_clipboard" => chat_text("chat.tool.deleting_clipboard"),
-        "list_script_plugins" => chat_text("chat.tool.listing_plugins"),
-        "read_script_plugin" => chat_text("chat.tool.reading_plugin"),
-        "read_skill_detail" => chat_text("chat.tool.reading_skill"),
-        "record_memory" => chat_text("chat.tool.saving_memory"),
-        "delete_memory" => chat_text("chat.tool.deleting_memory"),
-        "save_session_context" => chat_text("chat.tool.saving_session_context"),
-        "read_session_context" => chat_text("chat.tool.reading_session_context"),
-        "delete_session_context" => chat_text("chat.tool.deleting_session_context"),
-        "run_script_transform" => chat_text("chat.tool.running_script_plugin"),
-        "generate_script_plugin" => chat_text("chat.tool.creating_script_plugin"),
-        "modify_script_plugin" => chat_text("chat.tool.modifying_script_plugin"),
-        "delete_script_plugin" => chat_text("chat.tool.deleting_script_plugin"),
-        "generate_smart_rule" => chat_text("chat.tool.creating_smart_rule"),
-        "list_smart_rules" => chat_text("chat.tool.listing_smart_rules"),
-        "read_smart_rule" => chat_text("chat.tool.reading_smart_rule"),
-        "modify_smart_rule" => chat_text("chat.tool.modifying_smart_rule"),
-        "delete_smart_rule" => chat_text("chat.tool.deleting_smart_rule"),
-        _ => chat_format("chat.tool.running", &[("{tool}", tool.tool.clone())]),
-    }
+    tool_display_text_by_name(&tool.tool)
 }
 
 fn last_assistant_from_messages(messages: &[ConversationMessageData]) -> Option<String> {

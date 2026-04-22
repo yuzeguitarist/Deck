@@ -1095,11 +1095,12 @@ final class ClipboardItem: Identifiable, Equatable {
     }
 
     static func normalizedCustomTitle(_ title: String?) -> String? {
-        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let singleLine = title?
+            .replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        let trimmed = singleLine?.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let trimmed, !trimmed.isEmpty else { return nil }
-        if trimmed.count > Const.customTitleMaxLength {
-            return String(trimmed.prefix(Const.customTitleMaxLength))
-        }
         return trimmed
     }
 
