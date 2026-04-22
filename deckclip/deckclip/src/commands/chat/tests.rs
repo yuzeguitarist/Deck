@@ -737,6 +737,25 @@ fn replace_session_restores_user_attachment() {
 #[test]
 fn slash_command_normalizes_model_alias() {
     assert_eq!(normalize_slash_command("/model"), Some("/model"));
+    assert_eq!(normalize_slash_command("/login"), Some("/login"));
+}
+
+#[test]
+fn slash_login_requests_login_screen() {
+    let mut app = test_app();
+    let client = Arc::new(Mutex::new(DeckClient::new(Config::default())));
+    let (ui_tx, _ui_rx) = unbounded_channel();
+
+    app.set_input("/login".to_string());
+    handle_key_event(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        client,
+        ui_tx,
+    );
+
+    assert!(app.take_login_request());
+    assert!(app.input.is_empty());
 }
 
 #[test]
@@ -828,20 +847,58 @@ fn yolo_auto_approves_without_overlay() {
     assert_eq!(dispatch.session_id, "session-1");
     assert_eq!(dispatch.call_id, "call-1");
     assert!(dispatch.approved);
-    assert_eq!(dispatch.completion_tone, MetaTone::Warning);
+    assert_eq!(dispatch.completion, None);
     assert_eq!(app.mode, ChatMode::Streaming);
     assert!(matches!(app.overlay, OverlayState::None));
-    let expected_footer = chat_format(
-        "chat.footer.execution.auto_approved",
-        &[("{tool}", chat_text("chat.tool.writing_clipboard"))],
-    );
     assert_eq!(
         app.footer_message.as_ref().map(|(text, _)| text.as_str()),
-        Some(expected_footer.as_str())
+        Some(chat_text("chat.footer.generating").as_str())
     );
-    assert!(matches!(
-        app.activities.last(),
-        Some(TranscriptEntry::Meta { text, tone: MetaTone::Warning })
-            if text.contains(&chat_text("chat.tool.writing_clipboard"))
-    ));
+    assert!(app.activities.is_empty());
+}
+
+#[test]
+fn yolo_ready_status_stays_plain_because_header_badge_shows_mode() {
+    let mut app = test_app();
+    app.execution_mode = ExecutionMode::Yolo;
+
+    assert_eq!(app.status_text(), chat_text("chat.status.ready"));
+}
+
+#[test]
+fn yolo_thinking_status_stays_plain_without_tool_call() {
+    let mut app = test_app();
+    app.begin_send();
+    app.execution_mode = ExecutionMode::Yolo;
+
+    assert_eq!(
+        app.status_text(),
+        format!(
+            "{} {}",
+            app.spinner_frame(),
+            chat_text("chat.status.thinking_plain")
+        )
+    );
+}
+
+#[test]
+fn yolo_status_prefixes_normal_tool_status_inline() {
+    let mut app = test_app();
+    app.begin_send();
+    app.execution_mode = ExecutionMode::Yolo;
+
+    handle_ui_event(
+        &mut app,
+        UiEvent::ToolStarted(tool_event(
+            "call-1",
+            "write_clipboard",
+            serde_json::json!({"text": "hello"}),
+        )),
+    );
+
+    let expected_tool = chat_text("chat.tool.writing_clipboard");
+    assert_eq!(app.busy_action.as_deref(), Some(expected_tool.as_str()));
+    let status = app.status_text();
+    assert!(status.contains("YOLO MODE:"));
+    assert!(status.contains(expected_tool.as_str()));
 }

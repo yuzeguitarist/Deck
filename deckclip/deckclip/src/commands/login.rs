@@ -6,7 +6,11 @@ use std::time::Instant;
 
 use anyhow::{anyhow, bail, Context, Result};
 use crossterm::cursor::{Hide, MoveTo, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
 use crossterm::execute;
 use crossterm::queue;
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
@@ -234,6 +238,13 @@ impl FormState {
         self.fields.get_mut(self.focus)
     }
 
+    fn clear_focused_value(&mut self) {
+        if let Some(field) = self.focused_mut() {
+            field.value.clear();
+            self.error = None;
+        }
+    }
+
     fn move_focus(&mut self, delta: isize) {
         if self.fields.is_empty() {
             return;
@@ -434,6 +445,14 @@ impl LoginApp {
                 }
                 KeyCode::BackTab | KeyCode::Up => {
                     form.move_focus(-1);
+                }
+                KeyCode::Backspace | KeyCode::Delete
+                    if key.modifiers.contains(KeyModifiers::SUPER) =>
+                {
+                    form.clear_focused_value();
+                }
+                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    form.clear_focused_value();
                 }
                 KeyCode::Backspace => {
                     if let Some(field) = form.focused_mut() {
@@ -794,8 +813,16 @@ impl TerminalGuard {
     fn enter() -> Result<Self> {
         enable_raw_mode().context(login_text(LoginText::ErrorRawMode))?;
         let mut stdout = stdout();
-        execute!(stdout, EnterAlternateScreen, Hide)
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, Hide)
             .context(login_text(LoginText::ErrorEnterScreen))?;
+        let _ = execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+            )
+        );
         Ok(Self {
             stdout,
             last_content_signature: None,
@@ -881,6 +908,8 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        let _ = execute!(self.stdout, PopKeyboardEnhancementFlags);
+        let _ = execute!(self.stdout, DisableBracketedPaste);
         let _ = execute!(self.stdout, Show, LeaveAlternateScreen);
         let _ = disable_raw_mode();
     }
@@ -1868,5 +1897,69 @@ fn blend_toward(base: RgbColor, highlight: RgbColor, amount: f32) -> RgbColor {
         r: blend_channel(base.r, highlight.r),
         g: blend_channel(base.g, highlight.g),
         b: blend_channel(base.b, highlight.b),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app_with_openai_form(value: &str) -> LoginApp {
+        let mut app = LoginApp::new(LoginStatusData::default());
+        let mut form = FormState::new(ProviderKind::OpenAI, &ProviderStatus::default());
+        form.fields[0].value = value.to_string();
+        form.error = Some("previous error".to_string());
+        app.screen = Screen::Form(form);
+        app
+    }
+
+    fn focused_value(app: &LoginApp) -> &str {
+        let Screen::Form(form) = &app.screen else {
+            panic!("expected form screen");
+        };
+        &form.fields[form.focus].value
+    }
+
+    fn form_error(app: &LoginApp) -> Option<&str> {
+        let Screen::Form(form) = &app.screen else {
+            panic!("expected form screen");
+        };
+        form.error.as_deref()
+    }
+
+    #[tokio::test]
+    async fn form_ctrl_u_clears_focused_field() {
+        let mut app = app_with_openai_form("sk-pasted-into-url");
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
+            .await
+            .expect("handle key");
+
+        assert_eq!(focused_value(&app), "");
+        assert_eq!(form_error(&app), None);
+    }
+
+    #[tokio::test]
+    async fn form_command_delete_clears_focused_field() {
+        let mut app = app_with_openai_form("sk-pasted-into-url");
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Delete, KeyModifiers::SUPER))
+            .await
+            .expect("handle key");
+
+        assert_eq!(focused_value(&app), "");
+        assert_eq!(form_error(&app), None);
+    }
+
+    #[tokio::test]
+    async fn form_command_backspace_clears_focused_field() {
+        let mut app = app_with_openai_form("sk-pasted-into-url");
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Backspace, KeyModifiers::SUPER))
+            .await
+            .expect("handle key");
+
+        assert_eq!(focused_value(&app), "");
+        assert_eq!(form_error(&app), None);
     }
 }

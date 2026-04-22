@@ -82,7 +82,7 @@ struct ApprovalRenderCache {
 #[derive(Debug, Clone)]
 pub(super) struct ApprovalOverlay {
     pub(super) call_id: String,
-    pub(super) tool: String,
+    tool: String,
     title: String,
     summary: Vec<ApprovalSummaryItem>,
     content_blocks: Vec<ApprovalContentBlock>,

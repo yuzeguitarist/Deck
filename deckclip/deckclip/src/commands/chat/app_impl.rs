@@ -53,6 +53,7 @@ impl ChatApp {
             body_scrollbar_grab_offset: 0,
             created_at: Instant::now(),
             quit_hint_until: None,
+            pending_login_request: false,
             should_quit: false,
         }
     }
@@ -290,12 +291,25 @@ impl ChatApp {
     }
 
     fn status_text(&self) -> String {
+        let yolo_status =
+            |status: String| -> String { chat_format("chat.status.yolo", &[("{status}", status)]) };
+
         if let Some(action) = &self.busy_action {
-            return format!("{} {}", self.spinner_frame(), action);
+            let status =
+                if self.execution_mode == ExecutionMode::Yolo && self.busy_call_id.is_some() {
+                    yolo_status(action.clone())
+                } else {
+                    action.clone()
+                };
+            return format!("{} {}", self.spinner_frame(), status);
         }
+
         match self.mode {
             ChatMode::Ready => chat_text("chat.status.ready"),
-            ChatMode::Streaming => format!("{} Thinking", self.spinner_frame()),
+            ChatMode::Streaming => {
+                let thinking = chat_text("chat.status.thinking_plain");
+                format!("{} {}", self.spinner_frame(), thinking)
+            }
             ChatMode::AwaitingApproval => chat_format(
                 "chat.status.waiting_approval",
                 &[
@@ -937,6 +951,15 @@ impl ChatApp {
         self.refresh_slash_selection();
         self.clear_quit_hint();
         self.sync_footer_after_input_change();
+    }
+
+    fn request_login(&mut self) {
+        self.pending_login_request = true;
+        self.clear_quit_hint();
+    }
+
+    fn take_login_request(&mut self) -> bool {
+        std::mem::take(&mut self.pending_login_request)
     }
 
     fn slash_query(&self) -> Option<&str> {

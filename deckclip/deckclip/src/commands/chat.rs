@@ -440,6 +440,11 @@ const SLASH_COMMANDS: &[SlashCommand] = &[
         description: "chat.slash.model.description",
     },
     SlashCommand {
+        name: "/login",
+        aliases: &[],
+        description: "chat.slash.login.description",
+    },
+    SlashCommand {
         name: "/clear",
         aliases: &["/new"],
         description: "chat.slash.clear.description",
@@ -588,6 +593,7 @@ struct ChatApp {
     body_scrollbar_grab_offset: usize,
     created_at: Instant,
     quit_hint_until: Option<Instant>,
+    pending_login_request: bool,
     should_quit: bool,
 }
 
@@ -596,8 +602,7 @@ struct ApprovalDispatch {
     session_id: String,
     call_id: String,
     approved: bool,
-    completion_message: String,
-    completion_tone: MetaTone,
+    completion: Option<(String, MetaTone)>,
 }
 
 include!("chat/app_impl.rs");
@@ -640,6 +645,41 @@ impl TerminalGuard {
             }
         }
         self.terminal.draw(|frame| render(frame, app))?;
+        Ok(())
+    }
+
+    fn suspend_for_child_tui(&mut self) {
+        {
+            let backend = self.terminal.backend_mut();
+            let _ = execute!(backend, PopKeyboardEnhancementFlags);
+            let _ = execute!(backend, DisableBracketedPaste);
+            let _ = execute!(backend, DisableMouseCapture, LeaveAlternateScreen);
+        }
+        while event::poll(Duration::from_millis(0)).unwrap_or(false) {
+            let _ = event::read();
+        }
+        let _ = disable_raw_mode();
+        let _ = self.terminal.show_cursor();
+    }
+
+    fn resume_after_child_tui(&mut self) -> Result<()> {
+        enable_raw_mode().context(i18n::t("err.chat_raw_mode"))?;
+        execute!(
+            self.terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )
+        .context(i18n::t("err.chat_enter_screen"))?;
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+            )
+        );
+        self.terminal.clear()?;
         Ok(())
     }
 }
@@ -697,6 +737,39 @@ pub async fn run(output: OutputMode) -> Result<()> {
                 spawn_approval_dispatch(dispatch, ui_tx.clone());
             }
             needs_redraw = true;
+        }
+
+        if app.take_login_request() {
+            terminal.suspend_for_child_tui();
+            let login_result = login::run(OutputMode::Text).await;
+            let resume_result = terminal.resume_after_child_tui();
+            needs_redraw = true;
+
+            if let Err(error) = resume_result {
+                return Err(error);
+            }
+
+            match login_result {
+                Ok(()) => match fetch_bootstrap(primary_client.clone()).await {
+                    Ok(bootstrap) if bootstrap.configured => {
+                        app.apply_bootstrap(bootstrap);
+                        app.set_footer(chat_text("chat.footer.login_returned"), MetaTone::Success);
+                    }
+                    Ok(_) => {
+                        app.set_footer(
+                            chat_text("chat.footer.login_unconfigured"),
+                            MetaTone::Warning,
+                        );
+                    }
+                    Err(error) => {
+                        app.set_footer(output::render_error_message(&error), MetaTone::Error);
+                    }
+                },
+                Err(error) => {
+                    app.set_footer(output::render_error_message(&error), MetaTone::Error);
+                }
+            }
+            continue;
         }
 
         let animation_state = app.animation_state();
@@ -802,8 +875,10 @@ fn handle_key_event(
                             session_id,
                             call_id,
                             approved: true,
-                            completion_message: chat_text("chat.footer.tool_approved"),
-                            completion_tone: MetaTone::Info,
+                            completion: Some((
+                                chat_text("chat.footer.tool_approved"),
+                                MetaTone::Info,
+                            )),
                         },
                         ui_tx,
                     );
@@ -819,8 +894,10 @@ fn handle_key_event(
                             session_id,
                             call_id,
                             approved: false,
-                            completion_message: chat_text("chat.footer.tool_rejected"),
-                            completion_tone: MetaTone::Warning,
+                            completion: Some((
+                                chat_text("chat.footer.tool_rejected"),
+                                MetaTone::Warning,
+                            )),
                         },
                         ui_tx,
                     );
@@ -1409,6 +1486,17 @@ fn handle_slash_command(
         "/model" => {
             open_model_editor_if_available(app);
         }
+        "/login" => {
+            if app.mode != ChatMode::Ready {
+                app.set_footer(
+                    chat_text("chat.footer.cannot_login_while_replying"),
+                    MetaTone::Warning,
+                );
+                return;
+            }
+
+            app.request_login();
+        }
         "/cost" => {
             if let Some(usage) = &app.context_usage {
                 app.set_footer(
@@ -1545,31 +1633,18 @@ fn tool_display_text_by_name(tool: &str) -> String {
     }
 }
 
-fn auto_approve_tool_call(
-    app: &mut ChatApp,
-    call_id: String,
-    tool: &str,
-    footer_key: &str,
-) -> ApprovalDispatch {
-    let tool_text = tool_display_text_by_name(tool);
-    let footer_message = chat_format(footer_key, &[("{tool}", tool_text.clone())]);
+fn auto_approve_tool_call(app: &mut ChatApp, call_id: String) -> ApprovalDispatch {
     app.set_overlay(OverlayState::None);
     app.mode = ChatMode::Streaming;
     if app.mode_started_at.is_none() {
         app.mode_started_at = Some(Instant::now());
     }
-    app.push_activity(
-        chat_format("chat.activity.auto_approved", &[("{tool}", tool_text)]),
-        MetaTone::Warning,
-    );
-    app.set_footer(footer_message.clone(), MetaTone::Warning);
 
     ApprovalDispatch {
         session_id: app.session_id.clone(),
         call_id,
         approved: true,
-        completion_message: footer_message,
-        completion_tone: MetaTone::Warning,
+        completion: None,
     }
 }
 
@@ -1584,19 +1659,13 @@ fn toggle_execution_mode(app: &mut ChatApp) -> Option<ApprovalDispatch> {
         }
         ExecutionMode::Yolo => {
             let pending_approval = match &app.overlay {
-                OverlayState::Approval(overlay) => {
-                    Some((overlay.call_id.clone(), overlay.tool.clone()))
-                }
+                OverlayState::Approval(overlay) => Some(overlay.call_id.clone()),
                 _ => None,
             };
 
-            if let Some((call_id, tool)) = pending_approval {
-                Some(auto_approve_tool_call(
-                    app,
-                    call_id,
-                    &tool,
-                    "chat.footer.execution.yolo_current",
-                ))
+            if let Some(call_id) = pending_approval {
+                app.set_footer(chat_text("chat.footer.execution.yolo"), MetaTone::Warning);
+                Some(auto_approve_tool_call(app, call_id))
             } else {
                 app.set_footer(chat_text("chat.footer.execution.yolo"), MetaTone::Warning);
                 None
@@ -1611,12 +1680,15 @@ fn spawn_approval_dispatch(dispatch: ApprovalDispatch, ui_tx: UnboundedSender<Ui
             match respond_to_approval(&dispatch.session_id, &dispatch.call_id, dispatch.approved)
                 .await
             {
-                Ok(()) => {
-                    UiEvent::FooterMessage(dispatch.completion_message, dispatch.completion_tone)
-                }
-                Err(error) => ui_error(error),
+                Ok(()) => match dispatch.completion {
+                    Some((message, tone)) => Some(UiEvent::FooterMessage(message, tone)),
+                    None => None,
+                },
+                Err(error) => Some(ui_error(error)),
             };
-        let _ = ui_tx.send(event);
+        if let Some(event) = event {
+            let _ = ui_tx.send(event);
+        }
     });
 }
 
@@ -1729,13 +1801,7 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) -> Option<ApprovalDispatch
         UiEvent::ApprovalRequested(tool) => {
             if app.execution_mode == ExecutionMode::Yolo {
                 let call_id = tool.call_id;
-                let tool_name = tool.tool;
-                return Some(auto_approve_tool_call(
-                    app,
-                    call_id,
-                    &tool_name,
-                    "chat.footer.execution.auto_approved",
-                ));
+                return Some(auto_approve_tool_call(app, call_id));
             }
 
             app.mode = ChatMode::AwaitingApproval;
