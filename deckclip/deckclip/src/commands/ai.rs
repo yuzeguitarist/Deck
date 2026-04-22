@@ -1,5 +1,6 @@
 use anyhow::Result;
 use deckclip_core::DeckClient;
+use std::io::IsTerminal;
 
 use crate::cli::{AiAction, AiCommand, AiRunArgs, AiSearchArgs, AiTransformArgs};
 use crate::output::{read_text_or_stdin, OutputMode};
@@ -29,6 +30,7 @@ async fn run_ai(client: &mut DeckClient, output: OutputMode, args: AiRunArgs) ->
         )
         .await?;
     output.print_response(&response);
+    maybe_play_completion_sound(output);
     Ok(())
 }
 
@@ -37,6 +39,7 @@ async fn search(client: &mut DeckClient, output: OutputMode, args: AiSearchArgs)
         .ai_search(&args.query, args.mode.as_deref(), Some(args.limit))
         .await?;
     output.print_response(&response);
+    maybe_play_completion_sound(output);
     Ok(())
 }
 
@@ -56,5 +59,12 @@ async fn transform(
         .ai_transform(&args.prompt, text.as_deref(), args.plugin.as_deref())
         .await?;
     output.print_response(&response);
+    maybe_play_completion_sound(output);
     Ok(())
+}
+
+fn maybe_play_completion_sound(output: OutputMode) {
+    if matches!(output, OutputMode::Text) && std::io::stdout().is_terminal() {
+        crate::completion_sound::play();
+    }
 }

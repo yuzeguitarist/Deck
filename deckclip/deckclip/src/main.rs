@@ -1,5 +1,6 @@
 mod cli;
 mod commands;
+mod completion_sound;
 mod i18n;
 mod output;
 

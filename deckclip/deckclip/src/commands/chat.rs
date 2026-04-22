@@ -1847,6 +1847,7 @@ fn handle_ui_event(app: &mut ChatApp, event: UiEvent) -> Option<ApprovalDispatch
             app.last_assistant_text = Some(done.text);
             app.finish_send();
             app.set_footer(chat_text("chat.footer.round_done"), MetaTone::Success);
+            crate::completion_sound::play();
         }
         UiEvent::HistoryLoaded { data, append } => {
             app.clear_busy_action();
