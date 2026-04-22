@@ -36,7 +36,8 @@ struct DeckTag: Identifiable, Equatable, Codable {
         .teal,
         Color(red: 0.6, green: 0.4, blue: 0.8),   // 淡紫色
         Color(red: 0.95, green: 0.6, blue: 0.7),  // 珊瑚粉
-        Color(red: 0.4, green: 0.7, blue: 0.4)    // 草绿
+        Color(red: 0.4, green: 0.7, blue: 0.4),   // 草绿
+        Color(red: 0.28, green: 0.55, blue: 0.9)  // 天蓝
     ]
     
     var color: Color {

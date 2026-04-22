@@ -86,7 +86,6 @@ struct ClipItemCardView: View {
     @State private var multipeerService = MultipeerService.shared
     @State private var directConnectService = DirectConnectService.shared
     @State private var isHovered = false
-    @State private var isDragging = false
     @State private var contextMenuID = UUID()
     @State private var isEditingTitle = false
     @State private var titleDraft = ""
@@ -109,8 +108,8 @@ struct ClipItemCardView: View {
     // 异步智能分析状态
     @State private var smartState = SmartContentState()
 
-    private var smartTaskID: String {
-        "\(item.uniqueId)|\(item.searchText.hashValue)|\(instantCalculationEnabled ? 1 : 0)"
+    private var smartTaskID: SmartAnalysisTaskKey {
+        item.smartAnalysisTaskKey(instantCalculationEnabled: instantCalculationEnabled)
     }
 
     /// Whether the "Ask AI" context menu item should be shown.
@@ -139,6 +138,14 @@ struct ClipItemCardView: View {
 
     private var effectiveHeaderHeight: CGFloat {
         Const.cardHeaderSize * cardScale
+    }
+
+    private var headerAppIconSize: CGFloat {
+        min(Const.cardAppIconSize, max(Const.appIconSize, effectiveHeaderHeight - 12))
+    }
+
+    private var dragPreviewSelectionOutset: CGFloat {
+        isSelected ? 2 : 0
     }
 
     private var textPrefixLength: Int {
@@ -173,6 +180,37 @@ struct ClipItemCardView: View {
 
     var body: some View {
         let ocrText = (item.itemType == .image || item.isFileURLImage) ? item.ocrTextForImage : nil
+        cardBody
+            .onHover { isHovered = $0 }
+            .contextMenu { contextMenuContent(ocrText: ocrText) }
+            .id(contextMenuID)
+            .onDrag {
+                createDragItemProvider()
+            } preview: {
+                dragPreview
+            }
+            .onChange(of: item.searchText) { _, _ in
+                contextMenuID = UUID()
+            }
+            .onChange(of: vm.titleEditingResetToken) { _, _ in
+                if isEditingTitle {
+                    titleDraft = item.displayTitle ?? ""
+                    isEditingTitle = false
+                    titleFieldFocused = false
+                }
+                vm.isEditingItemTitle = false
+            }
+            .onDisappear {
+                if isEditingTitle {
+                    titleDraft = item.displayTitle ?? ""
+                    isEditingTitle = false
+                    titleFieldFocused = false
+                    vm.isEditingItemTitle = false
+                }
+            }
+    }
+
+    private var cardBody: some View {
         VStack(spacing: 0) {
             // Header
             cardHeader
@@ -200,45 +238,20 @@ struct ClipItemCardView: View {
             }
         }
         .zIndex(quickPasteNumber == nil ? 0 : 1)
+    }
 
-        .onHover { isHovered = $0 }
-        .contextMenu { contextMenuContent(ocrText: ocrText) }
-        .id(contextMenuID)
-        .onDrag {
-            createDragItemProvider()
-        }
-        .opacity(isDragging ? 0.6 : 1.0)
-        .onChange(of: item.searchText) { _, _ in
-            contextMenuID = UUID()
-        }
-        .onChange(of: vm.titleEditingResetToken) { _, _ in
-            if isEditingTitle {
-                titleDraft = item.displayTitle ?? ""
-                isEditingTitle = false
-                titleFieldFocused = false
-            }
-            vm.isEditingItemTitle = false
-        }
-        .onDisappear {
-            if isEditingTitle {
-                titleDraft = item.displayTitle ?? ""
-                isEditingTitle = false
-                titleFieldFocused = false
-                vm.isEditingItemTitle = false
-            }
-        }
+    private var dragPreview: some View {
+        cardBody
+            .padding(dragPreviewSelectionOutset)
+            .fixedSize()
+            .compositingGroup()
     }
 
     // MARK: - Virtual File Drag
 
     /// 创建拖拽时的 NSItemProvider
     private func createDragItemProvider() -> NSItemProvider {
-        isDragging = true
-
-        // 延迟重置拖拽状态
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            isDragging = false
-        }
+        MainWindowController.shared.beginClipItemDragWindowLevelRelaxation()
 
         switch item.itemType {
         case .image:
@@ -444,10 +457,10 @@ struct ClipItemCardView: View {
             if !item.appPath.isEmpty {
                 Image(nsImage: cachedIcon(for: item.appPath))
                     .resizable()
-                    .frame(width: Const.appIconSize, height: Const.appIconSize)
+                    .frame(width: headerAppIconSize, height: headerAppIconSize)
             }
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 1) {
                 Text(item.appName.isEmpty ? "未知" : item.appName)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.primary)
@@ -1784,8 +1797,8 @@ struct PreviewPopoverView: View {
     @State private var calculationResult: SmartTextService.CalculationResult?
     @AppStorage(PrefKey.instantCalculation.rawValue) private var instantCalculationEnabled = DeckUserDefaults.instantCalculation
 
-    private var calcTaskID: String {
-        "\(item.uniqueId)|\(item.searchText.hashValue)|\(instantCalculationEnabled ? 1 : 0)"
+    private var calcTaskID: SmartAnalysisTaskKey {
+        item.smartAnalysisTaskKey(instantCalculationEnabled: instantCalculationEnabled)
     }
 
     var body: some View {

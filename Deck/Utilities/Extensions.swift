@@ -237,20 +237,26 @@ extension String {
         }
     }
     
+    private static let codeSnippetPatterns: [String] = [
+        "^\\s*(func|class|struct|enum|protocol|extension|import|var|let|if|else|for|while|switch|case|return|guard|defer|do|try|catch|throw|async|await)\\s",
+        "^\\s*(def|class|import|from|if|elif|else|for|while|try|except|return|yield|async|await|lambda)\\s",
+        "^\\s*(function|const|let|var|if|else|for|while|switch|case|return|async|await|import|export|class)\\s",
+        "\\{[\\s\\S]*\\}",
+        "\\[[\\s\\S]*\\]",
+        "=>|->|::|&&|\\|\\|",
+        "^\\s*[#@]\\w+",
+        "\\w+\\(.*\\)\\s*[{;]?$"
+    ]
+
+    private static let codeSnippetRegexes: [NSRegularExpression] = codeSnippetPatterns.compactMap {
+        try? NSRegularExpression(pattern: $0)
+    }
+
     var isCodeSnippet: Bool {
-        let codePatterns = [
-            "^\\s*(func|class|struct|enum|protocol|extension|import|var|let|if|else|for|while|switch|case|return|guard|defer|do|try|catch|throw|async|await)\\s",
-            "^\\s*(def|class|import|from|if|elif|else|for|while|try|except|return|yield|async|await|lambda)\\s",
-            "^\\s*(function|const|let|var|if|else|for|while|switch|case|return|async|await|import|export|class)\\s",
-            "\\{[\\s\\S]*\\}",
-            "\\[[\\s\\S]*\\]",
-            "=>|->|::|&&|\\|\\|",
-            "^\\s*[#@]\\w+",
-            "\\w+\\(.*\\)\\s*[{;]?$"
-        ]
-        
-        for pattern in codePatterns {
-            if self.range(of: pattern, options: .regularExpression) != nil {
+        guard !isEmpty else { return false }
+        let range = NSRange(startIndex..., in: self)
+        for regex in Self.codeSnippetRegexes {
+            if regex.firstMatch(in: self, options: [], range: range) != nil {
                 return true
             }
         }

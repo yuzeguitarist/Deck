@@ -40,6 +40,7 @@ private nonisolated struct IndexedCollection<Base: RandomAccessCollection>: Rand
 private final class HistoryListInteractionState {
     var previewUpdateTask: Task<Void, Never>?
     var deferredPreviewSelectionId: ClipboardItem.ID?
+    var lastPreviewCommitTime: TimeInterval = 0
     var lastSelectionWasRepeating: Bool = false
     var lastTapId: ClipboardItem.ID?
     var lastTapTime: TimeInterval = 0
@@ -1735,22 +1736,30 @@ struct HistoryListView: View {
 
     private func updatePreviewNow(for id: ClipboardItem.ID?) {
         interaction.deferredPreviewSelectionId = nil
+        interaction.lastPreviewCommitTime = Date().timeIntervalSinceReferenceDate
         showPreviewId = id
     }
 
     private func schedulePreviewUpdate(for id: ClipboardItem.ID?, isRepeating: Bool) {
         guard isPreviewOpen else { return }
 
-        if !isRepeating {
+        let now = Date().timeIntervalSinceReferenceDate
+        let elapsedSinceLastCommit = now - interaction.lastPreviewCommitTime
+
+        if !isRepeating, elapsedSinceLastCommit >= previewUpdateInterval {
             cancelPreviewUpdateTask()
             updatePreviewNow(for: id)
             return
         }
 
+        let delay = isRepeating
+            ? previewUpdateInterval
+            : max(0, previewUpdateInterval - elapsedSinceLastCommit)
+
         cancelPreviewUpdateTask()
         interaction.deferredPreviewSelectionId = id
         interaction.previewUpdateTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: UInt64(previewUpdateInterval * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             guard !Task.isCancelled, isPreviewOpen else { return }
             updatePreviewNow(for: id)
         }

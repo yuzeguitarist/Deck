@@ -102,6 +102,7 @@ enum Const {
     static let iconSize: CGFloat = 16.0
     static let iconSizeLarge: CGFloat = 24.0
     static let appIconSize: CGFloat = 20.0
+    static let cardAppIconSize: CGFloat = 28.0
     
     // Colors - Adaptive for light/dark mode
     static let primaryBackground: Color = Color(nsColor: .windowBackgroundColor)

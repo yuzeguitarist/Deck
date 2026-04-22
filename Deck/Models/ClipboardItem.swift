@@ -105,6 +105,12 @@ enum ClipItemType: String, Codable, Sendable {
     }
 }
 
+struct SmartAnalysisTaskKey: Hashable {
+    let uniqueId: String
+    let searchTextVersion: UInt64
+    let instantCalculationEnabled: Bool
+}
+
 struct FigmaClipboardMeta: Decodable {
     let fileKey: String?
     let pasteID: Int?
@@ -137,6 +143,7 @@ final class ClipboardItem: Identifiable, Equatable {
     var searchText: String {
         didSet {
             guard searchText != oldValue else { return }
+            searchTextVersion &+= 1
             base64ImageChecked = false
             cachedBase64Image = nil
             urlChecked = false
@@ -149,6 +156,7 @@ final class ClipboardItem: Identifiable, Equatable {
             analysisLock.unlock()
         }
     }
+    private(set) var searchTextVersion: UInt64 = 0
     let contentLength: Int
     var tagId: Int
     var isTemporary: Bool
@@ -1239,7 +1247,7 @@ final class ClipboardItem: Identifiable, Equatable {
                 sample = rawText
             }
             if let language = SmartTextService.shared.detectCodeLanguage(in: sample), language != .markdown { return .code }
-            if rawText.isCodeSnippet { return .code }
+            if sample.isCodeSnippet { return .code }
             return .richText
         case .string:
             let rawText = searchText
@@ -1254,7 +1262,7 @@ final class ClipboardItem: Identifiable, Equatable {
                 sample = rawText
             }
             if let language = SmartTextService.shared.detectCodeLanguage(in: sample), language != .markdown { return .code }
-            if rawText.isCodeSnippet { return .code }
+            if sample.isCodeSnippet { return .code }
             return .text
         default:
             return .text
@@ -1598,6 +1606,14 @@ final class ClipboardItem: Identifiable, Equatable {
     
     func updateTimestamp() {
         timestamp = Int64(Date().timeIntervalSince1970)
+    }
+
+    func smartAnalysisTaskKey(instantCalculationEnabled: Bool) -> SmartAnalysisTaskKey {
+        SmartAnalysisTaskKey(
+            uniqueId: uniqueId,
+            searchTextVersion: searchTextVersion,
+            instantCalculationEnabled: instantCalculationEnabled
+        )
     }
     
     func displayDescription() -> String {
