@@ -256,7 +256,7 @@ nonisolated final class ScriptPluginService: @unchecked Sendable {
         config.httpCookieStorage = nil
         config.httpShouldSetCookies = false
         config.waitsForConnectivity = false
-        return URLSession(configuration: config)
+        return URLSession(configuration: config, delegate: DeckOutboundHTTPRedirectDelegate(), delegateQueue: nil)
     }()
 
     private final class ExecutionState: @unchecked Sendable {
@@ -1399,6 +1399,11 @@ nonisolated final class ScriptPluginService: @unchecked Sendable {
             guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
                 log.error("[JS \(pluginId)] Unsupported URL scheme: \(urlString)")
                 return Self.createFetchError(context: jsContext, message: "Only http/https URLs are allowed")
+            }
+
+            if let rejection = DeckOutboundNetworkPolicy.rejectionReason(for: url) {
+                log.error("[JS \(pluginId)] Blocked local/private URL: \(rejection)")
+                return Self.createFetchError(context: jsContext, message: "Local/private network URLs are not allowed")
             }
 
             // 解析 options

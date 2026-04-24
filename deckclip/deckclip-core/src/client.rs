@@ -111,7 +111,7 @@ impl DeckClient {
         let id = Uuid::new_v4().to_string();
         let ts = current_timestamp();
         let nonce = generate_nonce();
-        let sig = sign_request(session_key, ts, &nonce, cmd);
+        let sig = sign_request(session_key, ts, &nonce, cmd, &args);
 
         let request = Request {
             v: PROTOCOL_VERSION,
