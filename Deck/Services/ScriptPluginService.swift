@@ -1403,7 +1403,10 @@ nonisolated final class ScriptPluginService: @unchecked Sendable {
 
             if let rejection = DeckOutboundNetworkPolicy.rejectionReason(for: url) {
                 log.error("[JS \(pluginId)] Blocked local/private URL: \(rejection)")
-                return Self.createFetchError(context: jsContext, message: "Local/private network URLs are not allowed")
+                return Self.createFetchError(
+                    context: jsContext,
+                    message: NSLocalizedString("不允许访问本机或内网地址", comment: "Script plugin fetch error: blocked private network")
+                )
             }
 
             // 解析 options
