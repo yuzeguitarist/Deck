@@ -305,6 +305,10 @@ struct ClipItemCardView: View {
         Int(400 * cardScale)
     }
 
+    private var markdownCardPrefixLength: Int {
+        Int(1_400 * cardScale)
+    }
+
     private var codePrefixLength: Int {
         Int(600 * cardScale)
     }
@@ -803,6 +807,32 @@ struct ClipItemCardView: View {
     }
 
     private var textContent: some View {
+        Group {
+            if vm.layoutMode == .horizontal, smartState.isMarkdown {
+                MarkdownCardPreview(
+                    item: item,
+                    sourceText: String(item.searchText.prefix(markdownCardPrefixLength)),
+                    showsFileHeader: false,
+                    lineLimit: textLineLimit,
+                    maxLength: markdownCardPrefixLength
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else {
+                plainCardTextContent
+            }
+        }
+        .task(id: smartTaskID) {
+            // 异步加载智能分析
+            smartState.isLoading = true
+            let cached = await SmartContentCache.shared.analysis(for: item)
+            smartState.analysis = cached.analysis
+            smartState.isMarkdown = cached.isMarkdown
+            smartState.calculationResult = cached.calculationResult
+            smartState.isLoading = false
+        }
+    }
+
+    private var plainCardTextContent: some View {
         VStack(alignment: .leading, spacing: Const.space4) {
             // Smart content badges (不包含计算结果)
             if smartState.hasOtherSmartContent, let analysis = smartState.analysis {
@@ -843,15 +873,6 @@ struct ClipItemCardView: View {
         }
         .padding(Const.space12)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .task(id: smartTaskID) {
-            // 异步加载智能分析
-            smartState.isLoading = true
-            let cached = await SmartContentCache.shared.analysis(for: item)
-            smartState.analysis = cached.analysis
-            smartState.isMarkdown = cached.isMarkdown
-            smartState.calculationResult = cached.calculationResult
-            smartState.isLoading = false
-        }
     }
     
     private var imageContent: some View {
@@ -946,7 +967,7 @@ struct ClipItemCardView: View {
             // PDF 文件使用缩略图预览
             if item.isPDF {
                 PDFThumbnailView(item: item)
-            } else if item.isMarkdownFile {
+            } else if item.isMarkdownFile, vm.layoutMode == .horizontal {
                 // Markdown 文件预览
                 MarkdownCardPreview(item: item)
             } else {
@@ -1209,16 +1230,8 @@ struct ClipItemCardView: View {
             return nil
         }()
 
-        // Fallback: resolvedData() may hit disk/decrypt; do it off-main.
-        let finalData: Data? = await {
-            if let dataToDecode { return dataToDecode }
-
-            return await withCheckedContinuation { continuation in
-                DispatchQueue.global(qos: .userInitiated).async {
-                    continuation.resume(returning: item.resolvedData())
-                }
-            }
-        }()
+        // Fallback: resolvedData() is ClipboardItem-isolated; keep the actor boundary explicit.
+        let finalData: Data? = dataToDecode ?? item.resolvedData()
 
         guard let finalData, !finalData.isEmpty else {
             isImageThumbnailLoading = false

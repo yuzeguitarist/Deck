@@ -13,7 +13,7 @@ import CryptoKit
 
 // MARK: - Sendable Helpers
 
-struct UncheckedSendable<Value>: @unchecked Sendable {
+nonisolated struct UncheckedSendable<Value>: @unchecked Sendable {
     let value: Value
 
     init(_ value: Value) {
@@ -24,7 +24,7 @@ struct UncheckedSendable<Value>: @unchecked Sendable {
 // MARK: - Data Extensions
 
 extension Data {
-    var sha256Hex: String {
+    nonisolated var sha256Hex: String {
         let hash = SHA256.hash(data: self)
         return hash.compactMap { String(format: "%02x", $0) }.joined()
     }
@@ -241,8 +241,8 @@ extension String {
         "^\\s*(func|class|struct|enum|protocol|extension|import|var|let|if|else|for|while|switch|case|return|guard|defer|do|try|catch|throw|async|await)\\s",
         "^\\s*(def|class|import|from|if|elif|else|for|while|try|except|return|yield|async|await|lambda)\\s",
         "^\\s*(function|const|let|var|if|else|for|while|switch|case|return|async|await|import|export|class)\\s",
-        "\\{[\\s\\S]*\\}",
-        "\\[[\\s\\S]*\\]",
+        "^\\s*\\{[\\s\\S]*\\}\\s*$",
+        "^\\s*\\[[\\s\\S]*\\]\\s*$",
         "=>|->|::|&&|\\|\\|",
         "^\\s*[#@]\\w+",
         "\\w+\\(.*\\)\\s*[{;]?$"

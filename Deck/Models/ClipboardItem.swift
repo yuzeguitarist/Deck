@@ -1538,7 +1538,7 @@ final class ClipboardItem: Identifiable, Equatable {
 
     /// 为大图预生成缩略图数据（用于存入数据库的 previewData）
     /// 在数据写入时调用，避免读取时解码大图
-    static func generatePreviewThumbnailData(from imageData: Data, maxSize: CGFloat = 200) -> Data? {
+    nonisolated static func generatePreviewThumbnailData(from imageData: Data, maxSize: CGFloat = 200) -> Data? {
         let options: [CFString: Any] = [
             kCGImageSourceShouldCache: false,
             kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
@@ -1858,42 +1858,42 @@ extension ClipboardItem {
                 return NSItemProvider(object: str as NSString)
             }
         case .richText:
-            provider.registerDataRepresentation(forTypeIdentifier: pasteboardType.rawValue, visibility: .all) { [weak self] completion in
+            let representationData = resolvedData()
+            provider.registerDataRepresentation(forTypeIdentifier: pasteboardType.rawValue, visibility: .all) { completion in
                 let progress = Progress(totalUnitCount: 1)
                 DispatchQueue.global(qos: .userInitiated).async {
-                    guard let self, !progress.isCancelled else {
-                        completion(nil, nil)
-                        return
-                    }
-
-                    let data = self.resolvedData()
                     guard !progress.isCancelled else {
                         completion(nil, nil)
                         return
                     }
 
-                    completion(data, nil)
+                    guard !progress.isCancelled else {
+                        completion(nil, nil)
+                        return
+                    }
+
+                    completion(representationData, nil)
                     progress.completedUnitCount = 1
                 }
                 return progress
             }
         case .image:
             let imageType = imagePasteboardType
-            provider.registerDataRepresentation(forTypeIdentifier: imageType.rawValue, visibility: .all) { [weak self] completion in
+            let representationData = resolvedData()
+            provider.registerDataRepresentation(forTypeIdentifier: imageType.rawValue, visibility: .all) { completion in
                 let progress = Progress(totalUnitCount: 1)
                 DispatchQueue.global(qos: .userInitiated).async {
-                    guard let self, !progress.isCancelled else {
-                        completion(nil, nil)
-                        return
-                    }
-
-                    let data = self.resolvedData()
                     guard !progress.isCancelled else {
                         completion(nil, nil)
                         return
                     }
 
-                    completion(data, nil)
+                    guard !progress.isCancelled else {
+                        completion(nil, nil)
+                        return
+                    }
+
+                    completion(representationData, nil)
                     progress.completedUnitCount = 1
                 }
                 return progress

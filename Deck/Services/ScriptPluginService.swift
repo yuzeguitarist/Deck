@@ -20,30 +20,51 @@ private typealias JSGlobalContextGetGroupFunc = @convention(c) (JSGlobalContextR
 private typealias JSContextGroupSetExecutionTimeLimitCallback = @convention(c) (JSContextRef?, JSValueRef?) -> Bool
 private typealias JSContextGroupSetExecutionTimeLimitFunc = @convention(c) (JSContextGroupRef?, Double, JSContextGroupSetExecutionTimeLimitCallback?, UnsafeMutableRawPointer?) -> Void
 
-private enum JSExecutionTimeLimiter {
-    static let handle: UnsafeMutableRawPointer? = dlopen(
+private nonisolated enum JSExecutionTimeLimiter {
+    nonisolated(unsafe) static let handle: UnsafeMutableRawPointer? = dlopen(
         "/System/Library/Frameworks/JavaScriptCore.framework/JavaScriptCore",
         RTLD_NOW
     )
 
-    static let getGroup: JSGlobalContextGetGroupFunc? = {
+    nonisolated static let getGroup: JSGlobalContextGetGroupFunc? = {
         guard let handle, let symbol = dlsym(handle, "JSGlobalContextGetGroup") else { return nil }
         return unsafeBitCast(symbol, to: JSGlobalContextGetGroupFunc.self)
     }()
 
-    static let setLimit: JSContextGroupSetExecutionTimeLimitFunc? = {
+    nonisolated static let setLimit: JSContextGroupSetExecutionTimeLimitFunc? = {
         guard let handle, let symbol = dlsym(handle, "JSContextGroupSetExecutionTimeLimit") else { return nil }
         return unsafeBitCast(symbol, to: JSContextGroupSetExecutionTimeLimitFunc.self)
     }()
 
-    static let callback: JSContextGroupSetExecutionTimeLimitCallback = { _, _ in
+    nonisolated static let callback: JSContextGroupSetExecutionTimeLimitCallback = { _, _ in
         true
+    }
+}
+
+private nonisolated final class PluginNetworkResponseBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var responseData: Data?
+    private var httpResponse: HTTPURLResponse?
+    private var requestError: Error?
+
+    func update(data: Data?, response: URLResponse?, error: Error?) {
+        lock.lock()
+        responseData = data
+        httpResponse = response as? HTTPURLResponse
+        requestError = error
+        lock.unlock()
+    }
+
+    func snapshot() -> (data: Data?, response: HTTPURLResponse?, error: Error?) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (responseData, httpResponse, requestError)
     }
 }
 
 // MARK: - Script Plugin Model
 
-struct ScriptPlugin: Identifiable, Codable {
+nonisolated struct ScriptPlugin: Identifiable, Codable, Sendable {
     let id: String
     let name: String
     let description: String?
@@ -106,7 +127,7 @@ struct ScriptPlugin: Identifiable, Codable {
 // MARK: - Script Manifest
 
 /// 脚本清单文件格式 (manifest.json)
-struct ScriptManifest: Codable {
+nonisolated struct ScriptManifest: Codable, Sendable {
     let name: String
     let description: String?
     let author: String?
@@ -115,7 +136,7 @@ struct ScriptManifest: Codable {
     let icon: String?
     let permissions: ScriptPermissions?  // 权限声明
 
-    struct ScriptPermissions: Codable {
+    struct ScriptPermissions: Codable, Sendable {
         let network: Bool?  // 是否需要网络权限
     }
 }
@@ -128,7 +149,7 @@ struct ScriptResult {
     let error: String?
 }
 
-struct PluginSharePayload: Codable {
+nonisolated struct PluginSharePayload: Codable, Sendable {
     let manifest: ScriptManifest
     let files: [String: String]
 }
@@ -178,7 +199,7 @@ enum ScriptPluginPublishError: LocalizedError {
 // MARK: - Script Plugin Service
 
 @Observable
-final class ScriptPluginService {
+nonisolated final class ScriptPluginService: @unchecked Sendable {
     static let shared = ScriptPluginService()
 
     private(set) var plugins: [ScriptPlugin] = []
@@ -866,7 +887,10 @@ final class ScriptPluginService {
         if Thread.isMainThread {
             apply()
         } else {
-            DispatchQueue.main.async(execute: apply)
+            let applyBox = UncheckedSendable(apply)
+            DispatchQueue.main.async {
+                applyBox.value()
+            }
         }
 
         refreshScriptWatchTargets(with: loaded)
@@ -1403,16 +1427,12 @@ final class ScriptPluginService {
             }
 
             // 同步执行网络请求（可取消）
-            var responseData: Data?
-            var httpResponse: HTTPURLResponse?
-            var requestError: Error?
+            let responseBox = PluginNetworkResponseBox()
 
             let semaphore = DispatchSemaphore(value: 0)
 
             let task = Self.pluginNetworkSession.dataTask(with: request) { data, response, error in
-                responseData = data
-                httpResponse = response as? HTTPURLResponse
-                requestError = error
+                responseBox.update(data: data, response: response, error: error)
                 semaphore.signal()
             }
             task.resume()
@@ -1448,12 +1468,14 @@ final class ScriptPluginService {
                 return Self.createFetchError(context: jsContext, message: "Request timeout")
             }
 
-            if let error = requestError {
+            let responseSnapshot = responseBox.snapshot()
+
+            if let error = responseSnapshot.error {
                 log.error("[JS \(pluginId)] Fetch error: \(error.localizedDescription)")
                 return Self.createFetchError(context: jsContext, message: error.localizedDescription)
             }
 
-            if let data = responseData, data.count > Self.maxFetchResponseBytes {
+            if let data = responseSnapshot.data, data.count > Self.maxFetchResponseBytes {
                 log.error("[JS \(pluginId)] Fetch response too large (\(data.count) bytes): \(urlString)")
                 return Self.createFetchError(context: jsContext, message: "Response too large")
             }
@@ -1461,9 +1483,9 @@ final class ScriptPluginService {
             // 创建响应对象
             return Self.createFetchResponse(
                 context: jsContext,
-                data: responseData,
-                status: httpResponse?.statusCode ?? 0,
-                statusText: HTTPURLResponse.localizedString(forStatusCode: httpResponse?.statusCode ?? 0)
+                data: responseSnapshot.data,
+                status: responseSnapshot.response?.statusCode ?? 0,
+                statusText: HTTPURLResponse.localizedString(forStatusCode: responseSnapshot.response?.statusCode ?? 0)
             )
         }
 

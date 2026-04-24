@@ -210,7 +210,7 @@ enum Const {
     static let maxSearchTextLength: Int = 5000
     static let maxSmartAnalysisLength: Int = 8000
     static let maxPreviewBodyLength: Int = 10000
-    static let maxSemanticTextLength: Int = 512
+    nonisolated static let maxSemanticTextLength: Int = 512
     static let semanticCandidateLimit: Int = 800
     static let maxRichTextSanitizeBytes: Int = 512 * 1024
     static let largeBlobThreshold: Int = 512 * 1024 // 512KB threshold for offloading binary payloads
@@ -219,7 +219,7 @@ enum Const {
     // Script safety
     static let scriptExecutionTimeout: TimeInterval = 5.0  // 5 seconds timeout
     static let scriptMaxInputLength: Int = 100_000         // 100KB max input
-    static let scriptMaxOutputLength: Int = 100_000        // 100KB max output
+    nonisolated static let scriptMaxOutputLength: Int = 100_000        // 100KB max output
 
     // Animation
     static let showDuration: Double = 0.16
@@ -247,7 +247,7 @@ enum Const {
 enum DeckBuildFlags {
     /// `false` 时完全不执行 iCloud CloudKit 同步（不访问 `CKContainer`、不派发同步 Task）。
     /// 准备启用 iCloud 上架时改为 `true`，并配合 Capabilities / entitlements。
-    static let isCloudSyncCompiledIn = false
+    nonisolated static let isCloudSyncCompiledIn = false
 }
 
 // MARK: - Support & outbound links

@@ -131,7 +131,7 @@ enum Col {
 // MARK: - Maintenance helpers (storage cleanup / rollback snapshot)
 
 extension DeckSQLManager {
-    private struct UnsafeRowBatch: @unchecked Sendable {
+    private nonisolated struct UnsafeRowBatch: @unchecked Sendable {
         let rows: [Row]
     }
 
@@ -477,6 +477,27 @@ private final class SearchCacheEntry: NSObject {
     }
 }
 
+private nonisolated struct DatabaseQueues: @unchecked Sendable {
+    let serial: DispatchQueue
+    let interactive: DispatchQueue
+    let background: DispatchQueue
+
+    init() {
+        let serial = DispatchQueue(label: "com.deck.sqlite.queue.serial", qos: .userInitiated)
+        self.serial = serial
+        self.interactive = DispatchQueue(label: "com.deck.sqlite.queue.interactive", qos: .userInitiated, target: serial)
+        self.background = DispatchQueue(label: "com.deck.sqlite.queue.background", qos: .utility, target: serial)
+    }
+}
+
+private nonisolated final class SQLWorkBox<T>: @unchecked Sendable {
+    let work: () throws -> T
+
+    init(_ work: @escaping () throws -> T) {
+        self.work = work
+    }
+}
+
 final class DeckSQLManager: NSObject, @unchecked Sendable {
     nonisolated static let shared = DeckSQLManager()
     private static var isInitialized = false
@@ -494,59 +515,56 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     ///   - 后台 backfill / vacuum / migration 等用 `.utility`，避免抢占 CPU/能耗飙升
     ///   - 仍然保证 SQLite 单连接串行访问（不会并发触碰 Connection）
     // Keep the serial queue user-initiated so panel-open queries are not downgraded.
-    private let dbSerialQueue = DispatchQueue(label: "com.deck.sqlite.queue.serial", qos: .userInitiated)
-    private lazy var dbQueue: DispatchQueue = {
-        DispatchQueue(label: "com.deck.sqlite.queue.interactive", qos: .userInitiated, target: dbSerialQueue)
-    }()
-    private lazy var dbBackgroundQueue: DispatchQueue = {
-        DispatchQueue(label: "com.deck.sqlite.queue.background", qos: .utility, target: dbSerialQueue)
-    }()
+    private nonisolated let dbQueues = DatabaseQueues()
+    private nonisolated var dbSerialQueue: DispatchQueue { dbQueues.serial }
+    private nonisolated var dbQueue: DispatchQueue { dbQueues.interactive }
+    private nonisolated var dbBackgroundQueue: DispatchQueue { dbQueues.background }
     
     /// 队列检测 Key：用于判断当前代码是否已在 dbQueue 上执行
     /// - 作用：防止重复 dispatch 导致死锁（如在 dbQueue 上再次 sync 到 dbQueue）
     /// - 使用：`DispatchQueue.getSpecific(key: dbQueueKey)` 检测
-    private let dbQueueKey = DispatchSpecificKey<Void>()
+    private nonisolated let dbQueueKey = DispatchSpecificKey<Void>()
     
     /// 语义向量计算队列：与 dbQueue 解耦，避免阻塞数据库操作
     /// - Label: "com.deck.semantic.embedding"
     /// - QoS: .utility - 后台任务，不影响用户交互
     /// - 用途：向量编码、相似度计算等 CPU 密集型任务
-    private let embeddingQueue = DispatchQueue(label: "com.deck.semantic.embedding", qos: .utility)
+    private nonisolated let embeddingQueue = DispatchQueue(label: "com.deck.semantic.embedding", qos: .utility)
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // MARK: - Database Core (数据库核心)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
     /// SQLite 数据库连接（非线程安全，必须在 dbQueue 上访问）
-    private var db: Connection?
+    private nonisolated(unsafe) var db: Connection?
     
     /// ClipboardHistory 主表引用
-    private var table: Table?
+    private nonisolated(unsafe) var table: Table?
 
     /// 当前打开的数据库文件路径缓存
     /// - 目的：避免在热路径（每次查询/写入）里反复解析 security-scoped bookmark / 读取 UserDefaults
     /// - 注意：路径变化时会在 `openDatabase`/`reinitialize` 过程中刷新
-    private var currentDBPath: String?
-    private let dbPathLock = NSLock()
+    private nonisolated(unsafe) var currentDBPath: String?
+    private nonisolated let dbPathLock = NSLock()
 
     /// 数据库文件有效性检查节流（避免每次 DB 操作都触发 fileExists/readable 的系统调用）
-    private var lastDBFileCheckAt: TimeInterval = 0
-    private var lastDBFileCheckResult: Bool = true
-    private let dbFileCheckThrottle: TimeInterval = 0.5
+    private nonisolated(unsafe) var lastDBFileCheckAt: TimeInterval = 0
+    private nonisolated(unsafe) var lastDBFileCheckResult: Bool = true
+    private nonisolated let dbFileCheckThrottle: TimeInterval = 0.5
 
     /// 是否可用 UPSERT(unique_id) + RETURNING（取决于 SQLite 版本与 unique index 是否就绪）
     /// - 第一次失败后会自动降级为 delete+insert，避免每次都走异常路径
     private var supportsUniqueIdUpsert: Bool = true
 
     /// 列表模式下 Data 列投影阈值（与 `rowToClipboardItem(loadFullData: false)` 保持一致）
-    private static let listInlineBytesForNonImage = 32 * 1024
-    private static let listInlineBytesForFile = 256 * 1024
-    private static let listInlineBytesForImageWithoutPreview = 256 * 1024
+    private nonisolated static let listInlineBytesForNonImage = 32 * 1024
+    private nonisolated static let listInlineBytesForFile = 256 * 1024
+    private nonisolated static let listInlineBytesForImageWithoutPreview = 256 * 1024
 
     /// 列表模式下的 `data` 投影表达式：
     /// - 对于大 payload：返回空 BLOB（X''），避免把大 blob materialize 到 Swift Data
     /// - 对于 image：优先只取 preview_data
-    private lazy var listModeProjectedDataExpr: Expression<Data> = {
+    private nonisolated var listModeProjectedDataExpr: Expression<Data> {
         Expression<Data>(literal: """
             CASE
                 WHEN blob_path IS NOT NULL THEN X''
@@ -557,17 +575,17 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 ELSE data
             END AS data
             """)
-    }()
+    }
     
     /// 自定义存储路径的 security-scoped URL（需要在 deinit 时释放）
-    private var securityScopedURL: URL?
+    private nonisolated(unsafe) var securityScopedURL: URL?
     /// 保护 security-scoped access 的并发访问
-    private let securityScopeLock = NSLock()
+    private nonisolated let securityScopeLock = NSLock()
     /// 当前是否已成功 startAccessingSecurityScopedResource()
-    private var securityScopedAccessActive = false
+    private nonisolated(unsafe) var securityScopedAccessActive = false
     
     /// FTS5 是否使用 trigram 分词（支持中文等 CJK 语言）
-    private var ftsUsesTrigram = false
+    private nonisolated(unsafe) var ftsUsesTrigram = false
     
     /// trigram 分词最小查询长度（少于此长度不触发 FTS5 搜索）
     private let ftsTrigramMinQueryLength = 3
@@ -649,25 +667,25 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
     /// 连续错误计数（成功操作后重置为 0）
-    private var consecutiveErrorCount = 0
+    private nonisolated(unsafe) var consecutiveErrorCount = 0
     
     /// 最后一次错误发生时间
-    private var lastErrorTime: Date?
+    private nonisolated(unsafe) var lastErrorTime: Date?
     
     /// 错误阈值：连续错误达到此值时通知用户
-    private let errorThreshold = 3
+    private nonisolated let errorThreshold = 3
     
     /// 是否已通知用户（防止重复弹窗）
-    private var hasNotifiedUser = false
+    private nonisolated(unsafe) var hasNotifiedUser = false
     /// 是否已提示过加密失败（避免频繁弹窗）
-    private var hasNotifiedEncryptionFailure = false
+    private nonisolated(unsafe) var hasNotifiedEncryptionFailure = false
     
     /// 数据库恢复是否正在进行（防止并发恢复）
-    private var recoveryInProgress = false
+    private nonisolated(unsafe) var recoveryInProgress = false
     
     /// 错误状态锁（保护错误计数与通知状态）
-    private let errorStateQueue = DispatchQueue(label: "com.deck.sqlite.error.state")
-    private let errorStateQueueKey = DispatchSpecificKey<Void>()
+    private nonisolated let errorStateQueue = DispatchQueue(label: "com.deck.sqlite.error.state")
+    private nonisolated let errorStateQueueKey = DispatchSpecificKey<Void>()
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // MARK: - Search Cache (搜索缓存 - 安全模式优化)
@@ -686,7 +704,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
     /// Backfill cache for legacy rows with empty unique_id values.
     /// Keeps a stable generated UUID per row until the DB update succeeds.
-    private var pendingUniqueIdBackfill: [Int64: String] = [:]
+    private nonisolated(unsafe) var pendingUniqueIdBackfill: [Int64: String] = [:]
     private var hasConfiguredSensitiveCacheObservation = false
 
     /// 单例初始化（设置队列检测机制）
@@ -723,7 +741,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     /// - Returns: 代码块的返回值
     /// - Note: 如果当前已在 dbQueue 上，直接执行；否则 sync 到 dbQueue
     /// - Warning: 仅用于内部数据库操作，外部调用应使用 `withDB` / `withDBAsync`
-    private func syncOnDBQueue<T>(_ work: () throws -> T) rethrows -> T {
+    private nonisolated func syncOnDBQueue<T>(_ work: () throws -> T) rethrows -> T {
         if DispatchQueue.getSpecific(key: dbQueueKey) != nil {
             return try work()
         }
@@ -735,14 +753,15 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     /// - Returns: 代码块的返回值
     /// - Note: 如果当前已在 dbQueue 上，直接执行；否则异步切换到 dbQueue
     /// - Warning: 仅用于内部数据库操作，外部调用应使用 `withDB` / `withDBAsync`
-    private func asyncOnDBQueue<T>(_ work: @escaping () throws -> T) async throws -> T {
+    private nonisolated func asyncOnDBQueue<T>(_ work: @escaping () throws -> T) async throws -> T {
         if DispatchQueue.getSpecific(key: dbQueueKey) != nil {
             return try work()
         }
+        let workBox = SQLWorkBox(work)
         return try await withCheckedThrowingContinuation { continuation in
             dbQueue.async {
                 do {
-                    continuation.resume(returning: try work())
+                    continuation.resume(returning: try workBox.work())
                 } catch {
                     continuation.resume(throwing: error)
                 }
@@ -752,7 +771,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
     /// 在后台维护队列上同步执行代码块（防止死锁）
     /// - Note: 该队列 QoS 更低，适合 migration/backfill/vacuum 等“非交互”工作。
-    private func syncOnDBBackgroundQueue<T>(_ work: () throws -> T) rethrows -> T {
+    private nonisolated func syncOnDBBackgroundQueue<T>(_ work: () throws -> T) rethrows -> T {
         if DispatchQueue.getSpecific(key: dbQueueKey) != nil {
             return try work()
         }
@@ -760,14 +779,15 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     }
 
     /// 在后台维护队列上异步执行代码块（防止死锁）
-    private func asyncOnDBBackgroundQueue<T>(_ work: @escaping () throws -> T) async throws -> T {
+    private nonisolated func asyncOnDBBackgroundQueue<T>(_ work: @escaping () throws -> T) async throws -> T {
         if DispatchQueue.getSpecific(key: dbQueueKey) != nil {
             return try work()
         }
+        let workBox = SQLWorkBox(work)
         return try await withCheckedThrowingContinuation { continuation in
             dbBackgroundQueue.async(qos: .utility, flags: .enforceQoS) {
                 do {
-                    continuation.resume(returning: try work())
+                    continuation.resume(returning: try workBox.work())
                 } catch {
                     continuation.resume(throwing: error)
                 }
@@ -776,7 +796,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     }
 
     /// 在错误状态队列上同步执行（避免 NSLock 在 async 上下文报错）
-    private func syncOnErrorStateQueue<T>(_ work: () -> T) -> T {
+    private nonisolated func syncOnErrorStateQueue<T>(_ work: () -> T) -> T {
         if DispatchQueue.getSpecific(key: errorStateQueueKey) != nil {
             return work()
         }
@@ -822,7 +842,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     /// - Note: 自动处理错误、重置错误计数、触发恢复机制
     /// - Warning: 操作失败时会调用 `handleDBError()`，可能触发数据库恢复
     @discardableResult
-    private func withDBAsync<T>(_ work: @escaping () throws -> T) async -> T? {
+    private nonisolated func withDBAsync<T>(_ work: @escaping () throws -> T) async -> T? {
         // 在执行数据库操作前检查文件有效性，防止 try! 崩溃
         if !isDatabaseFileValid() {
             await log.warn("Database file is invalid or missing, attempting to reinitialize...")
@@ -880,7 +900,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
     /// 检查数据库文件是否存在且可访问
     /// 在数据库操作前调用，防止因文件被删除而导致 try! 崩溃
-    private func isDatabaseFileValid() -> Bool {
+    private nonisolated func isDatabaseFileValid() -> Bool {
         let now = Date().timeIntervalSince1970
 
         // Throttle the expensive filesystem checks on hot paths (search/pagination).
@@ -918,7 +938,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     }
 
     /// 处理数据库错误并在必要时通知用户
-    private func handleDBError(_ error: Error) {
+    private nonisolated func handleDBError(_ error: Error) {
         let details = extractDBErrorDetails(error)
         let errorMessage = details.message
         let errorCount = syncOnErrorStateQueue {
@@ -970,7 +990,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }
     }
 
-    private func attemptDBRecovery(reason: String) {
+    private nonisolated func attemptDBRecovery(reason: String) {
         let shouldProceed = syncOnErrorStateQueue {
             if recoveryInProgress {
                 return false
@@ -998,7 +1018,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         let isCriticalSQLiteCode: Bool
     }
 
-    private func extractDBErrorDetails(_ error: Error) -> DBErrorDetails {
+    private nonisolated func extractDBErrorDetails(_ error: Error) -> DBErrorDetails {
         let nsError = error as NSError
         let domain = nsError.domain
         let code = Int32(nsError.code)
@@ -1025,7 +1045,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     }
 
     /// 发送数据库错误通知
-    private func notifyUserOfDBError(_ message: String, isCritical: Bool) {
+    private nonisolated func notifyUserOfDBError(_ message: String, isCritical: Bool) {
         DispatchQueue.main.async {
             NotificationCenter.default.post(
                 name: .databaseError,
@@ -1265,7 +1285,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }
     }
     
-    private func getStoragePath() -> String {
+    private nonisolated func getStoragePath() -> String {
         var basePath: String
 
         if DeckUserDefaults.useCustomStorage {
@@ -1288,7 +1308,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         return (basePath as NSString).appendingPathComponent("Deck")
     }
 
-    private func resolveSecurityScopedStoragePath(from bookmarkData: Data) -> String? {
+    private nonisolated func resolveSecurityScopedStoragePath(from bookmarkData: Data) -> String? {
         var isStale = false
         do {
             let url = try URL(
@@ -1324,7 +1344,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         return nil
     }
 
-    private func ensureSecurityScopedAccess(for url: URL) -> (success: Bool, didStart: Bool) {
+    private nonisolated func ensureSecurityScopedAccess(for url: URL) -> (success: Bool, didStart: Bool) {
         securityScopeLock.lock()
         defer { securityScopeLock.unlock() }
 
@@ -1351,7 +1371,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         return (true, true)
     }
 
-    private func stopSecurityScopedAccess() {
+    private nonisolated func stopSecurityScopedAccess() {
         securityScopeLock.lock()
         defer { securityScopeLock.unlock() }
 
@@ -1365,16 +1385,16 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         securityScopedAccessActive = false
     }
     
-    private func defaultStoragePath() -> String {
+    private nonisolated func defaultStoragePath() -> String {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?.path
             ?? (NSHomeDirectory() as NSString).appendingPathComponent("Library/Application Support")
     }
     
-    func getStorageDirectory() -> String {
+    nonisolated func getStorageDirectory() -> String {
         getStoragePath()
     }
 
-    private func databasePaths(for basePath: String) -> (dbPath: String, backupPath: String) {
+    private nonisolated func databasePaths(for basePath: String) -> (dbPath: String, backupPath: String) {
         let dbPath = (basePath as NSString).appendingPathComponent("Deck.sqlite3")
         let backupPath = (basePath as NSString).appendingPathComponent(backupFileName)
         return (dbPath, backupPath)
@@ -2107,7 +2127,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         return ok
     }
 
-    private func performIntegrityCheck() -> Bool {
+    private nonisolated func performIntegrityCheck() -> Bool {
         let result: String? = syncOnDBQueue {
             guard let db = db else { return nil }
             return (try? db.scalar("PRAGMA quick_check(1)") as? String) ?? nil
@@ -2208,7 +2228,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         let backupURL = URL(fileURLWithPath: backupPath)
         let tempURL = URL(fileURLWithPath: backupPath + ".tmp")
 
-        let copyBlock = {
+        let copyBlock: @Sendable () -> Void = {
             do {
                 if FileManager.default.fileExists(atPath: tempURL.path) {
                     try FileManager.default.removeItem(at: tempURL)
@@ -2228,7 +2248,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             }
         }
 
-        let backupBlock = { [weak self] in
+        let backupBlock: @Sendable () -> Void = { [weak self] in
             guard let self, let db = self.db else { return }
             do {
                 try db.run("PRAGMA wal_checkpoint(TRUNCATE)")
@@ -2721,7 +2741,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }
     }
 
-    private func updateFTSTokenizerState() {
+    private nonisolated func updateFTSTokenizerState() {
         syncOnDBQueue {
             guard let db = db else { return }
 
@@ -2735,7 +2755,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }
     }
 
-    private func isFTSTrigramAvailable() -> Bool {
+    private nonisolated func isFTSTrigramAvailable() -> Bool {
         syncOnDBQueue {
             guard let db = db else { return false }
             let testTable = "ClipboardHistory_fts_trigram_check"
@@ -2766,8 +2786,10 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             guard self.isFTSTrigramAvailable() else { return }
 
             log.info("FTS5 trigram tokenizer available, rebuilding FTS table for CJK support")
-            self.createFTS5Table(forceRecreate: true, preferTrigram: true)
-            self.rebuildFTSIndex()
+            Task { @MainActor [weak self] in
+                self?.createFTS5Table(forceRecreate: true, preferTrigram: true)
+                self?.rebuildFTSIndex()
+            }
         }
     }
 
@@ -3623,13 +3645,17 @@ extension DeckSQLManager {
             guard let vector = SemanticSearchService.shared.vector(for: normalized, cacheKey: "i:\(id)-\(textHash)") else {
                 return
             }
-            self.storeSemanticEmbedding(id: id, textHash: textHash, vector: vector)
+            Task { @MainActor [weak self] in
+                self?.storeSemanticEmbedding(id: id, textHash: textHash, vector: vector)
+            }
         }
     }
 
     func scheduleSemanticEmbeddingStore(id: Int64, textHash: String, vector: [Float]) {
         embeddingQueue.async { [weak self] in
-            self?.storeSemanticEmbedding(id: id, textHash: textHash, vector: vector)
+            Task { @MainActor [weak self] in
+                self?.storeSemanticEmbedding(id: id, textHash: textHash, vector: vector)
+            }
         }
     }
 
@@ -4590,7 +4616,7 @@ extension DeckSQLManager {
     /// 列表模式下的轻量查询：
     /// - 投影 `data` 列（大内容返回空 BLOB），避免把大 blob materialize 到 Swift Data
     /// - 维持与 UI 一致的排序：timestamp DESC, id DESC
-    private func listModeBaseQuery(table: Table) -> Table {
+    private nonisolated func listModeBaseQuery(table: Table) -> Table {
         table.select(
             Col.id,
             Col.uniqueId,
@@ -4631,7 +4657,7 @@ extension DeckSQLManager {
 
     /// Cursor-based pagination for the main list (keyset pagination).
     /// - This avoids OFFSET scans which get slower as the list grows.
-    func fetchListPage(
+    nonisolated func fetchListPage(
         filter: SQLite.Expression<Bool>? = nil,
         limit: Int,
         cursor: RowCursor? = nil
@@ -5404,18 +5430,7 @@ extension DeckSQLManager {
     func mapRowsToClipboardItems(_ rows: [Row], loadFullData: Bool = false) async -> [ClipboardItem] {
         guard !rows.isEmpty else { return [] }
         guard !Task.isCancelled else { return [] }
-        let rowBatch = UnsafeRowBatch(rows: rows)
-
-        return await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async { [weak self, rowBatch] in
-                guard let self else {
-                    continuation.resume(returning: [])
-                    return
-                }
-                let items = rowBatch.rows.compactMap { self.rowToClipboardItem($0, loadFullData: loadFullData) }
-                continuation.resume(returning: items)
-            }
-        }
+        return rows.compactMap { rowToClipboardItem($0, loadFullData: loadFullData) }
     }
     
     // MARK: - Encryption Migration

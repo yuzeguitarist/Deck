@@ -11,13 +11,13 @@ import Foundation
 import os
 import os.lock
 
-enum LogLevel: String, CaseIterable, Comparable, Sendable {
+nonisolated enum LogLevel: String, CaseIterable, Comparable, Sendable {
     case debug = "DEBUG"
     case info = "INFO"
     case warning = "WARNING"
     case error = "ERROR"
 
-    var priority: Int {
+    nonisolated var priority: Int {
         switch self {
         case .debug: return 0
         case .info: return 1
@@ -26,7 +26,7 @@ enum LogLevel: String, CaseIterable, Comparable, Sendable {
         }
     }
 
-    static func < (lhs: LogLevel, rhs: LogLevel) -> Bool {
+    nonisolated static func < (lhs: LogLevel, rhs: LogLevel) -> Bool {
         lhs.priority < rhs.priority
     }
 }

@@ -36,6 +36,54 @@ final class SecurityService {
             return SymmetricKey(data: keyData)
         }
 
+        static func currentOrCreateKey() -> SymmetricKey? {
+            if let key = currentKey() {
+                return key
+            }
+
+            let key = SymmetricKey(size: .bits256)
+            let keyData = key.withUnsafeBytes { Data($0) }
+            guard saveKeyToKeychain(keyData) else { return nil }
+            return key
+        }
+
+        static func saveKeyToKeychain(_ keyData: Data) -> Bool {
+            let deleteQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: keychainService,
+                kSecAttrAccount as String: keychainAccount
+            ]
+            SecItemDelete(deleteQuery as CFDictionary)
+
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: keychainService,
+                kSecAttrAccount as String: keychainAccount,
+                kSecValueData as String: keyData,
+                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            ]
+
+            let status = SecItemAdd(query as CFDictionary, nil)
+            if status == errSecSuccess { return true }
+
+            let fallbackQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: keychainService,
+                kSecAttrAccount as String: keychainAccount,
+                kSecValueData as String: keyData
+            ]
+            return SecItemAdd(fallbackQuery as CFDictionary, nil) == errSecSuccess
+        }
+
+        static func encryptSilently(_ data: Data) -> Data? {
+            guard let key = currentOrCreateKey() else { return nil }
+            do {
+                return try AES.GCM.seal(data, using: key).combined
+            } catch {
+                return nil
+            }
+        }
+
         static func decryptSilently(_ encryptedData: Data) -> Data? {
             guard let key = currentKey() else { return nil }
             do {
@@ -64,6 +112,10 @@ final class SecurityService {
 
     nonisolated static func backgroundDecryptSilently(_ encryptedData: Data) -> Data? {
         BackgroundCrypto.decryptSilently(encryptedData)
+    }
+
+    nonisolated static func backgroundEncryptSilently(_ data: Data) -> Data? {
+        BackgroundCrypto.encryptSilently(data)
     }
     
     // MARK: - Touch ID Authentication
