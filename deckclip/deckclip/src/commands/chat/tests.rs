@@ -759,6 +759,29 @@ fn slash_login_requests_login_screen() {
 }
 
 #[test]
+fn enter_while_streaming_preserves_draft_input() {
+    let mut app = test_app();
+    let client = Arc::new(Mutex::new(DeckClient::new(Config::default())));
+    let (ui_tx, _ui_rx) = unbounded_channel();
+
+    app.begin_send();
+    app.set_input("继续分析这个片段".to_string());
+    handle_key_event(
+        &mut app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()),
+        client,
+        ui_tx,
+    );
+
+    assert_eq!(app.input, "继续分析这个片段");
+    assert_eq!(app.input_history.len(), 0);
+    assert_eq!(
+        app.footer_message.as_ref().map(|(text, _)| text.as_str()),
+        Some(chat_text("chat.footer.reply_incomplete_stop").as_str())
+    );
+}
+
+#[test]
 fn defaults_key_maps_current_provider_model_keys() {
     assert_eq!(deck_model_defaults_key("chatgpt"), Some("aiChatGPTModel"));
     assert_eq!(deck_model_defaults_key("openai_api"), Some("aiOpenAIModel"));

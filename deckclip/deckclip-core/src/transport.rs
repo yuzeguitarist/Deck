@@ -7,6 +7,8 @@ use tracing::debug;
 
 use crate::error::DeckError;
 
+const MAX_BUFFER_SIZE: usize = 16 * 1024 * 1024 + 6;
+
 /// A transport connection over Unix Domain Socket with frame codec.
 pub struct Transport {
     stream: UnixStream,
@@ -62,6 +64,9 @@ impl Transport {
                 return Err(DeckError::Connection("连接已关闭".into()));
             }
             self.buf.extend_from_slice(&tmp[..n]);
+            if self.buf.len() > MAX_BUFFER_SIZE {
+                return Err(DeckError::Protocol("接收缓冲区过大".into()));
+            }
         }
     }
 }

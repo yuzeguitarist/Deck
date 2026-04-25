@@ -1258,19 +1258,18 @@ fn handle_key_event(
             if submitted.is_empty() && pending_attachments.is_empty() {
                 return;
             }
+            if !submitted.starts_with('/') && app.mode != ChatMode::Ready {
+                app.set_footer(
+                    chat_text("chat.footer.reply_incomplete_stop"),
+                    MetaTone::Warning,
+                );
+                return;
+            }
             app.remember_input(&submitted_display);
             app.clear_composer();
 
             if submitted.starts_with('/') {
                 handle_slash_command(app, submitted, primary_client, ui_tx);
-                return;
-            }
-
-            if app.mode != ChatMode::Ready {
-                app.set_footer(
-                    chat_text("chat.footer.reply_incomplete_stop"),
-                    MetaTone::Warning,
-                );
                 return;
             }
 

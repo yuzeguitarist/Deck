@@ -101,6 +101,8 @@ fn format_deck_error(err: &DeckError) -> String {
         DeckError::Protocol(message) => {
             if let Some((expected, got)) = parse_id_mismatch_error(message) {
                 format_template("err.id_mismatch", &[&expected, &got])
+            } else if message == "接收缓冲区过大" {
+                i18n::t("err.recv_buffer_too_large")
             } else {
                 format_template("err.protocol", &[message])
             }

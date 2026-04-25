@@ -12,9 +12,10 @@ pub fn default_token_path() -> PathBuf {
 
 /// Deck's Application Support directory
 pub fn app_support_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("cannot determine home directory")
-        .join("Library/Application Support/Deck")
+    match dirs::home_dir().or_else(|| std::env::var_os("HOME").map(PathBuf::from)) {
+        Some(home) => home.join("Library/Application Support/Deck"),
+        None => std::env::temp_dir().join("Deck"),
+    }
 }
 
 /// Runtime configuration for the CLI client.

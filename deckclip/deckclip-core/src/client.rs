@@ -15,6 +15,8 @@ use crate::transport::Transport;
 const CLIPBOARD_QUERY_TIMEOUT_MS: u64 = 10_000;
 const SCRIPT_PLUGIN_QUERY_TIMEOUT_MS: u64 = 10_000;
 const SCRIPT_PLUGIN_RUN_TIMEOUT_MS: u64 = 60_000;
+const QUICK_COMMAND_TIMEOUT_MS: u64 = 10_000;
+const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
 
 /// High-level client for communicating with the Deck App.
 pub struct DeckClient {
@@ -39,6 +41,12 @@ impl DeckClient {
         }
     }
 
+    fn reset_connection(&mut self) {
+        self.transport = None;
+        self.session_token = None;
+        self.session_expires_at = 0;
+    }
+
     /// Ensure we have an authenticated connection.
     async fn ensure_connected(&mut self) -> Result<(), DeckError> {
         let now = current_timestamp();
@@ -56,9 +64,7 @@ impl DeckClient {
                 return Ok(());
             }
 
-            self.transport = None;
-            self.session_token = None;
-            self.session_expires_at = 0;
+            self.reset_connection();
         }
 
         // (Re)connect
@@ -128,7 +134,10 @@ impl DeckClient {
         };
 
         let transport = self.transport.as_mut().ok_or(DeckError::NotRunning)?;
-        transport.send(&request).await?;
+        if let Err(error) = transport.send(&request).await {
+            self.reset_connection();
+            return Err(error);
+        }
 
         let effective_timeout = if timeout_ms > 0 {
             timeout_ms
@@ -136,28 +145,35 @@ impl DeckClient {
             self.config.timeout_ms
         };
 
-        let response: Response = if effective_timeout > 0 {
+        let response_result: Result<Response, DeckError> = if effective_timeout > 0 {
             let duration = Duration::from_millis(effective_timeout);
             let result = {
                 let transport = self.transport.as_mut().ok_or(DeckError::NotRunning)?;
                 timeout(duration, transport.recv()).await
             };
             match result {
-                Ok(response) => response?,
+                Ok(response) => response,
                 Err(_) => {
-                    self.transport = None;
-                    self.session_token = None;
-                    self.session_expires_at = 0;
+                    self.reset_connection();
                     return Err(DeckError::Timeout);
                 }
             }
         } else {
             // No timeout — wait indefinitely (for AI/long operations)
             let transport = self.transport.as_mut().ok_or(DeckError::NotRunning)?;
-            transport.recv().await?
+            transport.recv().await
+        };
+
+        let response = match response_result {
+            Ok(response) => response,
+            Err(error) => {
+                self.reset_connection();
+                return Err(error);
+            }
         };
 
         if response.id != id {
+            self.reset_connection();
             return Err(DeckError::Protocol(format!(
                 "响应 ID 不匹配: expected {}, got {}",
                 id, response.id
@@ -179,12 +195,20 @@ impl DeckClient {
     // ─── Public API ───
 
     pub async fn health(&mut self) -> Result<Response, DeckError> {
-        self.execute(deckclip_protocol::cmd::HEALTH, json!({}), 0)
+        self.execute(
+            deckclip_protocol::cmd::HEALTH,
+            json!({}),
+            QUICK_COMMAND_TIMEOUT_MS,
+        )
             .await
     }
 
     pub async fn read(&mut self) -> Result<Response, DeckError> {
-        self.execute(deckclip_protocol::cmd::READ, json!({}), 0)
+        self.execute(
+            deckclip_protocol::cmd::READ,
+            json!({}),
+            QUICK_COMMAND_TIMEOUT_MS,
+        )
             .await
     }
 
@@ -293,7 +317,12 @@ impl DeckClient {
         if raw {
             args["raw"] = json!(true);
         }
-        self.execute(deckclip_protocol::cmd::WRITE, args, 0).await
+        self.execute(
+            deckclip_protocol::cmd::WRITE,
+            args,
+            DEFAULT_COMMAND_TIMEOUT_MS,
+        )
+        .await
     }
 
     pub async fn paste(
@@ -309,11 +338,20 @@ impl DeckClient {
         if let Some(t) = target {
             args["target"] = json!(t);
         }
-        self.execute(deckclip_protocol::cmd::PASTE, args, 0).await
+        self.execute(
+            deckclip_protocol::cmd::PASTE,
+            args,
+            DEFAULT_COMMAND_TIMEOUT_MS,
+        )
+        .await
     }
 
     pub async fn panel_toggle(&mut self) -> Result<Response, DeckError> {
-        self.execute(deckclip_protocol::cmd::PANEL_TOGGLE, json!({}), 0)
+        self.execute(
+            deckclip_protocol::cmd::PANEL_TOGGLE,
+            json!({}),
+            DEFAULT_COMMAND_TIMEOUT_MS,
+        )
             .await
     }
 
@@ -373,7 +411,11 @@ impl DeckClient {
     }
 
     pub async fn login_status(&mut self) -> Result<Response, DeckError> {
-        self.execute(deckclip_protocol::cmd::LOGIN_STATUS, json!({}), 0)
+        self.execute(
+            deckclip_protocol::cmd::LOGIN_STATUS,
+            json!({}),
+            DEFAULT_COMMAND_TIMEOUT_MS,
+        )
             .await
     }
 
@@ -381,13 +423,17 @@ impl DeckClient {
         self.execute(
             deckclip_protocol::cmd::LOGIN_CLEAR,
             json!({ "provider": provider }),
-            0,
+            DEFAULT_COMMAND_TIMEOUT_MS,
         )
         .await
     }
 
     pub async fn login_chatgpt_start(&mut self) -> Result<Response, DeckError> {
-        self.execute(deckclip_protocol::cmd::LOGIN_CHATGPT_START, json!({}), 0)
+        self.execute(
+            deckclip_protocol::cmd::LOGIN_CHATGPT_START,
+            json!({}),
+            DEFAULT_COMMAND_TIMEOUT_MS,
+        )
             .await
     }
 
@@ -397,7 +443,11 @@ impl DeckClient {
     }
 
     pub async fn login_chatgpt_cancel(&mut self) -> Result<Response, DeckError> {
-        self.execute(deckclip_protocol::cmd::LOGIN_CHATGPT_CANCEL, json!({}), 0)
+        self.execute(
+            deckclip_protocol::cmd::LOGIN_CHATGPT_CANCEL,
+            json!({}),
+            DEFAULT_COMMAND_TIMEOUT_MS,
+        )
             .await
     }
 
@@ -414,7 +464,7 @@ impl DeckClient {
                 "model": model,
                 "api_key": api_key,
             }),
-            0,
+            DEFAULT_COMMAND_TIMEOUT_MS,
         )
         .await
     }
@@ -432,7 +482,7 @@ impl DeckClient {
                 "model": model,
                 "api_key": api_key,
             }),
-            0,
+            DEFAULT_COMMAND_TIMEOUT_MS,
         )
         .await
     }
@@ -448,13 +498,17 @@ impl DeckClient {
                 "base_url": base_url,
                 "model": model,
             }),
-            0,
+            DEFAULT_COMMAND_TIMEOUT_MS,
         )
         .await
     }
 
     pub async fn chat_bootstrap(&mut self) -> Result<Response, DeckError> {
-        self.execute(deckclip_protocol::cmd::AI_CHAT_BOOTSTRAP, json!({}), 0)
+        self.execute(
+            deckclip_protocol::cmd::AI_CHAT_BOOTSTRAP,
+            json!({}),
+            DEFAULT_COMMAND_TIMEOUT_MS,
+        )
             .await
     }
 
@@ -475,12 +529,20 @@ impl DeckClient {
             args["new"] = json!(true);
         }
 
-        self.execute(deckclip_protocol::cmd::AI_CHAT_OPEN, args, 0)
+        self.execute(
+            deckclip_protocol::cmd::AI_CHAT_OPEN,
+            args,
+            DEFAULT_COMMAND_TIMEOUT_MS,
+        )
             .await
     }
 
     pub async fn chat_clipboard_read(&mut self) -> Result<Response, DeckError> {
-        self.execute(deckclip_protocol::cmd::AI_CHAT_CLIPBOARD_READ, json!({}), 0)
+        self.execute(
+            deckclip_protocol::cmd::AI_CHAT_CLIPBOARD_READ,
+            json!({}),
+            QUICK_COMMAND_TIMEOUT_MS,
+        )
             .await
     }
 
@@ -516,7 +578,7 @@ impl DeckClient {
                 "callId": call_id,
                 "approved": approved,
             }),
-            0,
+            DEFAULT_COMMAND_TIMEOUT_MS,
         )
         .await
     }
@@ -525,7 +587,7 @@ impl DeckClient {
         self.execute(
             deckclip_protocol::cmd::AI_CHAT_CANCEL,
             json!({ "sessionId": session_id }),
-            0,
+            DEFAULT_COMMAND_TIMEOUT_MS,
         )
         .await
     }
@@ -546,7 +608,11 @@ impl DeckClient {
         if let Some(limit) = limit {
             args["limit"] = json!(limit);
         }
-        self.execute(deckclip_protocol::cmd::AI_CHAT_HISTORY_LIST, args, 0)
+        self.execute(
+            deckclip_protocol::cmd::AI_CHAT_HISTORY_LIST,
+            args,
+            DEFAULT_COMMAND_TIMEOUT_MS,
+        )
             .await
     }
 
@@ -561,7 +627,7 @@ impl DeckClient {
                 "sessionId": session_id,
                 "conversationId": conversation_id,
             }),
-            0,
+            DEFAULT_COMMAND_TIMEOUT_MS,
         )
         .await
     }
@@ -579,7 +645,7 @@ impl DeckClient {
         self.execute(
             deckclip_protocol::cmd::AI_CHAT_CLOSE,
             json!({ "sessionId": session_id }),
-            0,
+            QUICK_COMMAND_TIMEOUT_MS,
         )
         .await
     }
