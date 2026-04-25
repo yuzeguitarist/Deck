@@ -43,9 +43,14 @@ const OPENCODE_SCHEMA_URL: &str = "https://opencode.ai/config.json";
 
 const TOOL_HEALTH_STATUS: &str = "deck_health_status";
 const TOOL_READ_LATEST: &str = "deck_read_latest_clipboard";
+const TOOL_LIST_ITEMS: &str = "deck_list_clipboard_items";
 const TOOL_WRITE_TEXT: &str = "deck_write_clipboard_text";
+const TOOL_SEARCH_ITEMS: &str = "deck_search_clipboard_items";
 const TOOL_SEARCH_HISTORY: &str = "deck_search_clipboard_history";
 const TOOL_TRANSFORM_TEXT: &str = "deck_transform_clipboard_text";
+const TOOL_LIST_SCRIPT_PLUGINS: &str = "deck_list_script_plugins";
+const TOOL_READ_SCRIPT_PLUGIN: &str = "deck_read_script_plugin";
+const TOOL_RUN_SCRIPT_TRANSFORM: &str = "deck_run_script_transform";
 
 pub async fn run(command: McpCommand, output: OutputMode) -> Result<()> {
     match command.action {
@@ -762,10 +767,22 @@ fn tool_descriptors() -> Vec<ToolDescriptor> {
             true,
         ),
         ToolDescriptor::new(
+            TOOL_LIST_ITEMS,
+            "mcp.tools.list_items.description",
+            "mcp.tools.list_items.input",
+            true,
+        ),
+        ToolDescriptor::new(
             TOOL_WRITE_TEXT,
             "mcp.tools.write_text.description",
             "mcp.tools.write_text.input",
             false,
+        ),
+        ToolDescriptor::new(
+            TOOL_SEARCH_ITEMS,
+            "mcp.tools.search_items.description",
+            "mcp.tools.search_items.input",
+            true,
         ),
         ToolDescriptor::new(
             TOOL_SEARCH_HISTORY,
@@ -779,6 +796,24 @@ fn tool_descriptors() -> Vec<ToolDescriptor> {
             "mcp.tools.transform_text.input",
             true,
         ),
+        ToolDescriptor::new(
+            TOOL_LIST_SCRIPT_PLUGINS,
+            "mcp.tools.list_script_plugins.description",
+            "mcp.tools.list_script_plugins.input",
+            true,
+        ),
+        ToolDescriptor::new(
+            TOOL_READ_SCRIPT_PLUGIN,
+            "mcp.tools.read_script_plugin.description",
+            "mcp.tools.read_script_plugin.input",
+            true,
+        ),
+        ToolDescriptor::new(
+            TOOL_RUN_SCRIPT_TRANSFORM,
+            "mcp.tools.run_script_transform.description",
+            "mcp.tools.run_script_transform.input",
+            false,
+        ),
     ]
 }
 
@@ -790,9 +825,14 @@ fn tool_title_key(name: &str) -> Option<&'static str> {
     match name {
         TOOL_HEALTH_STATUS => Some("mcp.tool.health.title"),
         TOOL_READ_LATEST => Some("mcp.tool.read_latest.title"),
+        TOOL_LIST_ITEMS => Some("mcp.tool.list_items.title"),
         TOOL_WRITE_TEXT => Some("mcp.tool.write_text.title"),
+        TOOL_SEARCH_ITEMS => Some("mcp.tool.search_items.title"),
         TOOL_SEARCH_HISTORY => Some("mcp.tool.search_history.title"),
         TOOL_TRANSFORM_TEXT => Some("mcp.tool.transform_text.title"),
+        TOOL_LIST_SCRIPT_PLUGINS => Some("mcp.tool.list_script_plugins.title"),
+        TOOL_READ_SCRIPT_PLUGIN => Some("mcp.tool.read_script_plugin.title"),
+        TOOL_RUN_SCRIPT_TRANSFORM => Some("mcp.tool.run_script_transform.title"),
         _ => None,
     }
 }
@@ -801,9 +841,14 @@ fn tool_description_key(name: &str) -> Option<&'static str> {
     match name {
         TOOL_HEALTH_STATUS => Some("mcp.tools.health.description"),
         TOOL_READ_LATEST => Some("mcp.tools.read_latest.description"),
+        TOOL_LIST_ITEMS => Some("mcp.tools.list_items.description"),
         TOOL_WRITE_TEXT => Some("mcp.tools.write_text.description"),
+        TOOL_SEARCH_ITEMS => Some("mcp.tools.search_items.description"),
         TOOL_SEARCH_HISTORY => Some("mcp.tools.search_history.description"),
         TOOL_TRANSFORM_TEXT => Some("mcp.tools.transform_text.description"),
+        TOOL_LIST_SCRIPT_PLUGINS => Some("mcp.tools.list_script_plugins.description"),
+        TOOL_READ_SCRIPT_PLUGIN => Some("mcp.tools.read_script_plugin.description"),
+        TOOL_RUN_SCRIPT_TRANSFORM => Some("mcp.tools.run_script_transform.description"),
         _ => None,
     }
 }
@@ -1281,10 +1326,28 @@ impl DeckMcpServer {
     pub async fn read_latest_clipboard(&self) -> Result<Json<ToolPayload>, ErrorData> {
         let mut client = self.client.lock().await;
         let response = client
-            .read()
+            .clipboard_latest()
             .await
             .map_err(|err| tool_error(anyhow::Error::new(err)))?;
         Ok(Json(response_payload(TOOL_READ_LATEST, response)))
+    }
+
+    #[tool(
+        name = "deck_list_clipboard_items",
+        description = "List recent clipboard items from Deck as structured metadata.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn list_clipboard_items(
+        &self,
+        params: Parameters<ListClipboardItemsParams>,
+    ) -> Result<Json<ToolPayload>, ErrorData> {
+        let params = params.0;
+        let mut client = self.client.lock().await;
+        let response = client
+            .clipboard_list(Some(params.limit))
+            .await
+            .map_err(|err| tool_error(anyhow::Error::new(err)))?;
+        Ok(Json(response_payload(TOOL_LIST_ITEMS, response)))
     }
 
     #[tool(
@@ -1307,6 +1370,24 @@ impl DeckMcpServer {
             .await
             .map_err(|err| tool_error(anyhow::Error::new(err)))?;
         Ok(Json(response_payload(TOOL_WRITE_TEXT, response)))
+    }
+
+    #[tool(
+        name = "deck_search_clipboard_items",
+        description = "Search clipboard history and return structured items instead of a natural-language summary.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn search_clipboard_items(
+        &self,
+        params: Parameters<SearchClipboardItemsParams>,
+    ) -> Result<Json<ToolPayload>, ErrorData> {
+        let params = params.0;
+        let mut client = self.client.lock().await;
+        let response = client
+            .clipboard_search(&params.query, params.mode.as_deref(), Some(params.limit))
+            .await
+            .map_err(|err| tool_error(anyhow::Error::new(err)))?;
+        Ok(Json(response_payload(TOOL_SEARCH_ITEMS, response)))
     }
 
     #[tool(
@@ -1356,6 +1437,60 @@ impl DeckMcpServer {
             .map_err(|err| tool_error(anyhow::Error::new(err)))?;
         Ok(Json(response_payload(TOOL_TRANSFORM_TEXT, response)))
     }
+
+    #[tool(
+        name = "deck_list_script_plugins",
+        description = "List installed Deck script plugins so external agents can discover available automation capabilities.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn list_script_plugins(
+        &self,
+        params: Parameters<ListScriptPluginsParams>,
+    ) -> Result<Json<ToolPayload>, ErrorData> {
+        let params = params.0;
+        let query = params.query.as_deref();
+        let mut client = self.client.lock().await;
+        let response = client
+            .script_plugins_list(query, Some(params.limit))
+            .await
+            .map_err(|err| tool_error(anyhow::Error::new(err)))?;
+        Ok(Json(response_payload(TOOL_LIST_SCRIPT_PLUGINS, response)))
+    }
+
+    #[tool(
+        name = "deck_read_script_plugin",
+        description = "Read a Deck script plugin manifest and main file contents for analysis or review.",
+        annotations(read_only_hint = true)
+    )]
+    pub async fn read_script_plugin(
+        &self,
+        params: Parameters<ReadScriptPluginParams>,
+    ) -> Result<Json<ToolPayload>, ErrorData> {
+        let params = params.0;
+        let mut client = self.client.lock().await;
+        let response = client
+            .script_plugin_read(&params.plugin_id)
+            .await
+            .map_err(|err| tool_error(anyhow::Error::new(err)))?;
+        Ok(Json(response_payload(TOOL_READ_SCRIPT_PLUGIN, response)))
+    }
+
+    #[tool(
+        name = "deck_run_script_transform",
+        description = "Run an installed Deck script plugin to transform, clean, format, or template text."
+    )]
+    pub async fn run_script_transform(
+        &self,
+        params: Parameters<RunScriptTransformParams>,
+    ) -> Result<Json<ToolPayload>, ErrorData> {
+        let params = params.0;
+        let mut client = self.client.lock().await;
+        let response = client
+            .script_transform_run(&params.plugin_id, &params.input)
+            .await
+            .map_err(|err| tool_error(anyhow::Error::new(err)))?;
+        Ok(Json(response_payload(TOOL_RUN_SCRIPT_TRANSFORM, response)))
+    }
 }
 
 #[tool_handler(
@@ -1404,6 +1539,21 @@ struct WriteClipboardTextParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct ListClipboardItemsParams {
+    #[serde(default = "default_list_limit")]
+    limit: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SearchClipboardItemsParams {
+    query: String,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default = "default_search_limit")]
+    limit: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct SearchClipboardHistoryParams {
     query: String,
     #[serde(default)]
@@ -1421,8 +1571,35 @@ struct TransformClipboardTextParams {
     plugin: Option<String>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ListScriptPluginsParams {
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default = "default_script_plugin_list_limit")]
+    limit: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct ReadScriptPluginParams {
+    plugin_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RunScriptTransformParams {
+    plugin_id: String,
+    input: String,
+}
+
+fn default_list_limit() -> u32 {
+    20
+}
+
 fn default_search_limit() -> u32 {
     10
+}
+
+fn default_script_plugin_list_limit() -> u32 {
+    30
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -1711,6 +1888,22 @@ mod tests {
             .iter()
             .find(|tool| tool.name.as_ref() == TOOL_READ_LATEST)
             .expect("expected localized read_latest tool");
+        let list_items = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == TOOL_LIST_ITEMS)
+            .expect("expected localized list_items tool");
+        let search_items = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == TOOL_SEARCH_ITEMS)
+            .expect("expected localized search_items tool");
+        let list_script_plugins = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == TOOL_LIST_SCRIPT_PLUGINS)
+            .expect("expected localized list_script_plugins tool");
+        let run_script_transform = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == TOOL_RUN_SCRIPT_TRANSFORM)
+            .expect("expected localized run_script_transform tool");
 
         assert_eq!(
             health.title.as_deref(),
@@ -1727,6 +1920,22 @@ mod tests {
         assert_eq!(
             read_latest.description.as_deref(),
             Some(i18n::t("mcp.tools.read_latest.description").as_str())
+        );
+        assert_eq!(
+            list_items.title.as_deref(),
+            Some(i18n::t("mcp.tool.list_items.title").as_str())
+        );
+        assert_eq!(
+            search_items.description.as_deref(),
+            Some(i18n::t("mcp.tools.search_items.description").as_str())
+        );
+        assert_eq!(
+            list_script_plugins.title.as_deref(),
+            Some(i18n::t("mcp.tool.list_script_plugins.title").as_str())
+        );
+        assert_eq!(
+            run_script_transform.description.as_deref(),
+            Some(i18n::t("mcp.tools.run_script_transform.description").as_str())
         );
 
         let output_schema = health

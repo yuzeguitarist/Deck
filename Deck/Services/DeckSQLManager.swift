@@ -105,6 +105,7 @@ import Foundation
 import SQLite3
 import Darwin
 import Accelerate
+import CryptoKit
 
 enum Col {
     // SQL 列描述本身是不可变常量；显式放开隔离，避免默认 MainActor 卡住后台 DB 路径。
@@ -3367,7 +3368,7 @@ extension DeckSQLManager {
     /// - Parameter data: 加密的数据
     /// - Returns: 解密后的数据（安全模式下），或原始数据（非安全模式）
     private func decryptData(_ data: Data, force: Bool = false) -> Data {
-        guard DeckUserDefaults.securityModeEnabled || force else { return data }
+        guard force || DeckUserDefaults.securityModeEnabled else { return data }
         return SecurityService.shared.decrypt(data) ?? data
     }
     
@@ -3393,7 +3394,7 @@ extension DeckSQLManager {
     /// - Parameter string: Base64 编码的加密数据
     /// - Returns: 解密后的字符串（安全模式下），或原始字符串（非安全模式）
     private func decryptString(_ string: String, force: Bool = false) -> String {
-        guard DeckUserDefaults.securityModeEnabled || force else { return string }
+        guard force || DeckUserDefaults.securityModeEnabled else { return string }
         guard let data = Data(base64Encoded: string),
               let decrypted = SecurityService.shared.decrypt(data),
               let result = String(data: decrypted, encoding: .utf8) else { return string }
@@ -3433,6 +3434,32 @@ extension DeckSQLManager {
         guard let data = string.data(using: .utf8),
               let encrypted = SecurityService.shared.encrypt(data) else { return nil }
         return encrypted.base64EncodedString()
+    }
+
+    private func encryptDataForMigration(_ data: Data, using key: SymmetricKey) -> Data? {
+        SecurityService.encryptWithKey(data, using: key)
+    }
+
+    private func decryptDataForMigration(_ data: Data, using key: SymmetricKey) -> Data? {
+        if data.isEmpty { return data }
+        return SecurityService.decryptWithKey(data, using: key)
+    }
+
+    private func encryptStringForMigration(_ string: String, using key: SymmetricKey) -> String? {
+        guard let data = string.data(using: .utf8),
+              let encrypted = SecurityService.encryptWithKey(data, using: key) else {
+            return nil
+        }
+        return encrypted.base64EncodedString()
+    }
+
+    private func decryptStringForMigration(_ string: String, using key: SymmetricKey) -> String? {
+        if string.isEmpty { return "" }
+        guard let data = Data(base64Encoded: string),
+              let decrypted = SecurityService.decryptWithKey(data, using: key) else {
+            return nil
+        }
+        return String(data: decrypted, encoding: .utf8)
     }
 
     private func notifyEncryptionFailureIfNeeded() {
@@ -3786,9 +3813,9 @@ extension DeckSQLManager {
         let resolvedAppName: String
         let resolvedCustomTitle: String
         if isSecurityMode {
-            resolvedSearchText = decryptString(rawSearchText)
-            resolvedAppName = decryptString(appName)
-            resolvedCustomTitle = rawCustomTitle.map { decryptString($0) } ?? ""
+            resolvedSearchText = decryptString(rawSearchText, force: true)
+            resolvedAppName = decryptString(appName, force: true)
+            resolvedCustomTitle = rawCustomTitle.map { decryptString($0, force: true) } ?? ""
         } else {
             resolvedSearchText = rawSearchText
             resolvedAppName = appName
@@ -5026,6 +5053,151 @@ extension DeckSQLManager {
         return rows.compactMap { rowToClipboardItem($0, loadFullData: loadFullData) }
     }
 
+    struct ExportRow: Sendable {
+        let id: Int64
+        let uniqueId: String
+        let pasteboardType: String
+        let itemType: String
+        let data: Data
+        let previewData: Data?
+        let timestamp: Int64
+        let appPath: String
+        let appName: String
+        let customTitle: String?
+        let sourceAnchor: SourceAnchor?
+        let searchText: String
+        let contentLength: Int
+        let tagId: Int
+        let isTemporary: Bool
+        let receivedFromLAN: Bool
+        let blobPath: String?
+    }
+
+    /// Export-only row mapper.
+    ///
+    /// This intentionally avoids constructing `ClipboardItem`: its initializer
+    /// re-detects item type and runs SmartTextService heuristics, which is useful
+    /// for capture/UI but pure overhead when rows already contain persisted
+    /// metadata. Export still loads full payload bytes (including blobs) and
+    /// decrypts only the fields that can be encrypted on disk.
+    func fetchExportRowsBeforeCursor(
+        limit: Int = 10000,
+        beforeTimestamp: Int64? = nil,
+        beforeId: Int64? = nil
+    ) async -> [ExportRow] {
+        let rows = await withDBAsync { () throws -> [Row] in
+            guard let db = self.db, let table = self.table else { return [Row]() }
+            var query = table.select(
+                Col.id,
+                Col.uniqueId,
+                Col.type,
+                Col.itemType,
+                Col.data,
+                Col.previewData,
+                Col.ts,
+                Col.appPath,
+                Col.appName,
+                Col.customTitle,
+                Col.sourceAnchor,
+                Col.searchText,
+                Col.length,
+                Col.tagId,
+                Col.blobPath,
+                Col.isTemporary,
+                Col.isEncrypted,
+                Col.receivedFromLan
+            )
+            if let beforeTimestamp, let beforeId {
+                let cursorFilter = (Col.ts < beforeTimestamp) || (Col.ts == beforeTimestamp && Col.id < beforeId)
+                query = query.filter(cursorFilter)
+            }
+            query = query.order(Col.ts.desc, Col.id.desc).limit(limit)
+            return Array(try db.prepare(query))
+        } ?? []
+
+        return rows.compactMap { exportRow(from: $0) }
+    }
+
+    private func exportRow(from row: Row) -> ExportRow? {
+        do {
+            let id = try row.get(Col.id)
+            let storedUniqueId = try row.get(Col.uniqueId)
+            let uniqueId: String
+            if storedUniqueId.isEmpty {
+                uniqueId = syncOnDBQueue {
+                    if let pending = pendingUniqueIdBackfill[id] {
+                        return pending
+                    }
+                    let newId = UUID().uuidString
+                    pendingUniqueIdBackfill[id] = newId
+                    return newId
+                }
+                backfillUniqueIdIfNeeded(id: id, uniqueId: uniqueId)
+            } else {
+                uniqueId = storedUniqueId
+            }
+
+            let type = try row.get(Col.type)
+            let itemType = try row.get(Col.itemType)
+            let rawData = try row.get(Col.data)
+            let rawPreviewData = try row.get(Col.previewData)
+            let timestamp = try row.get(Col.ts)
+            let appPath = try row.get(Col.appPath)
+            let rawAppName = try row.get(Col.appName)
+            let rawCustomTitle = (try? row.get(Col.customTitle)) ?? nil
+            let rawSourceAnchor = (try? row.get(Col.sourceAnchor)) ?? nil
+            let rawSearchText = try row.get(Col.searchText)
+            let contentLength = try row.get(Col.length)
+            let tagId = try row.get(Col.tagId)
+            let blobPath = try row.get(Col.blobPath)
+            let rawIsTemporary = (try? row.get(Col.isTemporary)) ?? false
+            let isEncrypted = (try? row.get(Col.isEncrypted)) ?? DeckUserDefaults.securityModeEnabled
+            let receivedFromLAN = (try? row.get(Col.receivedFromLan)) ?? false
+            let isTemporary = tagId == DeckTag.importantTagId ? false : rawIsTemporary
+
+            let previewData = rawPreviewData.map { decryptData($0, force: isEncrypted) }
+            let data: Data
+            if let blobPath, let blobData = BlobStorage.shared.load(path: blobPath) {
+                data = blobData
+            } else if blobPath != nil, let previewData, !previewData.isEmpty {
+                // Preserve the previous export fallback: if a referenced blob is
+                // unavailable, the ClipboardItem path exported its lightweight
+                // inline preview instead of crashing the whole export.
+                data = previewData
+            } else {
+                data = decryptData(rawData, force: isEncrypted)
+            }
+
+            let appName = decryptString(rawAppName, force: isEncrypted)
+            let customTitle = rawCustomTitle.map { decryptString($0, force: isEncrypted) }
+            let sourceAnchor = SourceAnchor.fromJSON(rawSourceAnchor.map { decryptString($0, force: isEncrypted) })
+            let searchText = decryptString(rawSearchText, force: isEncrypted)
+
+            return ExportRow(
+                id: id,
+                uniqueId: uniqueId,
+                pasteboardType: type,
+                itemType: itemType,
+                data: data,
+                previewData: previewData,
+                timestamp: timestamp,
+                appPath: appPath,
+                appName: appName,
+                customTitle: customTitle,
+                sourceAnchor: sourceAnchor,
+                searchText: searchText,
+                contentLength: contentLength,
+                tagId: tagId,
+                isTemporary: isTemporary,
+                receivedFromLAN: receivedFromLAN,
+                blobPath: blobPath
+            )
+        } catch {
+            log.error("Failed to convert row for export: \(error)")
+            return nil
+        }
+    }
+
     func fetchAll(limit: Int = 10000, offset: Int = 0, loadFullData: Bool = false) -> [ClipboardItem] {
         let rows = withDB { () throws -> [Row] in
             guard let db = self.db, let table = self.table else { return [Row]() }
@@ -5138,6 +5310,78 @@ extension DeckSQLManager {
             let query = table.filter(Col.ts >= timestamp)
             return try db.scalar(query.count)
         } ?? 0
+    }
+
+    struct StatisticsSummaryRow: Sendable {
+        let total: Int
+        let today: Int
+        let week: Int
+    }
+
+    struct TimestampRange: Sendable {
+        let start: Int64
+        let end: Int64
+    }
+
+    /// Summary counters in one SQLite pass. This avoids serializing three
+    /// independent count queries through the same database queue.
+    func fetchStatisticsSummary(todayStart: Int64, weekStart: Int64) async -> StatisticsSummaryRow {
+        return await withDBAsync {
+            guard let db = self.db else { return StatisticsSummaryRow(total: 0, today: 0, week: 0) }
+
+            let sql = """
+            SELECT
+                COUNT(*) AS total_count,
+                COALESCE(SUM(CASE WHEN timestamp >= ? THEN 1 ELSE 0 END), 0) AS today_count,
+                COALESCE(SUM(CASE WHEN timestamp >= ? THEN 1 ELSE 0 END), 0) AS week_count
+            FROM ClipboardHistory
+            """
+
+            let stmt = try db.prepare(sql).bind(todayStart, weekStart)
+            guard let row = try stmt.failableNext() else {
+                return StatisticsSummaryRow(total: 0, today: 0, week: 0)
+            }
+
+            return StatisticsSummaryRow(
+                total: Int(self.bindingToInt64(row[0]) ?? 0),
+                today: Int(self.bindingToInt64(row[1]) ?? 0),
+                week: Int(self.bindingToInt64(row[2]) ?? 0)
+            )
+        } ?? StatisticsSummaryRow(total: 0, today: 0, week: 0)
+    }
+
+    /// Counts rows inside fixed timestamp ranges in one query. The statistics
+    /// page passes local-calendar day boundaries, so DST/local-day semantics are
+    /// preserved while avoiding fetching every timestamp into Swift.
+    func fetchTimestampRangeCounts(_ ranges: [TimestampRange]) async -> [Int] {
+        guard !ranges.isEmpty else { return [] }
+        guard ranges.count <= 31, ranges.allSatisfy({ $0.end > $0.start }) else {
+            return Array(repeating: 0, count: ranges.count)
+        }
+
+        return await withDBAsync {
+            guard let db = self.db else { return Array(repeating: 0, count: ranges.count) }
+
+            let selectClauses = ranges.enumerated().map { index, range in
+                "COALESCE(SUM(CASE WHEN timestamp >= \(range.start) AND timestamp < \(range.end) THEN 1 ELSE 0 END), 0) AS c\(index)"
+            }.joined(separator: ", ")
+            let minStart = ranges.map(\.start).min() ?? 0
+            let maxEnd = ranges.map(\.end).max() ?? minStart
+            let sql = """
+            SELECT \(selectClauses)
+            FROM ClipboardHistory
+            WHERE timestamp >= \(minStart) AND timestamp < \(maxEnd)
+            """
+
+            let stmt = try db.prepare(sql)
+            guard let row = try stmt.failableNext() else {
+                return Array(repeating: 0, count: ranges.count)
+            }
+
+            return ranges.indices.map { index in
+                Int(self.bindingToInt64(row[index]) ?? 0)
+            }
+        } ?? Array(repeating: 0, count: ranges.count)
     }
 
     /// Fetch timestamps since the given unix timestamp (seconds).
@@ -5411,7 +5655,8 @@ extension DeckSQLManager {
                 id: id,
                 uniqueId: resolvedUniqueId,
                 blobPath: blobPath,
-                dataIsFull: dataIsFull
+                dataIsFull: dataIsFull,
+                itemType: itemType
             )
 
             if !dataIsFull, blobPath == nil {
@@ -5443,6 +5688,11 @@ extension DeckSQLManager {
             await log.error("Database not initialized for encryption migration")
             return false
         }
+        guard let migrationKey = SecurityService.shared.getOrCreateEncryptionKey() else {
+            notifyEncryptionFailureIfNeeded()
+            await log.error("Encryption migration failed: encryption key unavailable")
+            return false
+        }
 
         await log.info("Starting encryption migration: encrypt=\(encrypt)")
 
@@ -5459,6 +5709,7 @@ extension DeckSQLManager {
                 let query = table
                     .select(Col.id, Col.data, Col.previewData, Col.searchText, Col.appName, Col.customTitle, Col.sourceAnchor, Col.isEncrypted)
                     .filter(Col.id > lastId)
+                    .filter(Col.isEncrypted != encrypt)
                     .order(Col.id.asc)
                     .limit(batchSize)
                 let rows = Array(try db.prepare(query))
@@ -5477,9 +5728,22 @@ extension DeckSQLManager {
 
             // 处理当前批次
             let batchSuccess = await withDBAsync {
-                guard let db = self.db, let table = self.table else { return false }
+                guard let db = self.db else { return false }
                 do {
                     try db.transaction {
+                        let updateStatement = try db.prepare("""
+                            UPDATE ClipboardHistory
+                            SET data = ?,
+                                preview_data = ?,
+                                search_text = ?,
+                                app_name = ?,
+                                custom_title = ?,
+                                source_anchor = ?,
+                                is_encrypted = ?
+                            WHERE id = ?
+                            """)
+                        let targetEncryptedValue = encrypt ? 1 : 0
+
                         for row in batch.rows {
                             let id = try row.get(Col.id)
                             let rawData = try row.get(Col.data)
@@ -5498,13 +5762,14 @@ extension DeckSQLManager {
                             let newSourceAnchor: String?
 
                             if encrypt {
-                                guard let encryptedData = self.encryptDataIfNeeded(rawData) else {
+                                guard !rawIsEncrypted else { continue }
+                                guard let encryptedData = self.encryptDataForMigration(rawData, using: migrationKey) else {
                                     self.notifyEncryptionFailureIfNeeded()
                                     throw NSError(domain: "DeckSQL", code: -10, userInfo: nil)
                                 }
                                 newData = encryptedData
                                 if let rawPreviewData = rawPreviewData {
-                                    guard let encryptedPreview = self.encryptDataIfNeeded(rawPreviewData) else {
+                                    guard let encryptedPreview = self.encryptDataForMigration(rawPreviewData, using: migrationKey) else {
                                         self.notifyEncryptionFailureIfNeeded()
                                         throw NSError(domain: "DeckSQL", code: -11, userInfo: nil)
                                     }
@@ -5512,18 +5777,18 @@ extension DeckSQLManager {
                                 } else {
                                     newPreviewData = nil
                                 }
-                                guard let encryptedSearch = self.encryptStringIfNeeded(rawSearchText) else {
+                                guard let encryptedSearch = self.encryptStringForMigration(rawSearchText, using: migrationKey) else {
                                     self.notifyEncryptionFailureIfNeeded()
                                     throw NSError(domain: "DeckSQL", code: -12, userInfo: nil)
                                 }
                                 newSearchText = encryptedSearch
-                                guard let encryptedAppName = self.encryptStringIfNeeded(rawAppName) else {
+                                guard let encryptedAppName = self.encryptStringForMigration(rawAppName, using: migrationKey) else {
                                     self.notifyEncryptionFailureIfNeeded()
                                     throw NSError(domain: "DeckSQL", code: -13, userInfo: nil)
                                 }
                                 newAppName = encryptedAppName
                                 if let rawCustomTitle {
-                                    guard let encryptedTitle = self.encryptStringIfNeeded(rawCustomTitle) else {
+                                    guard let encryptedTitle = self.encryptStringForMigration(rawCustomTitle, using: migrationKey) else {
                                         self.notifyEncryptionFailureIfNeeded()
                                         throw NSError(domain: "DeckSQL", code: -15, userInfo: nil)
                                     }
@@ -5532,7 +5797,7 @@ extension DeckSQLManager {
                                     newCustomTitle = nil
                                 }
                                 if let rawSourceAnchor {
-                                    guard let encryptedAnchor = self.encryptStringIfNeeded(rawSourceAnchor) else {
+                                    guard let encryptedAnchor = self.encryptStringForMigration(rawSourceAnchor, using: migrationKey) else {
                                         self.notifyEncryptionFailureIfNeeded()
                                         throw NSError(domain: "DeckSQL", code: -14, userInfo: nil)
                                     }
@@ -5541,46 +5806,33 @@ extension DeckSQLManager {
                                     newSourceAnchor = nil
                                 }
                             } else {
-                                let decryptedData = SecurityService.shared.decryptSilently(rawData)
-                                if rawIsEncrypted && decryptedData == nil && !rawData.isEmpty {
+                                guard rawIsEncrypted else { continue }
+                                guard let decryptedData = self.decryptDataForMigration(rawData, using: migrationKey) else {
                                     throw NSError(domain: "DeckSQL", code: -16, userInfo: nil)
                                 }
-                                newData = decryptedData ?? rawData
+                                newData = decryptedData
 
                                 if let rawPreviewData {
-                                    let decryptedPreview = SecurityService.shared.decryptSilently(rawPreviewData)
-                                    if rawIsEncrypted && decryptedPreview == nil && !rawPreviewData.isEmpty {
+                                    guard let decryptedPreview = self.decryptDataForMigration(rawPreviewData, using: migrationKey) else {
                                         throw NSError(domain: "DeckSQL", code: -17, userInfo: nil)
                                     }
-                                    newPreviewData = decryptedPreview ?? rawPreviewData
+                                    newPreviewData = decryptedPreview
                                 } else {
                                     newPreviewData = nil
                                 }
 
-                                let maybeDecryptedSearch = self.decryptStringSilently(rawSearchText)
-                                if rawIsEncrypted,
-                                   maybeDecryptedSearch == rawSearchText,
-                                   !rawSearchText.isEmpty,
-                                   Data(base64Encoded: rawSearchText) != nil {
+                                guard let maybeDecryptedSearch = self.decryptStringForMigration(rawSearchText, using: migrationKey) else {
                                     throw NSError(domain: "DeckSQL", code: -18, userInfo: nil)
                                 }
                                 newSearchText = maybeDecryptedSearch
 
-                                let maybeDecryptedAppName = self.decryptStringSilently(rawAppName)
-                                if rawIsEncrypted,
-                                   maybeDecryptedAppName == rawAppName,
-                                   !rawAppName.isEmpty,
-                                   Data(base64Encoded: rawAppName) != nil {
+                                guard let maybeDecryptedAppName = self.decryptStringForMigration(rawAppName, using: migrationKey) else {
                                     throw NSError(domain: "DeckSQL", code: -19, userInfo: nil)
                                 }
                                 newAppName = maybeDecryptedAppName
 
                                 if let rawCustomTitle {
-                                    let maybeDecryptedTitle = self.decryptStringSilently(rawCustomTitle)
-                                    if rawIsEncrypted,
-                                       maybeDecryptedTitle == rawCustomTitle,
-                                       !rawCustomTitle.isEmpty,
-                                       Data(base64Encoded: rawCustomTitle) != nil {
+                                    guard let maybeDecryptedTitle = self.decryptStringForMigration(rawCustomTitle, using: migrationKey) else {
                                         throw NSError(domain: "DeckSQL", code: -20, userInfo: nil)
                                     }
                                     newCustomTitle = maybeDecryptedTitle
@@ -5589,11 +5841,7 @@ extension DeckSQLManager {
                                 }
 
                                 if let rawSourceAnchor {
-                                    let maybeDecryptedAnchor = self.decryptStringSilently(rawSourceAnchor)
-                                    if rawIsEncrypted,
-                                       maybeDecryptedAnchor == rawSourceAnchor,
-                                       !rawSourceAnchor.isEmpty,
-                                       Data(base64Encoded: rawSourceAnchor) != nil {
+                                    guard let maybeDecryptedAnchor = self.decryptStringForMigration(rawSourceAnchor, using: migrationKey) else {
                                         throw NSError(domain: "DeckSQL", code: -21, userInfo: nil)
                                     }
                                     newSourceAnchor = maybeDecryptedAnchor
@@ -5602,17 +5850,18 @@ extension DeckSQLManager {
                                 }
                             }
 
-                            let query = table.filter(Col.id == id)
-                            let update = query.update(
-                                Col.data <- newData,
-                                Col.previewData <- newPreviewData,
-                                Col.searchText <- newSearchText,
-                                Col.appName <- newAppName,
-                                Col.customTitle <- newCustomTitle,
-                                Col.sourceAnchor <- newSourceAnchor,
-                                Col.isEncrypted <- encrypt
-                            )
-                            try db.run(update)
+                            let dataBinding: Binding? = SQLite.Blob(bytes: [UInt8](newData))
+                            let previewBinding: Binding? = newPreviewData.map { SQLite.Blob(bytes: [UInt8]($0)) }
+                            try updateStatement.run([
+                                dataBinding,
+                                previewBinding,
+                                newSearchText,
+                                newAppName,
+                                newCustomTitle,
+                                newSourceAnchor,
+                                targetEncryptedValue,
+                                id
+                            ])
                         }
                     }
                     return true

@@ -813,7 +813,8 @@ final class ClipboardItem: Identifiable, Equatable {
         uniqueId: String? = nil,
         blobPath: String? = nil,
         dataIsFull: Bool = true,
-        dataLoader: (() -> Data?)? = nil
+        dataLoader: (() -> Data?)? = nil,
+        itemType: ClipItemType? = nil
     ) {
         self.pasteboardType = pasteboardType
         self.inlineData = data
@@ -840,7 +841,7 @@ final class ClipboardItem: Identifiable, Equatable {
             }
         }
 
-        self.itemType = detectItemType()
+        self.itemType = itemType ?? detectItemType()
     }
 
     var data: Data {
@@ -1427,7 +1428,8 @@ final class ClipboardItem: Identifiable, Equatable {
             kCGImageSourceThumbnailMaxPixelSize: Self.maxThumbnailSize
         ]
         
-        if let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        if let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions),
            let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) {
             return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         }
@@ -1511,7 +1513,8 @@ final class ClipboardItem: Identifiable, Equatable {
             kCGImageSourceThumbnailMaxPixelSize: Self.maxThumbnailSize
         ]
 
-        guard let source = CGImageSourceCreateWithData(payload as CFData, nil),
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(payload as CFData, sourceOptions),
               let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
             return nil
         }
@@ -1546,7 +1549,8 @@ final class ClipboardItem: Identifiable, Equatable {
             kCGImageSourceThumbnailMaxPixelSize: maxSize
         ]
 
-        guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(imageData as CFData, sourceOptions),
               let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
             return nil
         }

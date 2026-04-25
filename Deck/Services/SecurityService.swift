@@ -117,6 +117,26 @@ final class SecurityService {
     nonisolated static func backgroundEncryptSilently(_ data: Data) -> Data? {
         BackgroundCrypto.encryptSilently(data)
     }
+
+    nonisolated static func encryptWithKey(_ data: Data, using key: SymmetricKey) -> Data? {
+        do {
+            let sealedBox = try AES.GCM.seal(data, using: key)
+            return sealedBox.combined
+        } catch {
+            log.error("Encryption failed: \(error)")
+            return nil
+        }
+    }
+
+    nonisolated static func decryptWithKey(_ encryptedData: Data, using key: SymmetricKey) -> Data? {
+        do {
+            let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
+            return try AES.GCM.open(sealedBox, using: key)
+        } catch {
+            log.error("Decryption failed: \(error)")
+            return nil
+        }
+    }
     
     // MARK: - Touch ID Authentication
     
@@ -393,23 +413,11 @@ final class SecurityService {
         }
     }
 
-    func encrypt(_ data: Data, using key: SymmetricKey) -> Data? {
-        do {
-            let sealedBox = try AES.GCM.seal(data, using: key)
-            return sealedBox.combined
-        } catch {
-            log.error("Encryption failed: \(error)")
-            return nil
-        }
+    nonisolated func encrypt(_ data: Data, using key: SymmetricKey) -> Data? {
+        Self.encryptWithKey(data, using: key)
     }
 
-    func decrypt(_ encryptedData: Data, using key: SymmetricKey) -> Data? {
-        do {
-            let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
-            return try AES.GCM.open(sealedBox, using: key)
-        } catch {
-            log.error("Decryption failed: \(error)")
-            return nil
-        }
+    nonisolated func decrypt(_ encryptedData: Data, using key: SymmetricKey) -> Data? {
+        Self.decryptWithKey(encryptedData, using: key)
     }
 }

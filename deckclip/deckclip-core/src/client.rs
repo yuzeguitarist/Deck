@@ -12,6 +12,10 @@ use crate::config::Config;
 use crate::error::DeckError;
 use crate::transport::Transport;
 
+const CLIPBOARD_QUERY_TIMEOUT_MS: u64 = 10_000;
+const SCRIPT_PLUGIN_QUERY_TIMEOUT_MS: u64 = 10_000;
+const SCRIPT_PLUGIN_RUN_TIMEOUT_MS: u64 = 60_000;
+
 /// High-level client for communicating with the Deck App.
 pub struct DeckClient {
     config: Config,
@@ -134,11 +138,22 @@ impl DeckClient {
 
         let response: Response = if effective_timeout > 0 {
             let duration = Duration::from_millis(effective_timeout);
-            timeout(duration, transport.recv())
-                .await
-                .map_err(|_| DeckError::Timeout)??
+            let result = {
+                let transport = self.transport.as_mut().ok_or(DeckError::NotRunning)?;
+                timeout(duration, transport.recv()).await
+            };
+            match result {
+                Ok(response) => response?,
+                Err(_) => {
+                    self.transport = None;
+                    self.session_token = None;
+                    self.session_expires_at = 0;
+                    return Err(DeckError::Timeout);
+                }
+            }
         } else {
             // No timeout — wait indefinitely (for AI/long operations)
+            let transport = self.transport.as_mut().ok_or(DeckError::NotRunning)?;
             transport.recv().await?
         };
 
@@ -171,6 +186,94 @@ impl DeckClient {
     pub async fn read(&mut self) -> Result<Response, DeckError> {
         self.execute(deckclip_protocol::cmd::READ, json!({}), 0)
             .await
+    }
+
+    pub async fn clipboard_latest(&mut self) -> Result<Response, DeckError> {
+        self.execute(
+            deckclip_protocol::cmd::CLIPBOARD_LATEST,
+            json!({}),
+            CLIPBOARD_QUERY_TIMEOUT_MS,
+        )
+        .await
+    }
+
+    pub async fn clipboard_list(&mut self, limit: Option<u32>) -> Result<Response, DeckError> {
+        let mut args = json!({});
+        if let Some(limit) = limit {
+            args["limit"] = json!(limit);
+        }
+        self.execute(
+            deckclip_protocol::cmd::CLIPBOARD_LIST,
+            args,
+            CLIPBOARD_QUERY_TIMEOUT_MS,
+        )
+        .await
+    }
+
+    pub async fn clipboard_search(
+        &mut self,
+        query: &str,
+        mode: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Response, DeckError> {
+        let mut args = json!({ "query": query });
+        if let Some(mode) = mode {
+            args["mode"] = json!(mode);
+        }
+        if let Some(limit) = limit {
+            args["limit"] = json!(limit);
+        }
+        self.execute(
+            deckclip_protocol::cmd::CLIPBOARD_SEARCH,
+            args,
+            CLIPBOARD_QUERY_TIMEOUT_MS,
+        )
+        .await
+    }
+
+    pub async fn script_plugins_list(
+        &mut self,
+        query: Option<&str>,
+        limit: Option<u32>,
+    ) -> Result<Response, DeckError> {
+        let mut args = json!({});
+        if let Some(query) = query {
+            args["query"] = json!(query);
+        }
+        if let Some(limit) = limit {
+            args["limit"] = json!(limit);
+        }
+        self.execute(
+            deckclip_protocol::cmd::SCRIPT_PLUGINS_LIST,
+            args,
+            SCRIPT_PLUGIN_QUERY_TIMEOUT_MS,
+        )
+        .await
+    }
+
+    pub async fn script_plugin_read(&mut self, plugin_id: &str) -> Result<Response, DeckError> {
+        self.execute(
+            deckclip_protocol::cmd::SCRIPT_PLUGIN_READ,
+            json!({ "plugin_id": plugin_id }),
+            SCRIPT_PLUGIN_QUERY_TIMEOUT_MS,
+        )
+        .await
+    }
+
+    pub async fn script_transform_run(
+        &mut self,
+        plugin_id: &str,
+        input: &str,
+    ) -> Result<Response, DeckError> {
+        self.execute(
+            deckclip_protocol::cmd::SCRIPT_TRANSFORM_RUN,
+            json!({
+                "plugin_id": plugin_id,
+                "input": input,
+            }),
+            SCRIPT_PLUGIN_RUN_TIMEOUT_MS,
+        )
+        .await
     }
 
     pub async fn write(

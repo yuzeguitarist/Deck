@@ -260,36 +260,31 @@ final class DataExportService {
         var cursorId: Int64?
 
         while true {
-            let batch = await DeckSQLManager.shared.fetchAllBeforeCursor(
+            let batch = await DeckSQLManager.shared.fetchExportRowsBeforeCursor(
                 limit: batchSize,
                 beforeTimestamp: cursorTimestamp,
-                beforeId: cursorId,
-                loadFullData: true
+                beforeId: cursorId
             )
             if batch.isEmpty { break }
 
-            for item in batch {
-                // loadFullData=true 时通常已经有完整数据，避免重复读 blob。
-                let fullData = item.hasFullData ? item.data : (item.resolvedData() ?? item.data)
-                let isLargeBlob = item.blobPath != nil
-
+            for row in batch {
                 let exportItem = ExportItem(
-                    uniqueId: item.uniqueId,
-                    type: item.pasteboardType.rawValue,
-                    itemType: item.itemType.rawValue,
-                    data: fullData,
-                    previewData: item.previewData,
-                    timestamp: item.timestamp,
-                    appPath: item.appPath,
-                    appName: item.appName,
-                    customTitle: item.customTitle,
-                    sourceAnchor: item.sourceAnchor,
-                    searchText: item.searchText,
-                    contentLength: item.contentLength,
-                    tagId: item.tagId,
-                    isTemporary: item.isTemporary,
-                    receivedFromLAN: item.receivedFromLAN,
-                    isLargeBlob: isLargeBlob
+                    uniqueId: row.uniqueId,
+                    type: row.pasteboardType,
+                    itemType: row.itemType,
+                    data: row.data,
+                    previewData: row.previewData,
+                    timestamp: row.timestamp,
+                    appPath: row.appPath,
+                    appName: row.appName,
+                    customTitle: row.customTitle,
+                    sourceAnchor: row.sourceAnchor,
+                    searchText: row.searchText,
+                    contentLength: row.contentLength,
+                    tagId: row.tagId,
+                    isTemporary: row.isTemporary,
+                    receivedFromLAN: row.receivedFromLAN,
+                    isLargeBlob: row.blobPath != nil
                 )
                 let encodedData = try encoder.encode(exportItem)
                 let data = Self.sanitizeEncodedJSONForIDE(encodedData)
@@ -307,9 +302,9 @@ final class DataExportService {
 
             if batch.count < batchSize { break }
 
-            guard let last = batch.last, let lastId = last.id else { break }
+            guard let last = batch.last else { break }
             cursorTimestamp = last.timestamp
-            cursorId = lastId
+            cursorId = last.id
         }
 
         if !writeBuffer.isEmpty {

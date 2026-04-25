@@ -81,6 +81,12 @@ pub struct EventFrame {
 pub mod cmd {
     pub const HEALTH: &str = "health";
     pub const READ: &str = "read";
+    pub const CLIPBOARD_LATEST: &str = "clipboard.latest";
+    pub const CLIPBOARD_LIST: &str = "clipboard.list";
+    pub const CLIPBOARD_SEARCH: &str = "clipboard.search";
+    pub const SCRIPT_PLUGINS_LIST: &str = "script.plugins.list";
+    pub const SCRIPT_PLUGIN_READ: &str = "script.plugin.read";
+    pub const SCRIPT_TRANSFORM_RUN: &str = "script.transform.run";
     pub const WRITE: &str = "write";
     pub const PANEL_TOGGLE: &str = "panel.toggle";
     pub const PASTE: &str = "paste";

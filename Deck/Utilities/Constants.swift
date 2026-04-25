@@ -259,11 +259,35 @@ enum DeckSupportLinks {
         URL(string: supportDevelopmentPageBaseURLString())!
     }
 
+    static var localizedSurveyURL: URL {
+        URL(string: surveyPageBaseURLString())!
+    }
+
     private static func supportDevelopmentPageBaseURLString() -> String {
-        let candidates = Bundle.main.preferredLocalizations + Locale.preferredLanguages
-        for candidate in candidates where candidate.lowercased().hasPrefix("zh") {
+        if prefersChineseLocalization() {
             return "https://deckclip.app/zh-cn/support-development"
         }
         return "https://deckclip.app/support-development"
+    }
+
+    private static func surveyPageBaseURLString() -> String {
+        if prefersChineseLocalization() {
+            return "https://deckclip.app/zh-cn/survey"
+        }
+        return "https://deckclip.app/survey"
+    }
+
+    private static func prefersChineseLocalization() -> Bool {
+        let bundleCandidates = Bundle.main.preferredLocalizations.filter { !$0.isEmpty && $0.lowercased() != "base" }
+        if let preferred = bundleCandidates.first {
+            return preferred.lowercased().hasPrefix("zh")
+        }
+
+        let localeCandidates = Locale.preferredLanguages.filter { !$0.isEmpty }
+        if let preferred = localeCandidates.first {
+            return preferred.lowercased().hasPrefix("zh")
+        }
+
+        return Locale.current.identifier.lowercased().hasPrefix("zh")
     }
 }

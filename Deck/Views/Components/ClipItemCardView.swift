@@ -73,6 +73,63 @@ private enum ClipItemCardCache {
     }()
 }
 
+private struct ImageDecodeResult: @unchecked Sendable {
+    let image: CGImage
+    let pixelSize: CGSize?
+}
+
+private actor ClipItemThumbnailDecodeGate {
+    static let shared = ClipItemThumbnailDecodeGate()
+
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+
+    private let limit: Int
+    private var available: Int
+    private var waiters: [Waiter] = []
+
+    private init() {
+        let cores = ProcessInfo.processInfo.activeProcessorCount
+        let computedLimit = max(1, min(2, max(1, cores / 2)))
+        limit = computedLimit
+        available = computedLimit
+    }
+
+    func acquire() async -> Bool {
+        if Task.isCancelled { return false }
+        if available > 0 {
+            available -= 1
+            return true
+        }
+
+        let id = UUID()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                waiters.append(Waiter(id: id, continuation: continuation))
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id) }
+        }
+    }
+
+    func release() {
+        if !waiters.isEmpty {
+            let waiter = waiters.removeFirst()
+            waiter.continuation.resume(returning: true)
+            return
+        }
+        available = min(available + 1, limit)
+    }
+
+    private func cancelWaiter(_ id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = waiters.remove(at: index)
+        waiter.continuation.resume(returning: false)
+    }
+}
+
 final class TitleEditorTextField: NoSelectTextField {
     override func becomeFirstResponder() -> Bool {
         let result = super.becomeFirstResponder()
@@ -248,6 +305,8 @@ struct ClipItemCardView: View {
     // 缩略图（后台解码/降采样，避免滚动时主线程卡顿）
     @State private var imageThumbnail: CGImage?
     @State private var isImageThumbnailLoading: Bool = false
+    @State private var imageDimensionText: String?
+    @State private var imageStateItemID: String?
 
     // 图片文件大小（异步计算）
     @State private var imageFileSizeText: String?
@@ -902,7 +961,7 @@ struct ClipItemCardView: View {
             }
             
             HStack(spacing: Const.space4) {
-                Text(item.displayDescription())
+                Text(imageDimensionDisplayText)
                     .font(.system(size: 10))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -916,6 +975,10 @@ struct ClipItemCardView: View {
         }
         .padding(.horizontal, Const.space8)
         .padding(.bottom, Const.space4)
+    }
+
+    private var imageDimensionDisplayText: String {
+        imageDimensionText ?? NSLocalizedString("图片", comment: "Clipboard item description: image")
     }
 
     private var imageFileSizeDisplayText: String {
@@ -1095,6 +1158,12 @@ struct ClipItemCardView: View {
 
     @MainActor
     private func resetImageFileSizeState() {
+        if imageStateItemID != item.uniqueId {
+            imageStateItemID = item.uniqueId
+            imageThumbnail = nil
+            imageDimensionText = nil
+            isImageThumbnailLoading = false
+        }
         imageFileSizeText = nil
         isImageFileSizeLoading = false
     }
@@ -1203,17 +1272,19 @@ struct ClipItemCardView: View {
                 isImageThumbnailLoading = false
                 return
             }
-            let fileThumb = await Task.detached(priority: .userInitiated) {
-                Self.downsampledCGImage(from: fileURL, maxPixelSize: maxPixel)
-            }.value
+            let fileResult = await decodeThumbnail {
+                Self.downsampledImage(from: fileURL, maxPixelSize: maxPixel)
+            }
 
-            if let fileThumb {
+            if let fileResult {
+                let fileThumb = fileResult.image
                 ClipItemCardCache.thumbnailCache.setObject(
                     fileThumb,
                     forKey: cacheKey,
                     cost: fileThumb.bytesPerRow * fileThumb.height
                 )
                 imageThumbnail = fileThumb
+                imageDimensionText = Self.formatPixelSize(fileResult.pixelSize)
                 isImageThumbnailLoading = false
                 return
             }
@@ -1223,35 +1294,53 @@ struct ClipItemCardView: View {
         let previewData = item.previewData
         let inlineData = item.data
 
-        let dataToDecode: Data? = {
-            if let previewData, !previewData.isEmpty { return previewData }
+        let dataToDecode: (data: Data, isOriginal: Bool)? = {
+            if let previewData, !previewData.isEmpty { return (previewData, false) }
             if item.pasteboardType == .fileURL { return nil }
-            if !inlineData.isEmpty { return inlineData }
+            if !inlineData.isEmpty { return (inlineData, item.hasFullData) }
             return nil
         }()
 
         // Fallback: resolvedData() is ClipboardItem-isolated; keep the actor boundary explicit.
-        let finalData: Data? = dataToDecode ?? item.resolvedData()
+        let finalData: (data: Data, isOriginal: Bool)? = dataToDecode ?? item.resolvedData().map { ($0, true) }
 
-        guard let finalData, !finalData.isEmpty else {
+        guard let finalData, !finalData.data.isEmpty else {
             isImageThumbnailLoading = false
             return
         }
 
-        let cgImage = await Task.detached(priority: .userInitiated) {
-            Self.downsampledCGImage(from: finalData, maxPixelSize: maxPixel)
-        }.value
+        let decodeResult = await decodeThumbnail {
+            Self.downsampledImage(from: finalData.data, maxPixelSize: maxPixel)
+        }
 
         isImageThumbnailLoading = false
 
-        if let cgImage {
+        if let decodeResult {
+            let cgImage = decodeResult.image
             ClipItemCardCache.thumbnailCache.setObject(
                 cgImage,
                 forKey: cacheKey,
                 cost: cgImage.bytesPerRow * cgImage.height
             )
+            imageThumbnail = cgImage
+            if finalData.isOriginal {
+                imageDimensionText = Self.formatPixelSize(decodeResult.pixelSize)
+            }
         }
-        imageThumbnail = cgImage
+    }
+
+    @MainActor
+    private func decodeThumbnail(_ operation: @escaping @Sendable () -> ImageDecodeResult?) async -> ImageDecodeResult? {
+        let acquired = await ClipItemThumbnailDecodeGate.shared.acquire()
+        guard acquired else { return nil }
+        defer { Task { await ClipItemThumbnailDecodeGate.shared.release() } }
+
+        let task = Task.detached(priority: .utility, operation: operation)
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     @MainActor
@@ -1452,35 +1541,61 @@ struct ClipItemCardView: View {
         return checked >= 128
     }
 
-    nonisolated fileprivate static func downsampledCGImage(from data: Data, maxPixelSize: Int) -> CGImage? {
+    nonisolated private static func formatPixelSize(_ size: CGSize?) -> String? {
+        guard let size, size.width > 0, size.height > 0 else { return nil }
+        return "\(Int(size.width.rounded())) × \(Int(size.height.rounded()))"
+    }
+
+    nonisolated private static func imagePixelSize(from source: CGImageSource) -> CGSize? {
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? NSNumber,
+              let height = properties[kCGImagePropertyPixelHeight] as? NSNumber else {
+            return nil
+        }
+        return CGSize(width: CGFloat(truncating: width), height: CGFloat(truncating: height))
+    }
+
+    nonisolated private static func downsampledImage(from data: Data, maxPixelSize: Int) -> ImageDecodeResult? {
         let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions) else { return nil }
+        let pixelSize = imagePixelSize(from: source)
 
         let thumbnailOptions = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceShouldCacheImmediately: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+            kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixelSize)
         ] as CFDictionary
 
-        return CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions)
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else { return nil }
+        return ImageDecodeResult(image: image, pixelSize: pixelSize)
     }
 
-    nonisolated fileprivate static func downsampledCGImage(from url: URL, maxPixelSize: Int) -> CGImage? {
+    nonisolated private static func downsampledImage(from url: URL, maxPixelSize: Int) -> ImageDecodeResult? {
         if url.isFileURL, !FileManager.default.fileExists(atPath: url.path) {
             return nil
         }
         let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions) else { return nil }
+        let pixelSize = imagePixelSize(from: source)
 
         let thumbnailOptions = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceShouldCacheImmediately: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize
+            kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixelSize)
         ] as CFDictionary
 
-        return CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions)
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else { return nil }
+        return ImageDecodeResult(image: image, pixelSize: pixelSize)
+    }
+
+    nonisolated fileprivate static func downsampledCGImage(from data: Data, maxPixelSize: Int) -> CGImage? {
+        downsampledImage(from: data, maxPixelSize: maxPixelSize)?.image
+    }
+
+    nonisolated fileprivate static func downsampledCGImage(from url: URL, maxPixelSize: Int) -> CGImage? {
+        downsampledImage(from: url, maxPixelSize: maxPixelSize)?.image
     }
 
     private func primaryImageFileURL() -> URL? {
