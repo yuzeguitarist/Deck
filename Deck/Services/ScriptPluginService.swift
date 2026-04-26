@@ -276,7 +276,7 @@ nonisolated final class ScriptPluginService: @unchecked Sendable {
         }
     }
 
-    private final class FileSystemWatcher {
+    private nonisolated final class FileSystemWatcher {
         private var source: DispatchSourceFileSystemObject?
 
         init?(
@@ -293,14 +293,21 @@ nonisolated final class ScriptPluginService: @unchecked Sendable {
                 eventMask: eventMask,
                 queue: queue
             )
-            source.setEventHandler { [path] in
-                onChange(path)
-            }
-            source.setCancelHandler {
-                close(fileDescriptor)
-            }
+            source.setEventHandler(handler: Self.makeEventHandler(path: path, onChange: onChange))
+            source.setCancelHandler(handler: Self.makeCancelHandler(fileDescriptor: fileDescriptor))
             source.resume()
             self.source = source
+        }
+
+        private static func makeEventHandler(
+            path: String,
+            onChange: @escaping @Sendable (String) -> Void
+        ) -> @Sendable () -> Void {
+            { onChange(path) }
+        }
+
+        private static func makeCancelHandler(fileDescriptor: Int32) -> @Sendable () -> Void {
+            { close(fileDescriptor) }
         }
 
         func cancel() {

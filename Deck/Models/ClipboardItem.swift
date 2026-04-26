@@ -1561,7 +1561,7 @@ final class ClipboardItem: Identifiable, Equatable {
     }
 
     /// 异步生成预览缩略图数据
-    static func generatePreviewThumbnailDataAsync(from imageData: Data, maxSize: CGFloat = 200) async -> Data? {
+    nonisolated static func generatePreviewThumbnailDataAsync(from imageData: Data, maxSize: CGFloat = 200) async -> Data? {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
                 let result = generatePreviewThumbnailData(from: imageData, maxSize: maxSize)
@@ -1863,45 +1863,19 @@ extension ClipboardItem {
             }
         case .richText:
             let representationData = resolvedData()
-            provider.registerDataRepresentation(forTypeIdentifier: pasteboardType.rawValue, visibility: .all) { completion in
-                let progress = Progress(totalUnitCount: 1)
-                DispatchQueue.global(qos: .userInitiated).async {
-                    guard !progress.isCancelled else {
-                        completion(nil, nil)
-                        return
-                    }
-
-                    guard !progress.isCancelled else {
-                        completion(nil, nil)
-                        return
-                    }
-
-                    completion(representationData, nil)
-                    progress.completedUnitCount = 1
-                }
-                return progress
-            }
+            provider.registerDataRepresentation(
+                forTypeIdentifier: pasteboardType.rawValue,
+                visibility: .all,
+                loadHandler: Self.makeDataRepresentationHandler(data: representationData)
+            )
         case .image:
             let imageType = imagePasteboardType
             let representationData = resolvedData()
-            provider.registerDataRepresentation(forTypeIdentifier: imageType.rawValue, visibility: .all) { completion in
-                let progress = Progress(totalUnitCount: 1)
-                DispatchQueue.global(qos: .userInitiated).async {
-                    guard !progress.isCancelled else {
-                        completion(nil, nil)
-                        return
-                    }
-
-                    guard !progress.isCancelled else {
-                        completion(nil, nil)
-                        return
-                    }
-
-                    completion(representationData, nil)
-                    progress.completedUnitCount = 1
-                }
-                return progress
-            }
+            provider.registerDataRepresentation(
+                forTypeIdentifier: imageType.rawValue,
+                visibility: .all,
+                loadHandler: Self.makeDataRepresentationHandler(data: representationData)
+            )
             if pasteboardType == .fileURL, let path = primaryFilePath {
                 provider.suggestedName = URL(fileURLWithPath: path).lastPathComponent
             } else {
@@ -1913,17 +1887,12 @@ extension ClipboardItem {
                     let path = Self.normalizeFilePath(rawPath)
                     let fileURL = URL(fileURLWithPath: path)
                     let typeId = UTType(filenameExtension: fileURL.pathExtension)?.identifier ?? UTType.data.identifier
-                    provider.registerFileRepresentation(forTypeIdentifier: typeId, fileOptions: [], visibility: .all) { completion in
-                        DispatchQueue.global(qos: .userInitiated).async {
-                            if FileManager.default.fileExists(atPath: path) {
-                                completion(fileURL, true, nil)
-                            } else {
-                                let error = NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoSuchFileError)
-                                completion(nil, false, error)
-                            }
-                        }
-                        return nil
-                    }
+                    provider.registerFileRepresentation(
+                        forTypeIdentifier: typeId,
+                        fileOptions: [],
+                        visibility: .all,
+                        loadHandler: Self.makeFileRepresentationHandler(path: path, fileURL: fileURL)
+                    )
                 }
                 if paths.count == 1 {
                     let filePath = Self.normalizeFilePath(paths[0])
@@ -1940,5 +1909,43 @@ extension ClipboardItem {
         }
         
         return provider
+    }
+
+    private nonisolated static func makeDataRepresentationHandler(
+        data: Data?
+    ) -> @Sendable (@escaping @Sendable (Data?, Error?) -> Void) -> Progress? {
+        { completion in
+            let progress = Progress(totalUnitCount: 1)
+            let progressBox = UncheckedSendable(progress)
+            let completionBox = UncheckedSendable(completion)
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard !progressBox.value.isCancelled else {
+                    completionBox.value(nil, nil)
+                    return
+                }
+
+                completionBox.value(data, nil)
+                progressBox.value.completedUnitCount = 1
+            }
+            return progress
+        }
+    }
+
+    private nonisolated static func makeFileRepresentationHandler(
+        path: String,
+        fileURL: URL
+    ) -> @Sendable (@escaping @Sendable (URL?, Bool, Error?) -> Void) -> Progress? {
+        { completion in
+            let completionBox = UncheckedSendable(completion)
+            DispatchQueue.global(qos: .userInitiated).async {
+                if FileManager.default.fileExists(atPath: path) {
+                    completionBox.value(fileURL, true, nil)
+                } else {
+                    let error = NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoSuchFileError)
+                    completionBox.value(nil, false, error)
+                }
+            }
+            return nil
+        }
     }
 }

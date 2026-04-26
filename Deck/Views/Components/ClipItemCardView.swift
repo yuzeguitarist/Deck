@@ -54,9 +54,9 @@ struct QuickPasteBadgeView: View {
 private enum ClipItemCardCache {
     static let thumbnailCache: NSCache<NSString, CGImage> = {
         let cache = NSCache<NSString, CGImage>()
-        cache.countLimit = 256
+        cache.countLimit = 128
         // Rough memory cap (bytes) for thumbnails to avoid unbounded growth.
-        cache.totalCostLimit = 64 * 1024 * 1024
+        cache.totalCostLimit = 32 * 1024 * 1024
         return cache
     }()
 
@@ -356,10 +356,6 @@ struct ClipItemCardView: View {
         min(Const.cardAppIconSize, max(Const.appIconSize, effectiveHeaderHeight - 12))
     }
 
-    private var dragPreviewSelectionOutset: CGFloat {
-        isSelected ? 2 : 0
-    }
-
     private var textPrefixLength: Int {
         Int(400 * cardScale)
     }
@@ -402,8 +398,6 @@ struct ClipItemCardView: View {
             .id(contextMenuID)
             .onDrag {
                 createDragItemProvider()
-            } preview: {
-                dragPreview
             }
             .onChange(of: item.searchText) { _, _ in
                 contextMenuID = UUID()
@@ -438,12 +432,11 @@ struct ClipItemCardView: View {
         .clipShape(RoundedRectangle(cornerRadius: Const.radius, style: .continuous))
         .overlay {
             if isSelected {
-                RoundedRectangle(cornerRadius: Const.radius + 2, style: .continuous)
+                RoundedRectangle(cornerRadius: Const.radius, style: .continuous)
                     .strokeBorder(
                         Const.selectionBorderColor,
                         lineWidth: 2
                     )
-                    .padding(-2)
             }
         }
         .overlay(alignment: .bottomTrailing) {
@@ -454,13 +447,6 @@ struct ClipItemCardView: View {
             }
         }
         .zIndex(quickPasteNumber == nil ? 0 : 1)
-    }
-
-    private var dragPreview: some View {
-        cardBody
-            .padding(dragPreviewSelectionOutset)
-            .fixedSize()
-            .compositingGroup()
     }
 
     // MARK: - Virtual File Drag
@@ -881,13 +867,17 @@ struct ClipItemCardView: View {
             }
         }
         .task(id: smartTaskID) {
-            // 异步加载智能分析
+            smartState = SmartContentState()
             smartState.isLoading = true
+            defer { smartState.isLoading = false }
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            guard !Task.isCancelled else { return }
+            // 异步加载智能分析
             let cached = await SmartContentCache.shared.analysis(for: item)
+            guard !Task.isCancelled else { return }
             smartState.analysis = cached.analysis
             smartState.isMarkdown = cached.isMarkdown
             smartState.calculationResult = cached.calculationResult
-            smartState.isLoading = false
         }
     }
 
@@ -1145,8 +1135,8 @@ struct ClipItemCardView: View {
         }
         switch item.itemType {
         case .image:
-            await loadImageFileSizeIfNeeded()
             await loadImageThumbnailIfNeeded()
+            await loadImageFileSizeIfNeeded()
         case .text, .code:
             await loadBase64ThumbnailIfNeeded()
         default:
@@ -1369,7 +1359,7 @@ struct ClipItemCardView: View {
         isBase64ThumbnailLoading = true
         let maxPixel = thumbnailMaxPixelSize
 
-        let dataTask = Task.detached(priority: .userInitiated) {
+        let dataTask = Task.detached(priority: .utility) {
             Self.extractBase64ImageData(from: text, contentLength: length, maxBytes: maxBytes)
         }
         let data = await withTaskCancellationHandler(operation: {
@@ -1388,7 +1378,7 @@ struct ClipItemCardView: View {
             return
         }
 
-        let cgImageTask = Task.detached(priority: .userInitiated) {
+        let cgImageTask = Task.detached(priority: .utility) {
             Self.downsampledCGImage(from: data, maxPixelSize: maxPixel)
         }
         let cgImage = await withTaskCancellationHandler(operation: {

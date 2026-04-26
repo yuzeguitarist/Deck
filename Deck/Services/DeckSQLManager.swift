@@ -156,7 +156,11 @@ extension DeckSQLManager {
             do {
                 var query = table.select(Col.id).filter(filter)
                 if let limit { query = query.limit(limit) }
-                return try db.prepare(query).map { row in row[Col.id] }
+                var ids: [Int64] = []
+                for row in try db.prepare(query) {
+                    ids.append(row[Col.id])
+                }
+                return ids
             } catch {
                 return []
             }
@@ -228,7 +232,12 @@ extension DeckSQLManager {
                 do {
                     let query = table.select(Col.uniqueId)
                         .filter(chunk.contains(Col.id))
-                    return try db.prepare(query).map { row in row[Col.uniqueId] }
+                    var uniqueIds: [String] = []
+                    uniqueIds.reserveCapacity(chunk.count)
+                    for row in try db.prepare(query) {
+                        uniqueIds.append(row[Col.uniqueId])
+                    }
+                    return uniqueIds
                 } catch {
                     return []
                 }
@@ -249,13 +258,7 @@ extension DeckSQLManager {
         let deleted: Int = await withDBAsyncBackground {
             guard let db = self.db, let table = self.table else { return 0 }
             do {
-                var total = 0
-                try db.transaction {
-                    for chunk in chunks {
-                        let query = table.filter(chunk.contains(Col.id))
-                        total += try db.run(query.delete())
-                    }
-                }
+                let total = try Self.deleteRowsInTransaction(chunks: chunks, table: table, db: db)
                 // Invalidate once (hot path: avoid repeated cache clears/log spam).
                 self.invalidateSearchCache()
                 return total
@@ -265,6 +268,21 @@ extension DeckSQLManager {
         } ?? 0
 
         return deleted
+    }
+
+    private nonisolated static func deleteRowsInTransaction(
+        chunks: [[Int64]],
+        table: Table,
+        db: Connection
+    ) throws -> Int {
+        var total = 0
+        try db.transaction {
+            for chunk in chunks {
+                let query = table.filter(chunk.contains(Col.id))
+                total += try db.run(query.delete())
+            }
+        }
+        return total
     }
 
     /// Export a rollback snapshot database containing the specified ids.
@@ -555,7 +573,10 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
     /// 是否可用 UPSERT(unique_id) + RETURNING（取决于 SQLite 版本与 unique index 是否就绪）
     /// - 第一次失败后会自动降级为 delete+insert，避免每次都走异常路径
-    private var supportsUniqueIdUpsert: Bool = true
+    // Access is confined to the SQLite serial target queue. This must remain
+    // nonisolated because hot-path inserts execute on `com.deck.sqlite.queue.*`,
+    // not on MainActor under Swift 6 default actor isolation.
+    private nonisolated(unsafe) var supportsUniqueIdUpsert: Bool = true
 
     /// 列表模式下 Data 列投影阈值（与 `rowToClipboardItem(loadFullData: false)` 保持一致）
     private nonisolated static let listInlineBytesForNonImage = 32 * 1024
@@ -595,7 +616,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     private let backupFileName = "Deck.sqlite3.bak"
     
     /// 自动备份间隔（24 小时）
-    private let backupInterval: TimeInterval = 24 * 60 * 60
+    private nonisolated let backupInterval: TimeInterval = 24 * 60 * 60
     
     /// 初始化失败时间（用于重试退避）
     private var lastInitFailureAt: Date?
@@ -622,7 +643,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     ]
     
     /// 向量数值解析使用的 Locale（确保小数点格式一致）
-    private let vecNumberLocale = Locale(identifier: "en_US_POSIX")
+    private nonisolated let vecNumberLocale = Locale(identifier: "en_US_POSIX")
     
     /// 向量索引是否启用（安全模式下强制禁用）
     private var vecIndexEnabled = false
@@ -1574,14 +1595,21 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     }
 
     private func persistVecActiveTables() {
-        let persisted = vecActiveTableNames.filter { (dimension, tableName) in
-            !tableName.isEmpty && tableName != vecDefaultTableName(for: dimension)
+        var persisted: [Int: String] = [:]
+        for (dimension, tableName) in vecActiveTableNames {
+            if !tableName.isEmpty, tableName != vecDefaultTableName(for: dimension) {
+                persisted[dimension] = tableName
+            }
         }
         guard !persisted.isEmpty else {
             UserDefaults.standard.removeObject(forKey: vecActiveTablesDefaultsKey)
             return
         }
-        let raw = Dictionary(uniqueKeysWithValues: persisted.map { (String($0.key), $0.value) })
+        var raw: [String: String] = [:]
+        raw.reserveCapacity(persisted.count)
+        for (dimension, tableName) in persisted {
+            raw[String(dimension)] = tableName
+        }
         if let data = try? JSONEncoder().encode(raw) {
             UserDefaults.standard.set(data, forKey: vecActiveTablesDefaultsKey)
         }
@@ -1687,7 +1715,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         let defaultName = vecDefaultTableName(for: dimension)
         let recoveryPrefix = "\(vecTableBaseName)_recovery_\(dimension)_"
         let tables = listVecTables(for: dimension, db: db)
-        let latestRecovery = tables.filter { $0.hasPrefix(recoveryPrefix) }.sorted().last
+        let latestRecovery = Self.latestRecoveryVecTable(in: tables, recoveryPrefix: recoveryPrefix)
 
         if let active = vecActiveTableNames[dimension] {
             if vecTableExists(active, db: db) {
@@ -1712,6 +1740,20 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }
         setVecActiveTableName(dimension: dimension, tableName: defaultName)
         return defaultName
+    }
+
+    private nonisolated static func latestRecoveryVecTable(
+        in tables: [String],
+        recoveryPrefix: String
+    ) -> String? {
+        var latest: String?
+        for table in tables {
+            guard table.hasPrefix(recoveryPrefix) else { continue }
+            if latest == nil || table > latest! {
+                latest = table
+            }
+        }
+        return latest
     }
 
     private func cleanupObsoleteVecTables(dimension: Int, activeTableName: String, db: Connection) {
@@ -1894,28 +1936,12 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             """
 
             let selectStmt = try db.prepare(selectSQL).bind(rowBytes)
-            var indexed = 0
-            try db.transaction {
-                while let row = try selectStmt.failableNext() {
-                    guard let id = self.bindingToInt64(row[0]),
-                          let rawData = self.bindingToData(row[1]) else {
-                        continue
-                    }
-                    let decoded = DeckUserDefaults.securityModeEnabled ? self.decryptData(rawData) : rawData
-                    guard let vector = self.decodeEmbedding(decoded), vector.count == dimension else {
-                        continue
-                    }
-                    let normalized = self.normalizeVector(vector)
-                    guard !normalized.isEmpty else { continue }
-                    let payload = self.vectorToJSONString(normalized)
-                    try db.run(
-                        "INSERT OR REPLACE INTO \(recoveryTableName)(rowid, embedding) VALUES (?, ?)",
-                        id,
-                        payload
-                    )
-                    indexed += 1
-                }
-            }
+            let indexed = try self.backfillVecRecoveryRows(
+                selectStmt: selectStmt,
+                dimension: dimension,
+                recoveryTableName: recoveryTableName,
+                db: db
+            )
 
             let triggerName = self.vecTriggerName(for: recoveryTableName, dimension: dimension)
             try db.run("""
@@ -1945,6 +1971,36 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             }
             await log.error("Vec recovery failed for dim=\(dimension), table=\(recoveryTableName)")
         }
+    }
+
+    private nonisolated func backfillVecRecoveryRows(
+        selectStmt: Statement,
+        dimension: Int,
+        recoveryTableName: String,
+        db: Connection
+    ) throws -> Int {
+        var indexed = 0
+        try db.transaction {
+            while let row = try selectStmt.failableNext() {
+                guard let id = bindingToInt64(row[0]),
+                      let rawData = bindingToData(row[1]) else {
+                    continue
+                }
+                guard let vector = decodeEmbedding(rawData), vector.count == dimension else {
+                    continue
+                }
+                let normalized = normalizeVector(vector)
+                guard !normalized.isEmpty else { continue }
+                let payload = vectorToJSONString(normalized)
+                try db.run(
+                    "INSERT OR REPLACE INTO \(recoveryTableName)(rowid, embedding) VALUES (?, ?)",
+                    id,
+                    payload
+                )
+                indexed += 1
+            }
+        }
+        return indexed
     }
 
     @discardableResult
@@ -2210,7 +2266,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     ///   - synchronous: 是否同步执行（默认异步）
     /// - Note: 默认 24 小时备份一次，使用文件拷贝方式
     /// - Warning: 备份失败不会影响数据库正常运行
-    private func backupDatabaseIfNeeded(
+    private nonisolated func backupDatabaseIfNeeded(
         dbPath: String,
         backupPath: String,
         force: Bool = false,
@@ -2577,6 +2633,25 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 } catch {
                     log.debug("Failed to create idx_clipboardhistory_ts_id: \(error.localizedDescription)")
                 }
+                // Composite indexes for filtered history pages. The panel frequently combines
+                // item-type / tag filters with the same `timestamp DESC, id DESC` keyset order;
+                // keeping the order columns in the index avoids extra sorting and wide scans.
+                do {
+                    try db.run("""
+                        CREATE INDEX IF NOT EXISTS idx_clipboardhistory_item_type_ts_id
+                        ON ClipboardHistory(item_type, timestamp DESC, id DESC)
+                        """)
+                } catch {
+                    log.debug("Failed to create idx_clipboardhistory_item_type_ts_id: \(error.localizedDescription)")
+                }
+                do {
+                    try db.run("""
+                        CREATE INDEX IF NOT EXISTS idx_clipboardhistory_tag_ts_id
+                        ON ClipboardHistory(tag_id, timestamp DESC, id DESC)
+                        """)
+                } catch {
+                    log.debug("Failed to create idx_clipboardhistory_tag_ts_id: \(error.localizedDescription)")
+                }
                 // Create a partial unique index for non-empty unique_id to avoid sync duplicates.
                 do {
                     try db.run("""
@@ -2779,7 +2854,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }
     }
 
-    private func ensureFTSTrigramIfAvailable() {
+    private nonisolated func ensureFTSTrigramIfAvailable() {
         dbQueue.async { [weak self] in
             guard let self else { return }
             self.updateFTSTokenizerState()
@@ -3436,16 +3511,16 @@ extension DeckSQLManager {
         return encrypted.base64EncodedString()
     }
 
-    private func encryptDataForMigration(_ data: Data, using key: SymmetricKey) -> Data? {
+    private nonisolated func encryptDataForMigration(_ data: Data, using key: SymmetricKey) -> Data? {
         SecurityService.encryptWithKey(data, using: key)
     }
 
-    private func decryptDataForMigration(_ data: Data, using key: SymmetricKey) -> Data? {
+    private nonisolated func decryptDataForMigration(_ data: Data, using key: SymmetricKey) -> Data? {
         if data.isEmpty { return data }
         return SecurityService.decryptWithKey(data, using: key)
     }
 
-    private func encryptStringForMigration(_ string: String, using key: SymmetricKey) -> String? {
+    private nonisolated func encryptStringForMigration(_ string: String, using key: SymmetricKey) -> String? {
         guard let data = string.data(using: .utf8),
               let encrypted = SecurityService.encryptWithKey(data, using: key) else {
             return nil
@@ -3453,7 +3528,7 @@ extension DeckSQLManager {
         return encrypted.base64EncodedString()
     }
 
-    private func decryptStringForMigration(_ string: String, using key: SymmetricKey) -> String? {
+    private nonisolated func decryptStringForMigration(_ string: String, using key: SymmetricKey) -> String? {
         if string.isEmpty { return "" }
         guard let data = Data(base64Encoded: string),
               let decrypted = SecurityService.decryptWithKey(data, using: key) else {
@@ -3462,7 +3537,7 @@ extension DeckSQLManager {
         return String(data: decrypted, encoding: .utf8)
     }
 
-    private func notifyEncryptionFailureIfNeeded() {
+    private nonisolated func notifyEncryptionFailureIfNeeded() {
         let shouldNotify = syncOnErrorStateQueue {
             if hasNotifiedEncryptionFailure {
                 return false
@@ -3483,14 +3558,14 @@ extension DeckSQLManager {
         SemanticSearchService.semanticTextHash(text)
     }
 
-    private func bindingToData(_ binding: Binding?) -> Data? {
+    private nonisolated func bindingToData(_ binding: Binding?) -> Data? {
         if let blob = binding as? Blob {
             return Data(blob.bytes)
         }
         return nil
     }
 
-    private func bindingToInt64(_ binding: Binding?) -> Int64? {
+    private nonisolated func bindingToInt64(_ binding: Binding?) -> Int64? {
         if let value = binding as? Int64 {
             return value
         }
@@ -3503,7 +3578,7 @@ extension DeckSQLManager {
         return nil
     }
 
-    private func bindingToDouble(_ binding: Binding?) -> Double? {
+    private nonisolated func bindingToDouble(_ binding: Binding?) -> Double? {
         if let value = binding as? Double {
             return value
         }
@@ -3523,7 +3598,7 @@ extension DeckSQLManager {
         vector.withUnsafeBufferPointer { Data(buffer: $0) }
     }
 
-    private func decodeEmbedding(_ data: Data) -> [Float]? {
+    private nonisolated func decodeEmbedding(_ data: Data) -> [Float]? {
         guard data.count % MemoryLayout<Float>.size == 0 else { return nil }
         return data.withUnsafeBytes { rawBuffer in
             let buffer = rawBuffer.bindMemory(to: Float.self)
@@ -3531,7 +3606,7 @@ extension DeckSQLManager {
         }
     }
 
-    private func normalizeVector(_ vector: [Float]) -> [Float] {
+    private nonisolated func normalizeVector(_ vector: [Float]) -> [Float] {
         guard !vector.isEmpty else { return vector }
         var sumSquares: Float = 0
         vDSP_svesq(vector, 1, &sumSquares, vDSP_Length(vector.count))
@@ -3543,7 +3618,7 @@ extension DeckSQLManager {
         return normalized
     }
 
-    private func vectorToJSONString(_ vector: [Float]) -> String {
+    private nonisolated func vectorToJSONString(_ vector: [Float]) -> String {
         var parts: [String] = []
         parts.reserveCapacity(vector.count)
         for value in vector {
@@ -3663,7 +3738,7 @@ extension DeckSQLManager {
         updateVecIndex(id: id, vector: vector)
     }
 
-    func scheduleSemanticEmbeddingUpdate(id: Int64, searchText: String) {
+    nonisolated func scheduleSemanticEmbeddingUpdate(id: Int64, searchText: String) {
         embeddingQueue.async { [weak self] in
             guard let self else { return }
             let normalized = SemanticSearchService.normalizedSemanticText(searchText)
@@ -3678,7 +3753,7 @@ extension DeckSQLManager {
         }
     }
 
-    func scheduleSemanticEmbeddingStore(id: Int64, textHash: String, vector: [Float]) {
+    nonisolated func scheduleSemanticEmbeddingStore(id: Int64, textHash: String, vector: [Float]) {
         embeddingQueue.async { [weak self] in
             Task { @MainActor [weak self] in
                 self?.storeSemanticEmbedding(id: id, textHash: textHash, vector: vector)
@@ -3865,13 +3940,13 @@ extension DeckSQLManager {
 extension DeckSQLManager {
     /// Preserve existing user tag when the new payload is untagged (`-1`).
     /// This prevents duplicate-copy upserts from silently clearing manual tags.
-    private static func mergedTagId(incoming: Int, existing: Int?) -> Int {
+    private nonisolated static func mergedTagId(incoming: Int, existing: Int?) -> Int {
         guard incoming == -1, let existing, existing != -1 else { return incoming }
         return existing
     }
 
     /// Preserve LAN-received marker when a duplicate `unique_id` upsert supplies `false` (e.g. local re-copy).
-    private static func mergedReceivedFromLAN(incoming: Bool, existing: Bool?) -> Bool {
+    private nonisolated static func mergedReceivedFromLAN(incoming: Bool, existing: Bool?) -> Bool {
         incoming || (existing ?? false)
     }
 
@@ -3882,7 +3957,7 @@ extension DeckSQLManager {
         } ?? 0
     }
 
-    private struct InsertPayload {
+    private struct InsertPayload: Sendable {
         let uniqueId: String
         let pasteboardType: String
         let itemType: String
@@ -4000,6 +4075,14 @@ extension DeckSQLManager {
         )
     }
 
+    private func shouldScheduleSemanticEmbedding(for payload: InsertPayload) -> Bool {
+        if payload.receivedFromLAN,
+           payload.pasteboardType == PasteboardType.fileURL.rawValue || payload.itemType == ClipItemType.file.rawValue {
+            return false
+        }
+        return true
+    }
+
     private func prepareInsertPayload(for item: ClipboardItem) async -> InsertPayload? {
         var dataToStore = item.data
         var blobPath = item.blobPath
@@ -4105,7 +4188,7 @@ extension DeckSQLManager {
         }
     }
 
-    private func insertPreparedPayload(
+    private nonisolated func insertPreparedPayload(
         _ payload: InsertPayload,
         using db: Connection,
         table: Table
@@ -4158,7 +4241,12 @@ extension DeckSQLManager {
                 """
 
                 let dataBlob = SQLite.Blob(bytes: [UInt8](payload.data))
-                let previewBlob = payload.previewData.map { SQLite.Blob(bytes: [UInt8]($0)) }
+                let previewBlob: SQLite.Blob?
+                if let previewData = payload.previewData {
+                    previewBlob = SQLite.Blob(bytes: [UInt8](previewData))
+                } else {
+                    previewBlob = nil
+                }
                 let stmt = try db.prepare(sql).bind(
                     payload.uniqueId,
                     payload.pasteboardType,
@@ -4249,26 +4337,15 @@ extension DeckSQLManager {
                     throw ImportError.databaseUnavailable
                 }
 
-                var rowIds: [Int64] = []
-                rowIds.reserveCapacity(payloads.count)
-
-                try db.transaction {
-                    for payload in payloads {
-                        let result = try self.insertPreparedPayload(payload, using: db, table: table)
-                        guard result.rowId > 0 else {
-                            throw ImportError.insertFailed(payload.uniqueId)
-                        }
-                        rowIds.append(result.rowId)
-                    }
-                }
-
-                return rowIds
+                return try self.insertPreparedPayloadsInTransaction(payloads, using: db, table: table)
             }
 
             invalidateSearchCache()
             for (index, rowId) in rowIds.enumerated() where rowId > 0 {
                 await log.debug("Imported item with id: \(rowId)")
-                scheduleSemanticEmbeddingUpdate(id: rowId, searchText: payloads[index].searchTextPlain)
+                if shouldScheduleSemanticEmbedding(for: payloads[index]) {
+                    scheduleSemanticEmbeddingUpdate(id: rowId, searchText: payloads[index].searchTextPlain)
+                }
             }
             return rowIds.count
         } catch {
@@ -4277,8 +4354,54 @@ extension DeckSQLManager {
             throw error
         }
     }
+
+    private nonisolated func insertPreparedPayloadsInTransaction(
+        _ payloads: [InsertPayload],
+        using db: Connection,
+        table: Table
+    ) throws -> [Int64] {
+        var rowIds: [Int64] = []
+        rowIds.reserveCapacity(payloads.count)
+
+        try db.transaction {
+            for payload in payloads {
+                let result = try insertPreparedPayload(payload, using: db, table: table)
+                guard result.rowId > 0 else {
+                    throw ImportError.insertFailed(payload.uniqueId)
+                }
+                rowIds.append(result.rowId)
+            }
+        }
+
+        return rowIds
+    }
+
+    private nonisolated func insertPreparedPayloadsWithExistingCountInTransaction(
+        _ payloads: [InsertPayload],
+        using db: Connection,
+        table: Table
+    ) throws -> (rowIds: [Int64], deleted: Int) {
+        var rowIds: [Int64] = []
+        rowIds.reserveCapacity(payloads.count)
+        var deletedTotal = 0
+
+        try db.transaction {
+            for payload in payloads {
+                let existingCount: Int = try db.scalar(
+                    table.filter(Col.uniqueId == payload.uniqueId).count
+                )
+                let result = try insertPreparedPayload(payload, using: db, table: table)
+                if existingCount > 0 {
+                    deletedTotal += existingCount
+                }
+                rowIds.append(result.rowId)
+            }
+        }
+
+        return (rowIds, deletedTotal)
+    }
     
-    func insert(item: ClipboardItem) async -> Int64 {
+    func insert(item: ClipboardItem, scheduleSemanticEmbedding: Bool = true) async -> Int64 {
         guard let payload = await prepareInsertPayload(for: item) else { return -1 }
 
         let result: (rowId: Int64, usedUpsert: Bool)? = await withDBAsync {
@@ -4292,7 +4415,10 @@ extension DeckSQLManager {
         invalidateSearchCache(ids: [result.rowId])
 
         await log.debug("Inserted item with id: \(result.rowId)")
-        scheduleSemanticEmbeddingUpdate(id: result.rowId, searchText: payload.searchTextPlain)
+        if scheduleSemanticEmbedding,
+           shouldScheduleSemanticEmbedding(for: payload) {
+            scheduleSemanticEmbeddingUpdate(id: result.rowId, searchText: payload.searchTextPlain)
+        }
         return result.rowId
     }
 
@@ -4311,23 +4437,11 @@ extension DeckSQLManager {
 
         let result: (rowIds: [Int64], deleted: Int)? = await withDBAsync {
             guard let db = self.db, let table = self.table else { return ([], 0) }
-            var rowIds: [Int64] = []
-            var deletedTotal = 0
-
-                try db.transaction {
-                    for payload in payloads {
-                        let existingCount: Int = try db.scalar(
-                            table.filter(Col.uniqueId == payload.uniqueId).count
-                        )
-                        let result = try self.insertPreparedPayload(payload, using: db, table: table)
-                    if existingCount > 0 {
-                        deletedTotal += existingCount
-                    }
-                    rowIds.append(result.rowId)
-                }
-            }
-
-            return (rowIds, deletedTotal)
+            return try self.insertPreparedPayloadsWithExistingCountInTransaction(
+                payloads,
+                using: db,
+                table: table
+            )
         }
 
         guard let result else { return [] }
@@ -4337,7 +4451,9 @@ extension DeckSQLManager {
 
         for (index, rowId) in result.rowIds.enumerated() where rowId > 0 {
             await log.debug("Inserted item with id: \(rowId)")
-            scheduleSemanticEmbeddingUpdate(id: rowId, searchText: payloads[index].searchTextPlain)
+            if shouldScheduleSemanticEmbedding(for: payloads[index]) {
+                scheduleSemanticEmbeddingUpdate(id: rowId, searchText: payloads[index].searchTextPlain)
+            }
         }
 
         return result.rowIds.filter { $0 > 0 }
@@ -5359,18 +5475,14 @@ extension DeckSQLManager {
             return Array(repeating: 0, count: ranges.count)
         }
 
+        let rangeQuery = Self.timestampRangeCountQuery(for: ranges)
         return await withDBAsync {
             guard let db = self.db else { return Array(repeating: 0, count: ranges.count) }
 
-            let selectClauses = ranges.enumerated().map { index, range in
-                "COALESCE(SUM(CASE WHEN timestamp >= \(range.start) AND timestamp < \(range.end) THEN 1 ELSE 0 END), 0) AS c\(index)"
-            }.joined(separator: ", ")
-            let minStart = ranges.map(\.start).min() ?? 0
-            let maxEnd = ranges.map(\.end).max() ?? minStart
             let sql = """
-            SELECT \(selectClauses)
+            SELECT \(rangeQuery.selectClauses)
             FROM ClipboardHistory
-            WHERE timestamp >= \(minStart) AND timestamp < \(maxEnd)
+            WHERE timestamp >= \(rangeQuery.minStart) AND timestamp < \(rangeQuery.maxEnd)
             """
 
             let stmt = try db.prepare(sql)
@@ -5378,10 +5490,32 @@ extension DeckSQLManager {
                 return Array(repeating: 0, count: ranges.count)
             }
 
-            return ranges.indices.map { index in
-                Int(self.bindingToInt64(row[index]) ?? 0)
+            var counts: [Int] = []
+            counts.reserveCapacity(ranges.count)
+            for index in ranges.indices {
+                counts.append(Int(self.bindingToInt64(row[index]) ?? 0))
             }
+            return counts
         } ?? Array(repeating: 0, count: ranges.count)
+    }
+
+    private nonisolated static func timestampRangeCountQuery(
+        for ranges: [TimestampRange]
+    ) -> (selectClauses: String, minStart: Int64, maxEnd: Int64) {
+        var clauses: [String] = []
+        clauses.reserveCapacity(ranges.count)
+        var minStart = ranges[0].start
+        var maxEnd = ranges[0].end
+
+        for (index, range) in ranges.enumerated() {
+            clauses.append(
+                "COALESCE(SUM(CASE WHEN timestamp >= \(range.start) AND timestamp < \(range.end) THEN 1 ELSE 0 END), 0) AS c\(index)"
+            )
+            if range.start < minStart { minStart = range.start }
+            if range.end > maxEnd { maxEnd = range.end }
+        }
+
+        return (clauses.joined(separator: ", "), minStart, maxEnd)
     }
 
     /// Fetch timestamps since the given unix timestamp (seconds).
@@ -5729,145 +5863,7 @@ extension DeckSQLManager {
             // 处理当前批次
             let batchSuccess = await withDBAsync {
                 guard let db = self.db else { return false }
-                do {
-                    try db.transaction {
-                        let updateStatement = try db.prepare("""
-                            UPDATE ClipboardHistory
-                            SET data = ?,
-                                preview_data = ?,
-                                search_text = ?,
-                                app_name = ?,
-                                custom_title = ?,
-                                source_anchor = ?,
-                                is_encrypted = ?
-                            WHERE id = ?
-                            """)
-                        let targetEncryptedValue = encrypt ? 1 : 0
-
-                        for row in batch.rows {
-                            let id = try row.get(Col.id)
-                            let rawData = try row.get(Col.data)
-                            let rawPreviewData = try row.get(Col.previewData)
-                            let rawSearchText = try row.get(Col.searchText)
-                            let rawAppName = try row.get(Col.appName)
-                            let rawCustomTitle = try row.get(Col.customTitle)
-                            let rawSourceAnchor = try row.get(Col.sourceAnchor)
-                            let rawIsEncrypted = (try? row.get(Col.isEncrypted)) ?? false
-
-                            let newData: Data
-                            let newPreviewData: Data?
-                            let newSearchText: String
-                            let newAppName: String
-                            let newCustomTitle: String?
-                            let newSourceAnchor: String?
-
-                            if encrypt {
-                                guard !rawIsEncrypted else { continue }
-                                guard let encryptedData = self.encryptDataForMigration(rawData, using: migrationKey) else {
-                                    self.notifyEncryptionFailureIfNeeded()
-                                    throw NSError(domain: "DeckSQL", code: -10, userInfo: nil)
-                                }
-                                newData = encryptedData
-                                if let rawPreviewData = rawPreviewData {
-                                    guard let encryptedPreview = self.encryptDataForMigration(rawPreviewData, using: migrationKey) else {
-                                        self.notifyEncryptionFailureIfNeeded()
-                                        throw NSError(domain: "DeckSQL", code: -11, userInfo: nil)
-                                    }
-                                    newPreviewData = encryptedPreview
-                                } else {
-                                    newPreviewData = nil
-                                }
-                                guard let encryptedSearch = self.encryptStringForMigration(rawSearchText, using: migrationKey) else {
-                                    self.notifyEncryptionFailureIfNeeded()
-                                    throw NSError(domain: "DeckSQL", code: -12, userInfo: nil)
-                                }
-                                newSearchText = encryptedSearch
-                                guard let encryptedAppName = self.encryptStringForMigration(rawAppName, using: migrationKey) else {
-                                    self.notifyEncryptionFailureIfNeeded()
-                                    throw NSError(domain: "DeckSQL", code: -13, userInfo: nil)
-                                }
-                                newAppName = encryptedAppName
-                                if let rawCustomTitle {
-                                    guard let encryptedTitle = self.encryptStringForMigration(rawCustomTitle, using: migrationKey) else {
-                                        self.notifyEncryptionFailureIfNeeded()
-                                        throw NSError(domain: "DeckSQL", code: -15, userInfo: nil)
-                                    }
-                                    newCustomTitle = encryptedTitle
-                                } else {
-                                    newCustomTitle = nil
-                                }
-                                if let rawSourceAnchor {
-                                    guard let encryptedAnchor = self.encryptStringForMigration(rawSourceAnchor, using: migrationKey) else {
-                                        self.notifyEncryptionFailureIfNeeded()
-                                        throw NSError(domain: "DeckSQL", code: -14, userInfo: nil)
-                                    }
-                                    newSourceAnchor = encryptedAnchor
-                                } else {
-                                    newSourceAnchor = nil
-                                }
-                            } else {
-                                guard rawIsEncrypted else { continue }
-                                guard let decryptedData = self.decryptDataForMigration(rawData, using: migrationKey) else {
-                                    throw NSError(domain: "DeckSQL", code: -16, userInfo: nil)
-                                }
-                                newData = decryptedData
-
-                                if let rawPreviewData {
-                                    guard let decryptedPreview = self.decryptDataForMigration(rawPreviewData, using: migrationKey) else {
-                                        throw NSError(domain: "DeckSQL", code: -17, userInfo: nil)
-                                    }
-                                    newPreviewData = decryptedPreview
-                                } else {
-                                    newPreviewData = nil
-                                }
-
-                                guard let maybeDecryptedSearch = self.decryptStringForMigration(rawSearchText, using: migrationKey) else {
-                                    throw NSError(domain: "DeckSQL", code: -18, userInfo: nil)
-                                }
-                                newSearchText = maybeDecryptedSearch
-
-                                guard let maybeDecryptedAppName = self.decryptStringForMigration(rawAppName, using: migrationKey) else {
-                                    throw NSError(domain: "DeckSQL", code: -19, userInfo: nil)
-                                }
-                                newAppName = maybeDecryptedAppName
-
-                                if let rawCustomTitle {
-                                    guard let maybeDecryptedTitle = self.decryptStringForMigration(rawCustomTitle, using: migrationKey) else {
-                                        throw NSError(domain: "DeckSQL", code: -20, userInfo: nil)
-                                    }
-                                    newCustomTitle = maybeDecryptedTitle
-                                } else {
-                                    newCustomTitle = nil
-                                }
-
-                                if let rawSourceAnchor {
-                                    guard let maybeDecryptedAnchor = self.decryptStringForMigration(rawSourceAnchor, using: migrationKey) else {
-                                        throw NSError(domain: "DeckSQL", code: -21, userInfo: nil)
-                                    }
-                                    newSourceAnchor = maybeDecryptedAnchor
-                                } else {
-                                    newSourceAnchor = nil
-                                }
-                            }
-
-                            let dataBinding: Binding? = SQLite.Blob(bytes: [UInt8](newData))
-                            let previewBinding: Binding? = newPreviewData.map { SQLite.Blob(bytes: [UInt8]($0)) }
-                            try updateStatement.run([
-                                dataBinding,
-                                previewBinding,
-                                newSearchText,
-                                newAppName,
-                                newCustomTitle,
-                                newSourceAnchor,
-                                targetEncryptedValue,
-                                id
-                            ])
-                        }
-                    }
-                    return true
-                } catch {
-                    return false
-                }
+                return self.migrateEncryptionBatch(batch.rows, encrypt: encrypt, using: migrationKey, db: db)
             }
 
             if batchSuccess != true {
@@ -5909,11 +5905,167 @@ extension DeckSQLManager {
         }
 
         // 迁移语义向量缓存表的加密状态
-        await migrateEmbeddingEncryption(encrypt: encrypt)
+        await migrateEmbeddingEncryption(encrypt: encrypt, using: migrationKey)
 
         // 加密状态变化后，缓存的解密文本全部失效
         invalidateSearchCache()
         return true
+    }
+
+    /// Executes the transaction body from a nonisolated context. Under Swift 6's
+    /// default MainActor isolation, creating the SQLite transaction closure inside
+    /// `migrateEncryption(...)` makes SQLite.swift execute an actor-isolated block
+    /// on `com.deck.sqlite.queue.*`, which trips libdispatch's queue assertion.
+    private nonisolated func migrateEncryptionBatch(
+        _ rows: [Row],
+        encrypt: Bool,
+        using migrationKey: SymmetricKey,
+        db: Connection
+    ) -> Bool {
+        do {
+            try db.transaction {
+                let updateStatement = try db.prepare("""
+                    UPDATE ClipboardHistory
+                    SET data = ?,
+                        preview_data = ?,
+                        search_text = ?,
+                        app_name = ?,
+                        custom_title = ?,
+                        source_anchor = ?,
+                        is_encrypted = ?
+                    WHERE id = ?
+                    """)
+                let targetEncryptedValue = encrypt ? 1 : 0
+
+                for row in rows {
+                    let id = try row.get(Col.id)
+                    let rawData = try row.get(Col.data)
+                    let rawPreviewData = try row.get(Col.previewData)
+                    let rawSearchText = try row.get(Col.searchText)
+                    let rawAppName = try row.get(Col.appName)
+                    let rawCustomTitle = try row.get(Col.customTitle)
+                    let rawSourceAnchor = try row.get(Col.sourceAnchor)
+                    let rawIsEncrypted = (try? row.get(Col.isEncrypted)) ?? false
+
+                    let newData: Data
+                    let newPreviewData: Data?
+                    let newSearchText: String
+                    let newAppName: String
+                    let newCustomTitle: String?
+                    let newSourceAnchor: String?
+
+                    if encrypt {
+                        guard !rawIsEncrypted else { continue }
+                        guard let encryptedData = encryptDataForMigration(rawData, using: migrationKey) else {
+                            notifyEncryptionFailureIfNeeded()
+                            throw NSError(domain: "DeckSQL", code: -10, userInfo: nil)
+                        }
+                        newData = encryptedData
+                        if let rawPreviewData {
+                            guard let encryptedPreview = encryptDataForMigration(rawPreviewData, using: migrationKey) else {
+                                notifyEncryptionFailureIfNeeded()
+                                throw NSError(domain: "DeckSQL", code: -11, userInfo: nil)
+                            }
+                            newPreviewData = encryptedPreview
+                        } else {
+                            newPreviewData = nil
+                        }
+                        guard let encryptedSearch = encryptStringForMigration(rawSearchText, using: migrationKey) else {
+                            notifyEncryptionFailureIfNeeded()
+                            throw NSError(domain: "DeckSQL", code: -12, userInfo: nil)
+                        }
+                        newSearchText = encryptedSearch
+                        guard let encryptedAppName = encryptStringForMigration(rawAppName, using: migrationKey) else {
+                            notifyEncryptionFailureIfNeeded()
+                            throw NSError(domain: "DeckSQL", code: -13, userInfo: nil)
+                        }
+                        newAppName = encryptedAppName
+                        if let rawCustomTitle {
+                            guard let encryptedTitle = encryptStringForMigration(rawCustomTitle, using: migrationKey) else {
+                                notifyEncryptionFailureIfNeeded()
+                                throw NSError(domain: "DeckSQL", code: -15, userInfo: nil)
+                            }
+                            newCustomTitle = encryptedTitle
+                        } else {
+                            newCustomTitle = nil
+                        }
+                        if let rawSourceAnchor {
+                            guard let encryptedAnchor = encryptStringForMigration(rawSourceAnchor, using: migrationKey) else {
+                                notifyEncryptionFailureIfNeeded()
+                                throw NSError(domain: "DeckSQL", code: -14, userInfo: nil)
+                            }
+                            newSourceAnchor = encryptedAnchor
+                        } else {
+                            newSourceAnchor = nil
+                        }
+                    } else {
+                        guard rawIsEncrypted else { continue }
+                        guard let decryptedData = decryptDataForMigration(rawData, using: migrationKey) else {
+                            throw NSError(domain: "DeckSQL", code: -16, userInfo: nil)
+                        }
+                        newData = decryptedData
+
+                        if let rawPreviewData {
+                            guard let decryptedPreview = decryptDataForMigration(rawPreviewData, using: migrationKey) else {
+                                throw NSError(domain: "DeckSQL", code: -17, userInfo: nil)
+                            }
+                            newPreviewData = decryptedPreview
+                        } else {
+                            newPreviewData = nil
+                        }
+
+                        guard let maybeDecryptedSearch = decryptStringForMigration(rawSearchText, using: migrationKey) else {
+                            throw NSError(domain: "DeckSQL", code: -18, userInfo: nil)
+                        }
+                        newSearchText = maybeDecryptedSearch
+
+                        guard let maybeDecryptedAppName = decryptStringForMigration(rawAppName, using: migrationKey) else {
+                            throw NSError(domain: "DeckSQL", code: -19, userInfo: nil)
+                        }
+                        newAppName = maybeDecryptedAppName
+
+                        if let rawCustomTitle {
+                            guard let maybeDecryptedTitle = decryptStringForMigration(rawCustomTitle, using: migrationKey) else {
+                                throw NSError(domain: "DeckSQL", code: -20, userInfo: nil)
+                            }
+                            newCustomTitle = maybeDecryptedTitle
+                        } else {
+                            newCustomTitle = nil
+                        }
+
+                        if let rawSourceAnchor {
+                            guard let maybeDecryptedAnchor = decryptStringForMigration(rawSourceAnchor, using: migrationKey) else {
+                                throw NSError(domain: "DeckSQL", code: -21, userInfo: nil)
+                            }
+                            newSourceAnchor = maybeDecryptedAnchor
+                        } else {
+                            newSourceAnchor = nil
+                        }
+                    }
+
+                    let dataBinding: Binding? = SQLite.Blob(bytes: [UInt8](newData))
+                    let previewBinding: Binding?
+                    if let newPreviewData {
+                        previewBinding = SQLite.Blob(bytes: [UInt8](newPreviewData))
+                    } else {
+                        previewBinding = nil
+                    }
+                    try updateStatement.run([
+                        dataBinding,
+                        previewBinding,
+                        newSearchText,
+                        newAppName,
+                        newCustomTitle,
+                        newSourceAnchor,
+                        targetEncryptedValue,
+                        id
+                    ])
+                }
+            }
+            return true
+        } catch {
+            return false
+        }
     }
 
     /// 更新数据库中的 blob_path 字段（加密迁移后路径后缀变化）
@@ -5964,7 +6116,7 @@ extension DeckSQLManager {
         return !hasError
     }
 
-    private func migrateEmbeddingEncryption(encrypt: Bool) async {
+    private func migrateEmbeddingEncryption(encrypt: Bool, using migrationKey: SymmetricKey) async {
         let tab = Table("ClipboardHistory_embedding")
         let batchSize = 200
         var lastId: Int64 = 0
@@ -5987,43 +6139,9 @@ extension DeckSQLManager {
             if let lastRow = rows.last, let id = try? lastRow.get(EmbeddingCol.id) {
                 lastBatchId = id
             }
-            var shouldAbort = false
             let batchSuccess = await withDBAsync {
                 guard let db = self.db else { return false }
-                do {
-                    try db.transaction {
-                        for row in rows {
-                            if shouldAbort { break }
-                            do {
-                                let id = try row.get(EmbeddingCol.id)
-                                let rawEmbedding = try row.get(EmbeddingCol.embedding)
-
-                                let newEmbedding: Data
-                                if encrypt {
-                                    if SecurityService.shared.decryptSilently(rawEmbedding) != nil {
-                                        newEmbedding = rawEmbedding
-                                    } else if let encrypted = SecurityService.shared.encrypt(rawEmbedding) {
-                                        newEmbedding = encrypted
-                                    } else {
-                                        self.notifyEncryptionFailureIfNeeded()
-                                        shouldAbort = true
-                                        break
-                                    }
-                                } else {
-                                    newEmbedding = SecurityService.shared.decrypt(rawEmbedding) ?? rawEmbedding
-                                }
-
-                                let updateQuery = tab.filter(EmbeddingCol.id == id)
-                                try db.run(updateQuery.update(EmbeddingCol.embedding <- newEmbedding))
-                            } catch {
-                                continue
-                            }
-                        }
-                    }
-                    return !shouldAbort
-                } catch {
-                    return false
-                }
+                return self.migrateEmbeddingEncryptionBatch(rows, encrypt: encrypt, using: migrationKey, table: tab, db: db)
             }
 
             guard batchSuccess == true else { return }
@@ -6041,6 +6159,50 @@ extension DeckSQLManager {
             if syncOnDBQueue({ vecIndexEnabled }) {
                 scheduleVecIndexBackfillIfNeeded()
             }
+        }
+    }
+
+    private nonisolated func migrateEmbeddingEncryptionBatch(
+        _ rows: [Row],
+        encrypt: Bool,
+        using migrationKey: SymmetricKey,
+        table tab: Table,
+        db: Connection
+    ) -> Bool {
+        var shouldAbort = false
+        do {
+            try db.transaction {
+                for row in rows {
+                    if shouldAbort { break }
+                    do {
+                        let id = try row.get(EmbeddingCol.id)
+                        let rawEmbedding = try row.get(EmbeddingCol.embedding)
+
+                        let newEmbedding: Data
+                        if encrypt {
+                            if SecurityService.decryptWithKey(rawEmbedding, using: migrationKey) != nil {
+                                newEmbedding = rawEmbedding
+                            } else if let encrypted = SecurityService.encryptWithKey(rawEmbedding, using: migrationKey) {
+                                newEmbedding = encrypted
+                            } else {
+                                notifyEncryptionFailureIfNeeded()
+                                shouldAbort = true
+                                break
+                            }
+                        } else {
+                            newEmbedding = SecurityService.decryptWithKey(rawEmbedding, using: migrationKey) ?? rawEmbedding
+                        }
+
+                        let updateQuery = tab.filter(EmbeddingCol.id == id)
+                        try db.run(updateQuery.update(EmbeddingCol.embedding <- newEmbedding))
+                    } catch {
+                        continue
+                    }
+                }
+            }
+            return !shouldAbort
+        } catch {
+            return false
         }
     }
 
