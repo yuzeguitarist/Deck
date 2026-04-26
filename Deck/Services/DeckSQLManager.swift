@@ -31,7 +31,7 @@
 //  4. **安全模式（`DeckUserDefaults.securityModeEnabled`）**
 //     - 敏感列加密存储/解密读取：`data`、`search_text`、`app_name`、`custom_title`、`embedding`
 //     - 加密状态下 FTS5 与向量相似度不可用，走上述内存搜索降级
-//     - `searchTextCache`（`NSCache`，最多 300 条）降低重复解密；安全模式下应用/会话失焦时清空（见 `handleSensitiveCacheInvalidation`）
+//     - `searchTextCache`（`NSCache`，最多 300 条 / 4MB 成本上限）降低重复解密；安全模式下应用/会话失焦时清空（见 `handleSensitiveCacheInvalidation`）
 //
 //  5. **性能与其它**
 //     - 列表模式通过 SQL 投影避免大 `data` blob 物化到 Swift
@@ -488,11 +488,13 @@ private final class SearchCacheEntry: NSObject {
     let searchText: String
     let appName: String
     let customTitle: String
+    let estimatedCost: Int
 
     init(searchText: String, appName: String, customTitle: String) {
         self.searchText = searchText
         self.appName = appName
         self.customTitle = customTitle
+        self.estimatedCost = (searchText.utf16.count + appName.utf16.count + customTitle.utf16.count) * 2
     }
 }
 
@@ -716,11 +718,12 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     /// 搜索缓存：避免重复解密和 lowercased 转换（安全模式下会在失焦时清空）
     /// - Key: row.id (NSNumber)
     /// - Value: SearchCacheEntry (解密且小写化后的 searchText + appName + customTitle)
-    /// - Limit: 300 条（平衡性能与内存占用）
+    /// - Limit: 300 条 / 4MB 成本上限（平衡性能与内存占用）
     /// - 失效时机：`reinitialize()` / `invalidateSearchCache()`
-    private let searchTextCache: NSCache<NSNumber, SearchCacheEntry> = {
+    private nonisolated(unsafe) let searchTextCache: NSCache<NSNumber, SearchCacheEntry> = {
         let cache = NSCache<NSNumber, SearchCacheEntry>()
         cache.countLimit = 300  // 限制缓存条目，降低常驻内存
+        cache.totalCostLimit = 4 * 1024 * 1024
         return cache
     }()
 
@@ -2699,10 +2702,11 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }
     }
 
-    private func createFTS5Table(forceRecreate: Bool = false, preferTrigram: Bool = true) {
+    private nonisolated func createFTS5Table(forceRecreate: Bool = false, preferTrigram: Bool = true) {
         syncOnDBQueue {
             guard let db = db else { return }
-            if forceRecreate {
+            let shouldRecreateIndex = forceRecreate || DeckUserDefaults.securityModeEnabled
+            if shouldRecreateIndex {
                 do {
                     try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_ai")
                     try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_ad")
@@ -2757,30 +2761,55 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 }
             }
 
-            // Create triggers to keep FTS in sync
+            // Create triggers to keep FTS in sync.
+            // - Only index plaintext rows. Security mode searches decrypt in memory,
+            //   so indexing ciphertext is pure write amplification and can leave
+            //   useless terms behind.
+            // - Only rebuild FTS entries when FTS-backed columns actually change.
+            //   Tag / temporary-flag updates must not rewrite the full-text index.
             do {
-                try db.run("""
-                    CREATE TRIGGER IF NOT EXISTS ClipboardHistory_ai AFTER INSERT ON ClipboardHistory BEGIN
+                try db.transaction {
+                    try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_ai")
+                    try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_ad")
+                    try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_au")
+
+                    try db.run("""
+                    CREATE TRIGGER ClipboardHistory_ai
+                    AFTER INSERT ON ClipboardHistory
+                    WHEN new.is_encrypted = 0
+                    BEGIN
                         INSERT INTO ClipboardHistory_fts(rowid, search_text, app_name, custom_title)
                         VALUES (new.id, new.search_text, new.app_name, new.custom_title);
                     END
-                """)
+                    """)
 
-                try db.run("""
-                    CREATE TRIGGER IF NOT EXISTS ClipboardHistory_ad AFTER DELETE ON ClipboardHistory BEGIN
+                    try db.run("""
+                    CREATE TRIGGER ClipboardHistory_ad
+                    AFTER DELETE ON ClipboardHistory
+                    WHEN old.is_encrypted = 0
+                    BEGIN
                         INSERT INTO ClipboardHistory_fts(ClipboardHistory_fts, rowid, search_text, app_name, custom_title)
                         VALUES ('delete', old.id, old.search_text, old.app_name, old.custom_title);
                     END
-                """)
+                    """)
 
-                try db.run("""
-                    CREATE TRIGGER IF NOT EXISTS ClipboardHistory_au AFTER UPDATE ON ClipboardHistory BEGIN
+                    try db.run("""
+                    CREATE TRIGGER ClipboardHistory_au
+                    AFTER UPDATE OF search_text, app_name, custom_title, is_encrypted ON ClipboardHistory
+                    WHEN old.search_text IS NOT new.search_text
+                      OR old.app_name IS NOT new.app_name
+                      OR old.custom_title IS NOT new.custom_title
+                      OR old.is_encrypted IS NOT new.is_encrypted
+                    BEGIN
                         INSERT INTO ClipboardHistory_fts(ClipboardHistory_fts, rowid, search_text, app_name, custom_title)
-                        VALUES ('delete', old.id, old.search_text, old.app_name, old.custom_title);
+                        SELECT 'delete', old.id, old.search_text, old.app_name, old.custom_title
+                        WHERE old.is_encrypted = 0;
                         INSERT INTO ClipboardHistory_fts(rowid, search_text, app_name, custom_title)
-                        VALUES (new.id, new.search_text, new.app_name, new.custom_title);
+                        SELECT new.id, new.search_text, new.app_name, new.custom_title
+                        WHERE new.is_encrypted = 0;
                     END
-                """)
+                    """)
+                }
             } catch {
                 log.error("Failed to create FTS5 triggers: \(error.localizedDescription)")
             }
@@ -2855,27 +2884,46 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     }
 
     private nonisolated func ensureFTSTrigramIfAvailable() {
-        dbQueue.async { [weak self] in
+        dbBackgroundQueue.async(qos: .utility, flags: .enforceQoS) { [weak self] in
             guard let self else { return }
+            guard !DeckUserDefaults.securityModeEnabled else { return }
             self.updateFTSTokenizerState()
             guard !self.ftsUsesTrigram else { return }
             guard self.isFTSTrigramAvailable() else { return }
 
             log.info("FTS5 trigram tokenizer available, rebuilding FTS table for CJK support")
-            Task { @MainActor [weak self] in
-                self?.createFTS5Table(forceRecreate: true, preferTrigram: true)
-                self?.rebuildFTSIndex()
-            }
+            self.rebuildFTSIndex(preferTrigram: true)
         }
     }
 
     /// Rebuild FTS index from existing data (call after migration or if FTS gets out of sync)
-    func rebuildFTSIndex() {
-        if withDB({
+    nonisolated func rebuildFTSIndex(preferTrigram: Bool? = nil) {
+        let shouldPreferTrigram = preferTrigram ?? syncOnDBQueue { ftsUsesTrigram }
+        createFTS5Table(forceRecreate: true, preferTrigram: shouldPreferTrigram)
+
+        guard !DeckUserDefaults.securityModeEnabled else {
+            invalidateSearchCache()
+            log.info("FTS5 index cleared and rebuild skipped in security mode")
+            return
+        }
+
+        let rebuilt = syncOnDBQueue { () -> Bool in
             guard let db = self.db else { return false }
-            try db.run("INSERT INTO ClipboardHistory_fts(ClipboardHistory_fts) VALUES ('rebuild')")
-            return true
-        }) == true {
+            do {
+                try db.run("""
+                INSERT INTO ClipboardHistory_fts(rowid, search_text, app_name, custom_title)
+                SELECT id, search_text, app_name, custom_title
+                FROM ClipboardHistory
+                WHERE is_encrypted = 0
+                """)
+                return true
+            } catch {
+                log.error("Failed to rebuild FTS5 index: \(error.localizedDescription)")
+                return false
+            }
+        }
+
+        if rebuilt {
             // FTS 重建后清空搜索缓存，确保缓存与索引一致
             invalidateSearchCache()
             log.info("FTS5 index rebuilt successfully")
@@ -3147,8 +3195,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
     private func rebuildFTSForCustomTitleMigration() {
         let preferTrigram = syncOnDBQueue { ftsUsesTrigram }
-        createFTS5Table(forceRecreate: true, preferTrigram: preferTrigram)
-        rebuildFTSIndex()
+        rebuildFTSIndex(preferTrigram: preferTrigram)
     }
 
     private func backfillFileSearchTextIfNeeded() {
@@ -3904,13 +3951,13 @@ extension DeckSQLManager {
             customTitle: resolvedCustomTitle.lowercased()
         )
 
-        searchTextCache.setObject(entry, forKey: cacheKey)
+        searchTextCache.setObject(entry, forKey: cacheKey, cost: entry.estimatedCost)
         return entry
     }
 
     /// 使缓存失效
     /// - Parameter ids: 要失效的行 ID 列表。如果为 nil，则清空所有缓存
-    private func invalidateSearchCache(ids: [Int64]? = nil) {
+    private nonisolated func invalidateSearchCache(ids: [Int64]? = nil) {
         if let ids = ids {
             for id in ids {
                 searchTextCache.removeObject(forKey: NSNumber(value: id))
@@ -4376,31 +4423,6 @@ extension DeckSQLManager {
         return rowIds
     }
 
-    private nonisolated func insertPreparedPayloadsWithExistingCountInTransaction(
-        _ payloads: [InsertPayload],
-        using db: Connection,
-        table: Table
-    ) throws -> (rowIds: [Int64], deleted: Int) {
-        var rowIds: [Int64] = []
-        rowIds.reserveCapacity(payloads.count)
-        var deletedTotal = 0
-
-        try db.transaction {
-            for payload in payloads {
-                let existingCount: Int = try db.scalar(
-                    table.filter(Col.uniqueId == payload.uniqueId).count
-                )
-                let result = try insertPreparedPayload(payload, using: db, table: table)
-                if existingCount > 0 {
-                    deletedTotal += existingCount
-                }
-                rowIds.append(result.rowId)
-            }
-        }
-
-        return (rowIds, deletedTotal)
-    }
-    
     func insert(item: ClipboardItem, scheduleSemanticEmbedding: Bool = true) async -> Int64 {
         guard let payload = await prepareInsertPayload(for: item) else { return -1 }
 
@@ -4435,28 +4457,22 @@ extension DeckSQLManager {
 
         guard !payloads.isEmpty else { return [] }
 
-        let result: (rowIds: [Int64], deleted: Int)? = await withDBAsync {
-            guard let db = self.db, let table = self.table else { return ([], 0) }
-            return try self.insertPreparedPayloadsWithExistingCountInTransaction(
-                payloads,
-                using: db,
-                table: table
-            )
+        let rowIds: [Int64]? = await withDBAsync {
+            guard let db = self.db, let table = self.table else { return [] }
+            return try self.insertPreparedPayloadsInTransaction(payloads, using: db, table: table)
         }
 
-        guard let result else { return [] }
-        if result.deleted > 0 {
-            invalidateSearchCache()
-        }
+        guard let rowIds else { return [] }
+        invalidateSearchCache(ids: rowIds.filter { $0 > 0 })
 
-        for (index, rowId) in result.rowIds.enumerated() where rowId > 0 {
+        for (index, rowId) in rowIds.enumerated() where rowId > 0 {
             await log.debug("Inserted item with id: \(rowId)")
             if shouldScheduleSemanticEmbedding(for: payloads[index]) {
                 scheduleSemanticEmbeddingUpdate(id: rowId, searchText: payloads[index].searchTextPlain)
             }
         }
 
-        return result.rowIds.filter { $0 > 0 }
+        return rowIds.filter { $0 > 0 }
     }
     
     func delete(filter: SQLite.Expression<Bool>) async {
@@ -4858,19 +4874,48 @@ extension DeckSQLManager {
     }
 
     private func runFTSQuery(_ ftsQuery: String, limit: Int) async -> [Int64] {
+        await runFTSQuery(ftsQuery, typeFilter: nil, tagId: nil, limit: limit)
+    }
+
+    private func runFTSQuery(
+        _ ftsQuery: String,
+        typeFilter: [String]?,
+        tagId: Int?,
+        limit: Int
+    ) async -> [Int64] {
         return await withDBAsync {
             guard let db = self.db else { return [] }
+            var filters = [
+                "ClipboardHistory_fts MATCH ?",
+                "h.is_encrypted = 0"
+            ]
+            var bindings: [Binding?] = [ftsQuery]
+
+            if let types = typeFilter, !types.isEmpty {
+                let placeholders = Array(repeating: "?", count: types.count).joined(separator: ",")
+                filters.append("h.item_type IN (\(placeholders))")
+                bindings.append(contentsOf: types.map { $0 as Binding? })
+            }
+
+            if let tagId, tagId != -1 {
+                filters.append("h.tag_id = ?")
+                bindings.append(tagId)
+            }
+
+            bindings.append(limit)
             let sql = """
-                SELECT rowid, bm25(ClipboardHistory_fts) AS score
+                SELECT ClipboardHistory_fts.rowid, bm25(ClipboardHistory_fts) AS score
                 FROM ClipboardHistory_fts
-                WHERE ClipboardHistory_fts MATCH ?
-                ORDER BY score
+                JOIN ClipboardHistory h ON h.id = ClipboardHistory_fts.rowid
+                WHERE \(filters.joined(separator: " AND "))
+                ORDER BY score, h.timestamp DESC, h.id DESC
                 LIMIT ?
             """
-            let stmt = try db.prepare(sql).bind(ftsQuery, limit)
+            let stmt = try db.prepare(sql).bind(bindings)
             var ids: [Int64] = []
+            ids.reserveCapacity(limit)
             while let row = try stmt.failableNext() {
-                if let id = row[0] as? Int64 {
+                if let id = self.bindingToInt64(row[0]) {
                     ids.append(id)
                 }
             }
@@ -4886,24 +4931,60 @@ extension DeckSQLManager {
         return escaped
     }
 
-    private func searchWithSQLLike(keyword: String, limit: Int) async -> [Int64] {
+    func searchWithSQLLikeRows(
+        keyword: String,
+        typeFilter: [String]? = nil,
+        tagId: Int? = nil,
+        limit: Int
+    ) async -> [Row] {
+        let ids = await searchWithSQLLikeIds(
+            keyword: keyword,
+            typeFilter: typeFilter,
+            tagId: tagId,
+            limit: limit
+        )
+        return await fetchRowsForIds(ids, typeFilter: typeFilter, tagId: tagId)
+    }
+
+    private func searchWithSQLLikeIds(
+        keyword: String,
+        typeFilter: [String]?,
+        tagId: Int?,
+        limit: Int
+    ) async -> [Int64] {
         let escaped = escapeForLike(keyword)
         let pattern = "%\(escaped)%"
 
         return await withDBAsync {
             guard let db = self.db else { return [] }
+            var filters = [
+                "(search_text LIKE ? ESCAPE '\\' OR app_name LIKE ? ESCAPE '\\' OR IFNULL(custom_title, '') LIKE ? ESCAPE '\\')"
+            ]
+            var bindings: [Binding?] = [pattern, pattern, pattern]
+
+            if let types = typeFilter, !types.isEmpty {
+                let placeholders = Array(repeating: "?", count: types.count).joined(separator: ",")
+                filters.append("item_type IN (\(placeholders))")
+                bindings.append(contentsOf: types.map { $0 as Binding? })
+            }
+
+            if let tagId, tagId != -1 {
+                filters.append("tag_id = ?")
+                bindings.append(tagId)
+            }
+
+            bindings.append(limit)
             let sql = """
                 SELECT id FROM ClipboardHistory
-                WHERE search_text LIKE ? ESCAPE '\\'
-                   OR app_name LIKE ? ESCAPE '\\'
-                   OR custom_title LIKE ? ESCAPE '\\'
-                ORDER BY timestamp DESC
+                WHERE \(filters.joined(separator: " AND "))
+                ORDER BY timestamp DESC, id DESC
                 LIMIT ?
             """
-            let stmt = try db.prepare(sql).bind(pattern, pattern, pattern, limit)
+            let stmt = try db.prepare(sql).bind(bindings)
             var ids: [Int64] = []
+            ids.reserveCapacity(limit)
             while let row = try stmt.failableNext() {
-                if let id = row[0] as? Int64 {
+                if let id = self.bindingToInt64(row[0]) {
                     ids.append(id)
                 }
             }
@@ -4913,7 +4994,12 @@ extension DeckSQLManager {
 
     /// Fast full-text search using FTS5
     /// Returns row IDs matching the search term
-    func searchFTS(keyword: String, limit: Int = 50) async -> [Int64] {
+    func searchFTS(
+        keyword: String,
+        typeFilter: [String]? = nil,
+        tagId: Int? = nil,
+        limit: Int = 50
+    ) async -> [Int64] {
         guard !Task.isCancelled else { return [] }
         guard !keyword.isEmpty else { return [] }
         guard syncOnDBQueue({ db != nil }) else { return [] }
@@ -4930,9 +5016,9 @@ extension DeckSQLManager {
         if usesTrigram {
             let ftsQuery = buildFTSQuery(from: trimmed, useTrigram: true)
             guard !ftsQuery.isEmpty else {
-                return await searchWithSQLLike(keyword: trimmed, limit: limit)
+                return await searchWithSQLLikeIds(keyword: trimmed, typeFilter: typeFilter, tagId: tagId, limit: limit)
             }
-            return await runFTSQuery(ftsQuery, limit: limit)
+            return await runFTSQuery(ftsQuery, typeFilter: typeFilter, tagId: tagId, limit: limit)
         }
 
         // 检测是否包含 CJK 字符（中日韩）
@@ -4949,16 +5035,12 @@ extension DeckSQLManager {
 
         // FTS5 默认分词器对 CJK 支持不好，保留内存搜索兜底
         if containsCJK {
-            let sqlIds = await searchWithSQLLike(keyword: trimmed, limit: limit)
-            if !sqlIds.isEmpty {
-                return sqlIds
-            }
-            return await searchWithLike(keyword: trimmed, limit: limit)
+            return await searchWithSQLLikeIds(keyword: trimmed, typeFilter: typeFilter, tagId: tagId, limit: limit)
         }
 
         let ftsQuery = buildFTSQuery(from: trimmed, useTrigram: false)
         guard !ftsQuery.isEmpty else { return [] }
-        return await runFTSQuery(ftsQuery, limit: limit)
+        return await runFTSQuery(ftsQuery, typeFilter: typeFilter, tagId: tagId, limit: limit)
     }
 
     /// In-memory fallback search (security mode or CJK without trigram support)
@@ -5072,7 +5154,12 @@ extension DeckSQLManager {
         var rows: [Row] = []
         while true {
             // Get matching IDs from FTS
-            matchingIds = await searchFTS(keyword: keyword, limit: searchLimit)
+            matchingIds = await searchFTS(
+                keyword: keyword,
+                typeFilter: typeFilter,
+                tagId: tagId,
+                limit: searchLimit
+            )
             guard !matchingIds.isEmpty else { return [] }
 
             rows = await fetchRowsForIds(matchingIds, typeFilter: typeFilter, tagId: tagId)
@@ -6180,7 +6267,7 @@ extension DeckSQLManager {
 
                         let newEmbedding: Data
                         if encrypt {
-                            if SecurityService.decryptWithKey(rawEmbedding, using: migrationKey) != nil {
+                            if SecurityService.decryptWithKeySilently(rawEmbedding, using: migrationKey) != nil {
                                 newEmbedding = rawEmbedding
                             } else if let encrypted = SecurityService.encryptWithKey(rawEmbedding, using: migrationKey) {
                                 newEmbedding = encrypted
@@ -6190,7 +6277,7 @@ extension DeckSQLManager {
                                 break
                             }
                         } else {
-                            newEmbedding = SecurityService.decryptWithKey(rawEmbedding, using: migrationKey) ?? rawEmbedding
+                            newEmbedding = SecurityService.decryptWithKeySilently(rawEmbedding, using: migrationKey) ?? rawEmbedding
                         }
 
                         let updateQuery = tab.filter(EmbeddingCol.id == id)

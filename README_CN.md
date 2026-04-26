@@ -25,10 +25,6 @@
 
 ---
 
-> **Beta 内测说明**  
-> Deck 正在从 Swift 5 迁移到 Swift 6。如果你感兴趣并愿意参与内测，可以前往以下链接下载 Beta 版本：  
-> <https://beta.deckclip.app/Deck.dmg>
-
 <a id="功能特性"></a>
 ## 功能特性
 

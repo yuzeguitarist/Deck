@@ -25,10 +25,6 @@
 
 ---
 
-> **Beta Testing**  
-> Deck is currently migrating from Swift 5 to Swift 6. If you are interested in helping test the beta, you can download the Beta build here:  
-> <https://beta.deckclip.app/Deck.dmg>
-
 ## Features
 
 ### Clipboard History & Search

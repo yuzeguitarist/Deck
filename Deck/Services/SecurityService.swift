@@ -162,6 +162,15 @@ final class SecurityService {
             return nil
         }
     }
+
+    nonisolated static func decryptWithKeySilently(_ encryptedData: Data, using key: SymmetricKey) -> Data? {
+        do {
+            let sealedBox = try AES.GCM.SealedBox(combined: encryptedData)
+            return try AES.GCM.open(sealedBox, using: key)
+        } catch {
+            return nil
+        }
+    }
     
     // MARK: - Touch ID Authentication
     
