@@ -67,7 +67,7 @@ struct HistoryListView: View {
     /// If `orderedItems` shares the same storage with `dataStore.items`, every pagination append
     /// can trigger an expensive Copy-on-Write full-buffer copy, spiking CPU and peak memory.
     @State private var orderedItems: [ClipboardItem] = []
-    @State private var preferredTypes: [String]?
+    @State private var contextSnapshot: ContextAwareService.RankingSnapshot?
     @State private var workspaceObserver: NSObjectProtocol?
     @State private var interaction = HistoryListInteractionState()
     @State private var scrollRequestToken: Int = 0
@@ -142,7 +142,9 @@ struct HistoryListView: View {
             return dataStore.items
         }
         if DeckUserDefaults.contextAwareEnabled {
-            // 兜底：若异步刷新尚未完成，回退到原始列表避免出现空白
+            // 兜底：若同步刷新尚未完成，回退到原始列表；
+            // 若上下文快照已失效，不展示上一轮上下文的旧排序，避免首帧跳序。
+            guard contextSnapshot != nil else { return dataStore.items }
             return orderedItems.isEmpty ? dataStore.items : orderedItems
         }
         return dataStore.items
@@ -200,7 +202,7 @@ struct HistoryListView: View {
                 resetInitialSelection(force: true)
                 resetPreviewState()
             } else {
-                preferredTypes = nil
+                contextSnapshot = nil
                 clearQuickPasteModifierState()
                 resetPreviewState()
             }
@@ -646,9 +648,9 @@ struct HistoryListView: View {
             !pasteQueue.isQueueMode
         if shouldReorder {
             refreshDisplayItems()
-        } else if !orderedItems.isEmpty || preferredTypes != nil {
+        } else if !orderedItems.isEmpty || contextSnapshot != nil {
             orderedItems = []
-            preferredTypes = nil
+            contextSnapshot = nil
         }
         if dataStore.lastChangeType == .search || dataStore.lastChangeType == .reset {
             let firstId = displayItems.first?.id
@@ -1437,7 +1439,7 @@ struct HistoryListView: View {
         return true
     }
     
-    private func refreshDisplayItems(usePreAppContext: Bool = false, preferredTypesOverride: [String]? = nil) {
+    private func refreshDisplayItems(usePreAppContext: Bool = false, snapshotOverride: ContextAwareService.RankingSnapshot? = nil) {
         let trimmedQuery = vm.query.trimmingCharacters(in: .whitespacesAndNewlines)
         let shouldLogSearch = log.isEnabled(.debug) && dataStore.lastChangeType == .search && !trimmedQuery.isEmpty
         if shouldLogSearch {
@@ -1451,7 +1453,7 @@ struct HistoryListView: View {
             // No reordering needed. Keep `orderedItems` empty to avoid sharing storage with
             // `dataStore.items` (prevents COW full-array copies during pagination appends).
             orderedItems = []
-            preferredTypes = nil
+            contextSnapshot = nil
             if shouldLogSearch {
                 let preview = dataStore.items.prefix(10).compactMap { $0.id }.map(String.init).joined(separator: ", ")
                 if !preview.isEmpty {
@@ -1464,7 +1466,7 @@ struct HistoryListView: View {
         if !trimmedQuery.isEmpty {
             // Searching: use DB order directly; avoid mirroring `dataStore.items`.
             orderedItems = []
-            preferredTypes = nil
+            contextSnapshot = nil
             if shouldLogSearch {
                 let preview = dataStore.items.prefix(10).compactMap { $0.id }.map(String.init).joined(separator: ", ")
                 if !preview.isEmpty {
@@ -1478,7 +1480,7 @@ struct HistoryListView: View {
             // 队列模式下禁用上下文重排，维持时间顺序
             // Avoid mirroring `dataStore.items` to prevent COW full-array copies.
             orderedItems = []
-            preferredTypes = nil
+            contextSnapshot = nil
             if shouldLogSearch {
                 let preview = dataStore.items.prefix(10).compactMap { $0.id }.map(String.init).joined(separator: ", ")
                 if !preview.isEmpty {
@@ -1488,25 +1490,22 @@ struct HistoryListView: View {
             return
         }
         
-        let previousCachedTypes = preferredTypes?.joined(separator: ",") ?? "nil"
-        let contextTypes: [String]?
-        if let override = preferredTypesOverride {
-            contextTypes = override
+        let previousCachedTypes = contextSnapshot?.preferredTypes.joined(separator: ",") ?? "nil"
+        let snapshot: ContextAwareService.RankingSnapshot?
+        if let snapshotOverride {
+            snapshot = snapshotOverride
         } else if usePreAppContext,
                   let preApp = MainWindowController.shared.preApp,
                   preApp.bundleIdentifier != Bundle.main.bundleIdentifier {
-            contextTypes = ContextAwareService.shared.getPreferredTypes(for: preApp)
+            snapshot = ContextAwareService.shared.primedSnapshot(for: preApp)
+                ?? ContextAwareService.shared.makeRankingSnapshot(for: preApp)
+        } else if let cached = contextSnapshot {
+            snapshot = cached
         } else {
-            let resolved = ContextAwareService.shared.getPreferredTypes()
-            if let resolved {
-                contextTypes = resolved
-            } else if let cached = preferredTypes {
-                contextTypes = cached
-            } else {
-                contextTypes = nil
-            }
+            snapshot = ContextAwareService.shared.makeRankingSnapshot()
         }
-        preferredTypes = contextTypes
+        contextSnapshot = snapshot
+        let contextTypes = snapshot?.preferredTypes
 
         if log.isEnabled(.debug) {
             let preAppBundle = MainWindowController.shared.preApp?.bundleIdentifier ?? "nil"
@@ -1520,7 +1519,7 @@ struct HistoryListView: View {
             #endif
         }
 
-        guard let contextTypes else {
+        guard let snapshot else {
             // No mapping for current context: keep DB order.
             // IMPORTANT: Do not mirror dataStore.items here; it would share storage and trigger
             // expensive full-buffer Copy-on-Write when pagination appends new items.
@@ -1535,7 +1534,7 @@ struct HistoryListView: View {
         
         let reordered = ContextAwareService.shared.reorderItems(
             dataStore.items,
-            preferredTypes: contextTypes
+            snapshot: snapshot
         )
         
         if !hasSameItemOrder(orderedItems, reordered) {
@@ -1580,8 +1579,8 @@ struct HistoryListView: View {
             }
             MainActor.assumeIsolated {
                 guard DeckUserDefaults.contextAwareEnabled else { return }
-                let types = ContextAwareService.shared.getPreferredTypes(forBundleIdentifier: appBundleIdentifier)
-                refreshDisplayItems(preferredTypesOverride: types)
+                let snapshot = ContextAwareService.shared.makeRankingSnapshot(for: app)
+                refreshDisplayItems(snapshotOverride: snapshot)
                 resetInitialSelection(force: true)
             }
         }

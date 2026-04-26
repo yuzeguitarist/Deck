@@ -105,7 +105,7 @@ enum ClipItemType: String, Codable, Sendable {
     }
 }
 
-struct SmartAnalysisTaskKey: Hashable {
+struct SmartAnalysisTaskKey: Hashable, Sendable {
     let uniqueId: String
     let searchTextVersion: UInt64
     let instantCalculationEnabled: Bool
@@ -150,6 +150,8 @@ final class ClipboardItem: Identifiable, Equatable {
             cachedURL = nil
             analysisLock.lock()
             cachedSmartAnalysis = nil
+            cachedContextAwareCodeLanguage = nil
+            contextAwareCodeLanguageChecked = false
             cachedIsMarkdown = nil
             cachedCalculationResult = nil
             calculationResultChecked = false
@@ -225,6 +227,12 @@ final class ClipboardItem: Identifiable, Equatable {
     
     @ObservationIgnored
     private var cachedSmartAnalysis: SmartTextService.DetectionResult?
+
+    @ObservationIgnored
+    private var cachedContextAwareCodeLanguage: SmartTextService.CodeLanguage?
+
+    @ObservationIgnored
+    private var contextAwareCodeLanguageChecked: Bool = false
     
     @ObservationIgnored
     private var cachedIsMarkdown: Bool?
@@ -1788,6 +1796,42 @@ final class ClipboardItem: Identifiable, Equatable {
     
     var detectedCodeLanguage: SmartTextService.CodeLanguage? {
         smartAnalysis.codeLanguage
+    }
+
+    /// Lightweight code-language signal for ranking paths.
+    ///
+    /// Context-aware ordering only needs a small language bonus, so avoid the full
+    /// `smartAnalysis` pipeline (email/URL/phone/JWT detectors) during panel open.
+    var contextAwareCodeLanguage: SmartTextService.CodeLanguage? {
+        analysisLock.lock()
+        if let cachedSmartAnalysis {
+            let language = cachedSmartAnalysis.codeLanguage
+            analysisLock.unlock()
+            return language
+        }
+        if contextAwareCodeLanguageChecked {
+            let language = cachedContextAwareCodeLanguage
+            analysisLock.unlock()
+            return language
+        }
+        analysisLock.unlock()
+
+        guard itemType == .text || itemType == .richText || itemType == .code else {
+            analysisLock.lock()
+            cachedContextAwareCodeLanguage = nil
+            contextAwareCodeLanguageChecked = true
+            analysisLock.unlock()
+            return nil
+        }
+
+        let sample = Self.sampleText(searchText, maxLength: 2_048)
+        let language = SmartTextService.shared.detectCodeLanguage(in: sample)
+
+        analysisLock.lock()
+        cachedContextAwareCodeLanguage = language
+        contextAwareCodeLanguageChecked = true
+        analysisLock.unlock()
+        return language
     }
     
     var isMarkdown: Bool {

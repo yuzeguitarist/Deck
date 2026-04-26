@@ -19,7 +19,20 @@ final class SecurityService {
         static let keychainService = "com.deck.encryption"
         static let keychainAccount = "master-key"
 
+        private enum BackgroundKeychainLoadResult {
+            case success(Data)
+            case notFound
+            case failure(OSStatus)
+        }
+
         static func currentKey() -> SymmetricKey? {
+            guard case .success(let keyData) = loadKeyFromKeychain() else {
+                return nil
+            }
+            return SymmetricKey(data: keyData)
+        }
+
+        private static func loadKeyFromKeychain() -> BackgroundKeychainLoadResult {
             let query: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: keychainService,
@@ -30,15 +43,27 @@ final class SecurityService {
 
             var result: AnyObject?
             let status = SecItemCopyMatching(query as CFDictionary, &result)
-            guard status == errSecSuccess, let keyData = result as? Data else {
-                return nil
+            if status == errSecSuccess {
+                guard let keyData = result as? Data else {
+                    return .failure(errSecInternalError)
+                }
+                return .success(keyData)
             }
-            return SymmetricKey(data: keyData)
+            if status == errSecItemNotFound {
+                return .notFound
+            }
+            return .failure(status)
         }
 
         static func currentOrCreateKey() -> SymmetricKey? {
-            if let key = currentKey() {
-                return key
+            switch loadKeyFromKeychain() {
+            case .success(let keyData):
+                return SymmetricKey(data: keyData)
+            case .notFound:
+                break
+            case .failure(let status):
+                log.error("BackgroundCrypto: failed to load encryption key from Keychain: \(status)")
+                return nil
             }
 
             let key = SymmetricKey(size: .bits256)
