@@ -782,6 +782,9 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
     /// Backfill cache for legacy rows with empty unique_id values.
     /// Keeps a stable generated UUID per row until the DB update succeeds.
+    /// - Important: Access only through the pending-unique-id helpers below so
+    ///   read mapping and background metadata backfill stay serialized on the
+    ///   writer DB queue.
     private nonisolated(unsafe) var pendingUniqueIdBackfill: [Int64: String] = [:]
     private nonisolated(unsafe) var readPathMetadataBackfillScheduled = false
     private var hasConfiguredSensitiveCacheObservation = false
@@ -5719,14 +5722,7 @@ extension DeckSQLManager {
             let storedUniqueId = try row.get(Col.uniqueId)
             let uniqueId: String
             if storedUniqueId.isEmpty {
-                uniqueId = syncOnDBQueue {
-                    if let pending = pendingUniqueIdBackfill[id] {
-                        return pending
-                    }
-                    let newId = UUID().uuidString
-                    pendingUniqueIdBackfill[id] = newId
-                    return newId
-                }
+                uniqueId = stablePendingUniqueId(for: id)
             } else {
                 uniqueId = storedUniqueId
             }
@@ -5832,14 +5828,7 @@ extension DeckSQLManager {
             return existing
         }
 
-        let resolvedUniqueId = syncOnDBQueue {
-            if let pending = pendingUniqueIdBackfill[id] {
-                return pending
-            }
-            let newId = UUID().uuidString
-            pendingUniqueIdBackfill[id] = newId
-            return newId
-        }
+        let resolvedUniqueId = stablePendingUniqueId(for: id)
 
         backfillUniqueIdIfNeeded(id: id, uniqueId: resolvedUniqueId)
         return resolvedUniqueId
@@ -6111,6 +6100,44 @@ extension DeckSQLManager {
         } ?? []
     }
 
+    private nonisolated func stablePendingUniqueId(for id: Int64) -> String {
+        syncOnDBQueue {
+            if let pending = pendingUniqueIdBackfill[id] {
+                return pending
+            }
+            let newId = UUID().uuidString
+            pendingUniqueIdBackfill[id] = newId
+            return newId
+        }
+    }
+
+    private nonisolated func existingPendingUniqueIds(for ids: [Int64]) -> [Int64: String] {
+        syncOnDBQueue {
+            var result: [Int64: String] = [:]
+            result.reserveCapacity(ids.count)
+            for id in ids {
+                if let pending = pendingUniqueIdBackfill[id] {
+                    result[id] = pending
+                }
+            }
+            return result
+        }
+    }
+
+    private nonisolated func removePendingUniqueIdIfMatching(id: Int64, uniqueId: String) {
+        removePendingUniqueIdsIfMatching([id: uniqueId])
+    }
+
+    private nonisolated func removePendingUniqueIdsIfMatching(_ uniqueIdsByRowId: [Int64: String]) {
+        guard !uniqueIdsByRowId.isEmpty else { return }
+        syncOnDBQueue {
+            for (id, uniqueId) in uniqueIdsByRowId {
+                guard pendingUniqueIdBackfill[id] == uniqueId else { continue }
+                pendingUniqueIdBackfill.removeValue(forKey: id)
+            }
+        }
+    }
+
     private func backfillUniqueIdIfNeeded(id: Int64, uniqueId: String) {
         Task { [weak self] in
             guard let self else { return }
@@ -6121,9 +6148,7 @@ extension DeckSQLManager {
             } ?? false
 
             if didUpdate {
-                _ = self.syncOnDBQueue {
-                    self.pendingUniqueIdBackfill.removeValue(forKey: id)
-                }
+                self.removePendingUniqueIdIfMatching(id: id, uniqueId: uniqueId)
             }
         }
     }
@@ -6174,21 +6199,25 @@ extension DeckSQLManager {
 
                 let updateSQL = "UPDATE ClipboardHistory SET unique_id = ? WHERE id = ? AND unique_id = ''"
                 let updateStmt = try db.prepare(updateSQL)
+                let pendingUniqueIds = self.existingPendingUniqueIds(for: ids)
+                var committedPendingUniqueIds: [Int64: String] = [:]
+                committedPendingUniqueIds.reserveCapacity(pendingUniqueIds.count)
                 var updated = 0
                 try db.transaction {
                     for id in ids {
-                        let pendingUniqueId = self.pendingUniqueIdBackfill[id]
+                        let pendingUniqueId = pendingUniqueIds[id]
                         let uniqueId = pendingUniqueId ?? UUID().uuidString
                         try updateStmt.run(uniqueId, id)
                         let changes = Int(db.changes)
                         if changes > 0 {
                             updated += changes
-                            if pendingUniqueId != nil {
-                                self.pendingUniqueIdBackfill.removeValue(forKey: id)
+                            if let pendingUniqueId {
+                                committedPendingUniqueIds[id] = pendingUniqueId
                             }
                         }
                     }
                 }
+                self.removePendingUniqueIdsIfMatching(committedPendingUniqueIds)
                 return updated
             } ?? 0
 
@@ -6237,14 +6266,7 @@ extension DeckSQLManager {
             let storedUniqueId = try row.get(Col.uniqueId)
             let resolvedUniqueId: String
             if storedUniqueId.isEmpty {
-                resolvedUniqueId = syncOnDBQueue {
-                    if let pending = pendingUniqueIdBackfill[id] {
-                        return pending
-                    }
-                    let newId = UUID().uuidString
-                    pendingUniqueIdBackfill[id] = newId
-                    return newId
-                }
+                resolvedUniqueId = stablePendingUniqueId(for: id)
             } else {
                 resolvedUniqueId = storedUniqueId
             }
