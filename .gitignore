@@ -31,6 +31,11 @@ Deck/Services/*
 !Deck/Services/DataExportService.swift
 !Deck/Services/DeckSQLManager.swift
 !Deck/Services/SecurityService.swift
+!Deck/Services/TextTransformer.swift
+!Deck/Services/WebToolService.swift
+!Deck/Services/LANFileArchiver.swift
+!Deck/Services/MaccyMigrationAdapter.swift
+!Deck/Services/AppleStreamingMetadataResolver.swift
 
 # 公开
 !Deck/Utilities/
@@ -54,6 +59,12 @@ Deck/Resources/*
 Deck/App/
 Deck/Controllers/
 Deck/Views/
+!Deck/Views/
+Deck/Views/*
+!Deck/Views/AIChat/
+Deck/Views/AIChat/*
+!Deck/Views/AIChat/AIChatBreathingDot.swift
+!Deck/Views/AIChat/AIStreamingTextAccumulator.swift
 Deck/Assets.xcassets/
 Deck/DeckApp.swift
 Deck/Deck.entitlements
