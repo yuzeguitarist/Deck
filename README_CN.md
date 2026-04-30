@@ -19,7 +19,7 @@
   <a href="https://deckclip.app/zh-cn">
     <img src="https://img.shields.io/badge/platform-macOS_14+-blue?style=flat-square" alt="macOS 14+ 剪贴板管理器">
     <img src="https://img.shields.io/badge/swift-5.9+-F05138?style=flat-square&logo=swift&logoColor=white" alt="基于 Swift 5.9+ 构建">
-    <img src="https://img.shields.io/badge/license-All_Rights_Reserved-red?style=flat-square" alt="保留所有权利">
+    <img src="https://img.shields.io/badge/license-AGPL_v3_%26_ARR-blue?style=flat-square" alt="deckclip AGPLv3，其他 ARR">
   </a>
 </p>
 
@@ -189,7 +189,10 @@ brew install --cask deckclip
 <a id="许可证"></a>
 ## 许可证
 
-本项目为**源码可见**，并且 **保留所有权利（All Rights Reserved）** — 详见 [LICENSE](LICENSE)。
+本项目采用**双许可证**策略：
+
+- `Deck/deckclip` 目录下的代码以 **GNU AGPL v3.0 only** 发布 — 详见 [`deckclip/LICENSE`](deckclip/LICENSE)。
+- 其他目录与文件为 **源码可见**，并且 **保留所有权利（All Rights Reserved）** — 详见 [LICENSE](LICENSE)。
 
 ### 使用与权利说明
 

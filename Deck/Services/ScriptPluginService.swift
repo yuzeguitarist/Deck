@@ -143,7 +143,7 @@ nonisolated struct ScriptManifest: Codable, Sendable {
 
 // MARK: - Script Execution Result
 
-struct ScriptResult {
+struct ScriptResult: Sendable {
     let success: Bool
     let output: String?
     let error: String?
@@ -237,6 +237,7 @@ nonisolated final class ScriptPluginService: @unchecked Sendable {
         qos: .utility,
         attributes: .concurrent
     )
+    @ObservationIgnored private let scriptTimeoutQueue = DispatchQueue(label: "deck.script.timeout", qos: .utility)
     private let defaultPluginAuthor = "Deck"
     private let legacyDefaultPluginDirectoryNames: Set<String> = [
         "base64-encode",
@@ -259,20 +260,49 @@ nonisolated final class ScriptPluginService: @unchecked Sendable {
         return URLSession(configuration: config, delegate: DeckOutboundHTTPRedirectDelegate(), delegateQueue: nil)
     }()
 
+    private enum ExecutionInterruptionReason {
+        case timeout
+        case cancelled
+    }
+
     private final class ExecutionState: @unchecked Sendable {
         private let lock = NSLock()
-        private var interrupted = false
+        private var interruptionReason: ExecutionInterruptionReason?
 
-        func markInterrupted() {
+        func markInterrupted(reason: ExecutionInterruptionReason) {
             lock.lock()
-            interrupted = true
+            interruptionReason = reason
             lock.unlock()
         }
 
         func isInterrupted() -> Bool {
             lock.lock()
             defer { lock.unlock() }
-            return interrupted
+            return interruptionReason != nil
+        }
+
+        func interruptedByTimeout() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return interruptionReason == .timeout
+        }
+    }
+
+    private final class ScriptCompletionBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var isCompleted = false
+
+        @discardableResult
+        func complete(_ result: ScriptResult, using completion: @escaping @Sendable (ScriptResult) -> Void) -> Bool {
+            lock.lock()
+            guard !isCompleted else {
+                lock.unlock()
+                return false
+            }
+            isCompleted = true
+            lock.unlock()
+            completion(result)
+            return true
         }
     }
 
@@ -1027,8 +1057,12 @@ nonisolated final class ScriptPluginService: @unchecked Sendable {
 
     private func clearExecutionStates() {
         stateLock.lock()
+        let runningStates = Array(executionStates.values)
         executionStates.removeAll()
         stateLock.unlock()
+        for state in runningStates {
+            state.markInterrupted(reason: .cancelled)
+        }
     }
 
     /// 执行脚本转换（带安全检查）
@@ -1047,61 +1081,115 @@ nonisolated final class ScriptPluginService: @unchecked Sendable {
     /// 异步执行脚本转换（不会阻塞调用方线程）
     func executeTransformAsync(pluginId: String, input: String) async -> ScriptResult {
         await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .utility).async { [weak self] in
-                let result = self?.executeTransformInternal(pluginId: pluginId, input: input)
-                    ?? ScriptResult(
-                        success: false,
-                        output: nil,
-                        error: NSLocalizedString("执行失败", comment: "Script execution failed")
-                    )
+            executeTransformInternalAsync(pluginId: pluginId, input: input) { result in
                 continuation.resume(returning: result)
             }
         }
     }
 
-    private func executeTransformInternal(pluginId: String, input: String) -> ScriptResult {
-        let plugin: ScriptPlugin? = {
-            pluginsLock.lock()
-            defer { pluginsLock.unlock() }
-            return pluginsById[pluginId]
-        }()
-        guard let plugin else {
-            return ScriptResult(
-                success: false,
-                output: nil,
-                error: NSLocalizedString("插件不存在", comment: "Script plugin does not exist")
+    private func pluginForExecution(pluginId: String) -> ScriptPlugin? {
+        pluginsLock.lock()
+        defer { pluginsLock.unlock() }
+        return pluginsById[pluginId]
+    }
+
+    private func pluginNotFoundResult() -> ScriptResult {
+        ScriptResult(
+            success: false,
+            output: nil,
+            error: NSLocalizedString("插件不存在", comment: "Script plugin does not exist")
+        )
+    }
+
+    private func inputTooLongResult(maxInput: Int) -> ScriptResult {
+        ScriptResult(
+            success: false,
+            output: nil,
+            error: String(
+                format: NSLocalizedString("输入超过最大长度限制 (%d 字符)", comment: "Script input too long"),
+                maxInput
             )
+        )
+    }
+
+    private func outputTooLongResult() -> ScriptResult {
+        ScriptResult(
+            success: false,
+            output: nil,
+            error: String(
+                format: NSLocalizedString("输出超过最大长度限制 (%d 字符)", comment: "Script output too long"),
+                Const.scriptMaxOutputLength
+            )
+        )
+    }
+
+    private func validateScriptOutput(_ result: ScriptResult) -> ScriptResult {
+        if let output = result.output, output.count > Const.scriptMaxOutputLength {
+            return outputTooLongResult()
+        }
+        return result
+    }
+
+    private static func scriptExecutionFailedResult() -> ScriptResult {
+        ScriptResult(
+            success: false,
+            output: nil,
+            error: NSLocalizedString("执行失败", comment: "Script execution failed")
+        )
+    }
+
+    private static func scriptTimeoutResult(timeout: TimeInterval) -> ScriptResult {
+        ScriptResult(
+            success: false,
+            output: nil,
+            error: String(
+                format: NSLocalizedString("脚本执行超时（超过 %d 秒）\n注意：包含死循环的脚本可能仍在后台运行", comment: "Script execution timeout"),
+                Int(timeout)
+            )
+        )
+    }
+
+    private func executeTransformInternal(pluginId: String, input: String) -> ScriptResult {
+        let plugin = pluginForExecution(pluginId: pluginId)
+        guard let plugin else {
+            return pluginNotFoundResult()
         }
 
         // 输入长度检查
         let maxInput = DeckUserDefaults.scriptMaxInputLength
         guard input.count <= maxInput else {
-            return ScriptResult(
-                success: false,
-                output: nil,
-                error: String(
-                    format: NSLocalizedString("输入超过最大长度限制 (%d 字符)", comment: "Script input too long"),
-                    maxInput
-                )
-            )
+            return inputTooLongResult(maxInput: maxInput)
         }
 
         // 执行脚本（带超时）
         let result = executeScriptWithTimeout(plugin: plugin, input: input)
+        return validateScriptOutput(result)
+    }
 
-        // 输出长度检查
-        if let output = result.output, output.count > Const.scriptMaxOutputLength {
-            return ScriptResult(
-                success: false,
-                output: nil,
-                error: String(
-                    format: NSLocalizedString("输出超过最大长度限制 (%d 字符)", comment: "Script output too long"),
-                    Const.scriptMaxOutputLength
-                )
-            )
+    private func executeTransformInternalAsync(
+        pluginId: String,
+        input: String,
+        completion: @escaping @Sendable (ScriptResult) -> Void
+    ) {
+        let plugin = pluginForExecution(pluginId: pluginId)
+        guard let plugin else {
+            completion(pluginNotFoundResult())
+            return
         }
 
-        return result
+        let maxInput = DeckUserDefaults.scriptMaxInputLength
+        guard input.count <= maxInput else {
+            completion(inputTooLongResult(maxInput: maxInput))
+            return
+        }
+
+        executeScriptWithTimeoutAsync(plugin: plugin, input: input) { [weak self] result in
+            guard let self else {
+                completion(Self.scriptExecutionFailedResult())
+                return
+            }
+            completion(self.validateScriptOutput(result))
+        }
     }
 
     /// 带超时的脚本执行
@@ -1171,28 +1259,70 @@ nonisolated final class ScriptPluginService: @unchecked Sendable {
 
         if waitResult == .timedOut {
             // 标记为已中断（用于 fetch 等检查）
-            executionState.markInterrupted()
+            executionState.markInterrupted(reason: .timeout)
             finishTask(executionId)
             
             log.warn("Script \(plugin.id) execution timed out after \(Int(timeout)) seconds.")
             
-            return ScriptResult(
-                success: false,
-                output: nil,
-                error: String(
-                    format: NSLocalizedString("脚本执行超时（超过 %d 秒）\n注意：包含死循环的脚本可能仍在后台运行", comment: "Script execution timeout"),
-                    Int(timeout)
-                )
-            )
+            return Self.scriptTimeoutResult(timeout: timeout)
         }
 
         // 清理任务追踪
         finishTask(executionId)
-        return resultBox.result ?? ScriptResult(
-            success: false,
-            output: nil,
-            error: NSLocalizedString("执行失败", comment: "Script execution failed")
-        )
+        return resultBox.result ?? Self.scriptExecutionFailedResult()
+    }
+
+    /// Async timeout path used by Swift concurrency callers. Unlike the sync
+    /// wrapper above, this never parks a global worker thread while waiting for
+    /// the script queue or the timeout deadline.
+    private func executeScriptWithTimeoutAsync(
+        plugin: ScriptPlugin,
+        input: String,
+        completion: @escaping @Sendable (ScriptResult) -> Void
+    ) {
+        let timeout = TimeInterval(DeckUserDefaults.scriptTimeout)
+        let executionId = UUID().uuidString
+        let executionState = markTaskRunning(executionId)
+        let completionBox = ScriptCompletionBox()
+
+        let timeoutWorkItem = DispatchWorkItem { [weak self] in
+            executionState.markInterrupted(reason: .timeout)
+            self?.finishTask(executionId)
+            if completionBox.complete(Self.scriptTimeoutResult(timeout: timeout), using: completion) {
+                log.warn("Script \(plugin.id) execution timed out after \(Int(timeout)) seconds.")
+            }
+        }
+        let timeoutWorkItemBox = UncheckedSendable(timeoutWorkItem)
+
+        scriptTimeoutQueue.asyncAfter(deadline: .now() + timeout, execute: timeoutWorkItem)
+
+        scriptExecutionQueue.async { [weak self] in
+            guard let self else {
+                timeoutWorkItemBox.value.cancel()
+                executionState.markInterrupted(reason: .cancelled)
+                completionBox.complete(Self.scriptExecutionFailedResult(), using: completion)
+                return
+            }
+
+            guard self.isTaskRunning(executionId) else {
+                timeoutWorkItemBox.value.cancel()
+                if executionState.interruptedByTimeout() {
+                    return
+                }
+                completionBox.complete(Self.scriptExecutionFailedResult(), using: completion)
+                return
+            }
+
+            let result = self.executeScript(
+                plugin: plugin,
+                input: input,
+                executionState: executionState,
+                timeout: timeout
+            )
+            timeoutWorkItemBox.value.cancel()
+            self.finishTask(executionId)
+            completionBox.complete(result, using: completion)
+        }
     }
 
     /// 执行脚本（内部方法，不带安全检查）

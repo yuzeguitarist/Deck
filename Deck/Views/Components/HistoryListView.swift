@@ -77,6 +77,7 @@ struct HistoryListView: View {
     private let previewUpdateInterval: TimeInterval = 0.12
     @State private var pasteQueue = PasteQueueService.shared
     @State private var isQuickPasteModifierHeld = false
+    @State private var feedbackSurveyCard = FeedbackSurveyCardController.shared
     
     // MARK: - Scroll Wheel Navigation
     /// Non-precise wheel devices (most mice) send deltas in line-based steps.
@@ -150,13 +151,23 @@ struct HistoryListView: View {
         return dataStore.items
     }
 
-    private var quickPasteOverlayMap: [ClipboardItem.ID: Int] {
+    private func quickPasteOverlayMap(for items: [ClipboardItem]) -> [ClipboardItem.ID: Int] {
         guard isQuickPasteModifierHeld else { return [:] }
-        return DeckQuickPasteResolver.quickPasteNumbers(in: displayItems, selectedItemId: selectedId)
+        return DeckQuickPasteResolver.quickPasteNumbers(in: items, selectedItemId: selectedId)
     }
 
     private var shouldShowInitialLoadingState: Bool {
         dataStore.items.isEmpty && dataStore.isPreparingInitialPresentation
+    }
+
+    private var shouldShowFeedbackSurveyCard: Bool {
+        feedbackSurveyCard.shouldShowCard(
+            itemCount: max(dataStore.totalCount, dataStore.items.count),
+            query: vm.query,
+            selectedTagId: vm.selectedTagId,
+            isSearching: vm.isSearching,
+            isQueueMode: pasteQueue.isQueueMode
+        )
     }
     
     var body: some View {
@@ -222,6 +233,8 @@ struct HistoryListView: View {
             }
             // Close preview when panel disappears
             resetPreviewState()
+            itemToDelete = nil
+            vm.isShowingDeleteConfirm = false
         }
     }
 
@@ -489,10 +502,23 @@ struct HistoryListView: View {
     // MARK: - Horizontal Scroll Content (横版模式)
 
     private func horizontalScrollContent(proxy: ScrollViewProxy) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
+        let items = displayItems
+        let quickPasteNumbers = quickPasteOverlayMap(for: items)
+
+        return ScrollView(.horizontal, showsIndicators: false) {
             LazyHStack(alignment: .top, spacing: Const.cardSpace) {
-                ForEach(IndexedCollection(displayItems), id: \.element.id) { index, item in
-                    horizontalCard(for: item, at: index)
+                if shouldShowFeedbackSurveyCard {
+                    FeedbackSurveyCardView(
+                        cardSize: vm.horizontalCardSize,
+                        isHorizontalLayout: true,
+                        onOpenSurvey: openFeedbackSurvey,
+                        onHideForCurrentSession: hideFeedbackSurveyForCurrentSession,
+                        onHidePermanently: hideFeedbackSurveyPermanently
+                    )
+                }
+
+                ForEach(IndexedCollection(items), id: \.element.id) { index, item in
+                    horizontalCard(for: item, at: index, quickPasteNumbers: quickPasteNumbers)
                 }
             }
             .padding(.horizontal, Const.cardSpace)
@@ -517,19 +543,6 @@ struct HistoryListView: View {
         .onChange(of: dataStore.items) { _, _ in
             handleItemsChanged()
         }
-        .alert("确认删除", isPresented: $vm.isShowingDeleteConfirm) {
-            Button("取消", role: .cancel) {
-                itemToDelete = nil
-                restoreWindowFocus()
-            }
-            Button("删除", role: .destructive) {
-                if let item = itemToDelete { performDelete(item) }
-                itemToDelete = nil
-                restoreWindowFocus()
-            }
-        } message: {
-            Text("确定要删除这条记录吗？")
-        }
         .onChange(of: pasteQueue.isQueueMode) { _, _ in
             refreshDisplayItems()
         }
@@ -538,15 +551,28 @@ struct HistoryListView: View {
     // MARK: - Vertical Scroll Content (竖版模式)
 
     private func verticalScrollContent(proxy: ScrollViewProxy) -> some View {
-        ScrollView(.vertical, showsIndicators: false) {
+        let items = displayItems
+        let quickPasteNumbers = quickPasteOverlayMap(for: items)
+
+        return ScrollView(.vertical, showsIndicators: false) {
             LazyVStack(spacing: Const.verticalRowSpace) {
                 Color.clear
                     .frame(height: verticalListTopInset)
                     .id(verticalTopSpacerID)
                     .allowsHitTesting(false)
 
-                ForEach(IndexedCollection(displayItems), id: \.element.id) { index, item in
-                    verticalRow(for: item, at: index)
+                if shouldShowFeedbackSurveyCard {
+                    FeedbackSurveyCardView(
+                        cardSize: vm.horizontalCardSize,
+                        isHorizontalLayout: false,
+                        onOpenSurvey: openFeedbackSurvey,
+                        onHideForCurrentSession: hideFeedbackSurveyForCurrentSession,
+                        onHidePermanently: hideFeedbackSurveyPermanently
+                    )
+                }
+
+                ForEach(IndexedCollection(items), id: \.element.id) { index, item in
+                    verticalRow(for: item, at: index, quickPasteNumbers: quickPasteNumbers)
                 }
 
                 Color.clear
@@ -576,33 +602,26 @@ struct HistoryListView: View {
         .onChange(of: dataStore.items) { _, _ in
             handleItemsChanged()
         }
-        .alert("确认删除", isPresented: $vm.isShowingDeleteConfirm) {
-            Button("取消", role: .cancel) {
-                itemToDelete = nil
-                restoreWindowFocus()
-            }
-            Button("删除", role: .destructive) {
-                if let item = itemToDelete { performDelete(item) }
-                itemToDelete = nil
-                restoreWindowFocus()
-            }
-        } message: {
-            Text("确定要删除这条记录吗？")
-        }
         .onChange(of: pasteQueue.isQueueMode) { _, _ in
             refreshDisplayItems()
         }
     }
 
     @ViewBuilder
-    private func horizontalCard(for item: ClipboardItem, at index: Int) -> some View {
+    private func horizontalCard(
+        for item: ClipboardItem,
+        at index: Int,
+        quickPasteNumbers: [ClipboardItem.ID: Int]
+    ) -> some View {
         let isItemSelected = selectedId == item.id
-        let quickPasteNumber = quickPasteOverlayMap[item.id]
+        let quickPasteNumber = quickPasteNumbers[item.id]
 
         ClipItemCardView(
             item: item,
             isSelected: isItemSelected,
             showPreview: makePreviewBinding(for: item.id),
+            cardSize: vm.horizontalCardSize,
+            isHorizontalLayout: true,
             quickPasteNumber: quickPasteNumber,
             onDelete: { deleteItem(item) }
         )
@@ -617,9 +636,13 @@ struct HistoryListView: View {
     }
 
     @ViewBuilder
-    private func verticalRow(for item: ClipboardItem, at index: Int) -> some View {
+    private func verticalRow(
+        for item: ClipboardItem,
+        at index: Int,
+        quickPasteNumbers: [ClipboardItem.ID: Int]
+    ) -> some View {
         let isItemSelected = selectedId == item.id
-        let quickPasteNumber = quickPasteOverlayMap[item.id]
+        let quickPasteNumber = quickPasteNumbers[item.id]
 
         ClipItemRowView(
             item: item,
@@ -1601,6 +1624,18 @@ struct HistoryListView: View {
             }
         )
     }
+
+    private func openFeedbackSurvey() {
+        feedbackSurveyCard.openSurvey()
+    }
+
+    private func hideFeedbackSurveyForCurrentSession() {
+        feedbackSurveyCard.hideForCurrentSession()
+    }
+
+    private func hideFeedbackSurveyPermanently() {
+        feedbackSurveyCard.hidePermanently()
+    }
     
     private func handleTap(on item: ClipboardItem) {
         if vm.focusArea != .history {
@@ -1645,12 +1680,43 @@ struct HistoryListView: View {
     private func deleteItem(_ item: ClipboardItem) {
         log.info("deleteItem called: id=\(String(describing: item.id)), focusArea=\(vm.focusArea)")
         if DeckUserDefaults.deleteConfirmation {
-            itemToDelete = item
-            vm.isShowingDeleteConfirm = true
-            log.info("Showing delete confirmation")
+            showSystemDeleteConfirmation(for: item)
         } else {
             performDelete(item)
         }
+    }
+
+    private func showSystemDeleteConfirmation(for item: ClipboardItem) {
+        itemToDelete = item
+        vm.isShowingDeleteConfirm = true
+        log.info("Showing delete confirmation")
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = NSLocalizedString("确认删除", comment: "Delete confirmation title")
+        alert.informativeText = NSLocalizedString("确定要删除这条记录吗？", comment: "Delete confirmation message")
+
+        let deleteButton = alert.addButton(withTitle: NSLocalizedString("删除", comment: "Delete"))
+        if #available(macOS 11.0, *) {
+            deleteButton.hasDestructiveAction = true
+        }
+
+        let cancelButton = alert.addButton(withTitle: NSLocalizedString("取消", comment: "Cancel"))
+        cancelButton.keyEquivalent = "\u{1b}"
+
+        if let panelLevel = MainWindowController.shared.window?.level {
+            let targetLevel = max(NSWindow.Level.modalPanel.rawValue, panelLevel.rawValue + 1)
+            alert.window.level = NSWindow.Level(rawValue: targetLevel)
+        }
+
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            performDelete(item)
+        }
+
+        itemToDelete = nil
+        vm.isShowingDeleteConfirm = false
+        restoreWindowFocus()
     }
 
     /// 恢复主窗口焦点（用于 alert 对话框关闭后）

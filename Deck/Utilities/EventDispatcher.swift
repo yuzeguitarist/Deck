@@ -124,6 +124,7 @@ enum KeyCode {
     static let v: UInt16 = UInt16(kVK_ANSI_V)
     static let p: UInt16 = UInt16(kVK_ANSI_P)
     static let q: UInt16 = UInt16(kVK_ANSI_Q)
+    static let u: UInt16 = UInt16(kVK_ANSI_U)
     
     static let escape: UInt16 = UInt16(kVK_Escape)
     static let delete: UInt16 = UInt16(kVK_Delete)

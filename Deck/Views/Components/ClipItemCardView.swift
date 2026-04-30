@@ -287,6 +287,8 @@ struct ClipItemCardView: View {
     @Bindable var item: ClipboardItem
     let isSelected: Bool
     @Binding var showPreview: Bool
+    let cardSize: CGFloat
+    let isHorizontalLayout: Bool
     let quickPasteNumber: Int?
     var onDelete: (() -> Void)?
     @AppStorage(PrefKey.instantCalculation.rawValue) private var instantCalculationEnabled = DeckUserDefaults.instantCalculation
@@ -340,7 +342,7 @@ struct ClipItemCardView: View {
     }
 
     private var effectiveCardSize: CGFloat {
-        vm.layoutMode == .horizontal ? vm.horizontalCardSize : Const.cardSize
+        isHorizontalLayout ? cardSize : Const.cardSize
     }
 
     /// Scale factor relative to the default card size (1.0 at default, >1.0 when enlarged).
@@ -380,12 +382,16 @@ struct ClipItemCardView: View {
         item: ClipboardItem,
         isSelected: Bool,
         showPreview: Binding<Bool>,
+        cardSize: CGFloat = Const.cardSize,
+        isHorizontalLayout: Bool = false,
         quickPasteNumber: Int? = nil,
         onDelete: (() -> Void)? = nil
     ) {
         self.item = item
         self.isSelected = isSelected
         self._showPreview = showPreview
+        self.cardSize = cardSize
+        self.isHorizontalLayout = isHorizontalLayout
         self.quickPasteNumber = quickPasteNumber
         self.onDelete = onDelete
     }
@@ -853,7 +859,7 @@ struct ClipItemCardView: View {
 
     private var textContent: some View {
         Group {
-            if vm.layoutMode == .horizontal, smartState.isMarkdown {
+            if isHorizontalLayout, smartState.isMarkdown {
                 MarkdownCardPreview(
                     item: item,
                     sourceText: String(item.searchText.prefix(markdownCardPrefixLength)),
@@ -1019,8 +1025,8 @@ struct ClipItemCardView: View {
         Group {
             // PDF 文件使用缩略图预览
             if item.isPDF {
-                PDFThumbnailView(item: item)
-            } else if item.isMarkdownFile, vm.layoutMode == .horizontal {
+                PDFThumbnailView(item: item, isHorizontalLayout: isHorizontalLayout)
+            } else if item.isMarkdownFile, isHorizontalLayout {
                 // Markdown 文件预览
                 MarkdownCardPreview(item: item)
             } else {

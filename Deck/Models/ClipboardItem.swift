@@ -1284,11 +1284,16 @@ final class ClipboardItem: Identifiable, Equatable {
 
     @ObservationIgnored
     private var cachedPDFThumbnail: NSImage?
+    @ObservationIgnored
+    private var cachedPDFThumbnailSize: CGSize?
 
     /// 使用 QLThumbnailGenerator 生成 PDF 首页缩略图 (卡片界面使用)
     func pdfThumbnail(size: CGSize = CGSize(width: 400, height: 400), completion: @escaping (NSImage?) -> Void) {
+        let requestSize = Self.normalizedPDFThumbnailRequestSize(size)
+
         // 返回缓存
-        if let cached = cachedPDFThumbnail {
+        if let cached = cachedPDFThumbnail,
+           Self.pdfThumbnailSize(cachedPDFThumbnailSize, satisfies: requestSize) {
             completion(cached)
             return
         }
@@ -1305,34 +1310,75 @@ final class ClipboardItem: Identifiable, Equatable {
         let url = URL(fileURLWithPath: pdfPath)
         let request = QLThumbnailGenerator.Request(
             fileAt: url,
-            size: size,
+            size: requestSize,
             scale: NSScreen.main?.backingScaleFactor ?? 2.0,
             representationTypes: .thumbnail
         )
 
-        QLThumbnailGenerator.shared.generateRepresentations(for: request) { [weak self] thumbnail, _, error in
+        Self.generatePDFThumbnailRepresentation(request: request, pdfPath: pdfPath, size: requestSize) { [weak self] image in
+            self?.cachedPDFThumbnail = image
+            self?.cachedPDFThumbnailSize = requestSize
+            completion(image)
+        }
+    }
+
+    /// Build the QuickLook callback outside the default MainActor isolation.
+    ///
+    /// `QLThumbnailGenerator` invokes its update handler on a private QuickLook queue. Under Swift 6
+    /// default MainActor isolation, creating that handler inside `pdfThumbnail` makes the runtime
+    /// assert before the handler body can hop back to the main queue. Keep the QuickLook callback
+    /// nonisolated and perform all AppKit / observable-state work after dispatching to main.
+    nonisolated private static func generatePDFThumbnailRepresentation(
+        request: QLThumbnailGenerator.Request,
+        pdfPath: String,
+        size: CGSize,
+        completion: @escaping (NSImage) -> Void
+    ) {
+        QLThumbnailGenerator.shared.generateRepresentations(for: request) { thumbnail, _, error in
+            let imageBox = UncheckedSendable(thumbnail?.nsImage)
+            let completionBox = UncheckedSendable(completion)
+            let errorDescription = error?.localizedDescription
+
             DispatchQueue.main.async {
-                if let thumbnail = thumbnail {
-                    let image = thumbnail.nsImage
-                    self?.cachedPDFThumbnail = image
-                    completion(image)
-                } else {
-                    log.debug("PDF thumbnail generation failed: \(error?.localizedDescription ?? "unknown")")
-                    // Fallback: 使用系统文件图标
-                    let icon = IconCache.shared.icon(
-                        forFile: pdfPath,
-                        size: NSSize(width: size.width, height: size.height)
-                    )
-                    self?.cachedPDFThumbnail = icon
-                    completion(icon)
+                if let image = imageBox.value {
+                    completionBox.value(image)
+                    return
                 }
+
+                log.debug("PDF thumbnail generation failed: \(errorDescription ?? "unknown")")
+                // Fallback: 使用系统文件图标
+                let icon = IconCache.shared.icon(
+                    forFile: pdfPath,
+                    size: NSSize(width: size.width, height: size.height)
+                )
+                completionBox.value(icon)
             }
         }
     }
 
     /// 同步获取 PDF 缩略图（如果已缓存）
-    func cachedPDFThumbnailImage() -> NSImage? {
+    func cachedPDFThumbnailImage(minimumSize: CGSize? = nil) -> NSImage? {
+        guard let cachedPDFThumbnail else { return nil }
+
+        if let minimumSize {
+            let requestSize = Self.normalizedPDFThumbnailRequestSize(minimumSize)
+            guard Self.pdfThumbnailSize(cachedPDFThumbnailSize, satisfies: requestSize) else { return nil }
+        }
+
         return cachedPDFThumbnail
+    }
+
+    private static func normalizedPDFThumbnailRequestSize(_ size: CGSize) -> CGSize {
+        CGSize(
+            width: max(1, ceil(size.width)),
+            height: max(1, ceil(size.height))
+        )
+    }
+
+    private static func pdfThumbnailSize(_ cachedSize: CGSize?, satisfies requestSize: CGSize) -> Bool {
+        guard let cachedSize else { return false }
+        return cachedSize.width >= requestSize.width * 0.82 &&
+            cachedSize.height >= requestSize.height * 0.82
     }
     
     func thumbnail() -> NSImage? {

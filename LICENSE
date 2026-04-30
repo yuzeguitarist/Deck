@@ -1,12 +1,22 @@
 Deck
-Copyright (c) 2024-2026 Yuze Pan (潘禹泽)
-All Rights Reserved.
+Copyright (c) 2024-2026 Yuze Pan
 
-This repository is source-available.
+This repository uses the following licensing terms:
 
-You may view the source code in this repository for reference only.
+1. Deck/deckclip
 
-You may not, without prior written permission from the copyright holder:
+The Deck/deckclip directory is licensed under the GNU Affero General Public License v3.0 only (AGPL-3.0-only).
+
+You may use, copy, modify, and redistribute the source code in Deck/deckclip only under the terms of the AGPL-3.0-only license:
+https://www.gnu.org/licenses/agpl-3.0.html
+
+2. All other files and directories
+
+All files and directories outside Deck/deckclip are source-available and All Rights Reserved.
+
+You may view the source code outside Deck/deckclip for reference only.
+
+For those files and directories, you may not, without prior written permission from the copyright holder:
 - use the source code;
 - copy or redistribute the source code;
 - modify, adapt, or create derivative works from the source code;

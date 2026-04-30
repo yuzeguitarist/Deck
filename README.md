@@ -19,7 +19,7 @@
   <a href="https://deckclip.app">
     <img src="https://img.shields.io/badge/platform-macOS_14+-blue?style=flat-square" alt="macOS 14+ clipboard manager">
     <img src="https://img.shields.io/badge/swift-5.9+-F05138?style=flat-square&logo=swift&logoColor=white" alt="Built with Swift 5.9+">
-    <img src="https://img.shields.io/badge/license-All_Rights_Reserved-red?style=flat-square" alt="All Rights Reserved">
+    <img src="https://img.shields.io/badge/license-AGPL_v3_%26_ARR-blue?style=flat-square" alt="AGPL v3 for deckclip; ARR for rest">
   </a>
 </p>
 
@@ -181,7 +181,10 @@ More shortcuts and Vim mode are in Settings.
 
 ## License
 
-This project is **source-available** and **All Rights Reserved** — see [LICENSE](LICENSE).
+This project uses **dual licensing**:
+
+- `Deck/deckclip` is licensed under **GNU AGPL v3.0 only** — see [`deckclip/LICENSE`](deckclip/LICENSE).
+- All other files and directories are **source-available** and **All Rights Reserved** — see [LICENSE](LICENSE).
 
 ### Usage and Rights
 

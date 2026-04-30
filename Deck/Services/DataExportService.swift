@@ -120,54 +120,63 @@ final class DataExportService {
         }
     }
 
-    private static let lineSeparatorLS = Data([0xE2, 0x80, 0xA8]) // U+2028
-    private static let lineSeparatorPS = Data([0xE2, 0x80, 0xA9]) // U+2029
-    private static let lineSeparatorLSEscaped = Data("\\u2028".utf8)
-    private static let lineSeparatorPSEscaped = Data("\\u2029".utf8)
+    private nonisolated static let lineSeparatorLSEscaped = Data("\\u2028".utf8)
+    private nonisolated static let lineSeparatorPSEscaped = Data("\\u2029".utf8)
 
-    private static func containsJSONLineSeparators(_ data: Data) -> Bool {
-        guard data.count >= 3 else { return false }
+    private nonisolated static func sanitizeEncodedJSONForIDE(_ data: Data) -> Data {
+        guard data.count >= 3 else { return data }
+
         return data.withUnsafeBytes { rawBuffer in
             let bytes = rawBuffer.bindMemory(to: UInt8.self)
-            guard let base = bytes.baseAddress else { return false }
+            guard let base = bytes.baseAddress else { return data }
             let count = bytes.count
-            var i = 0
-            while i <= count - 3 {
-                if base[i] == 0xE2, base[i + 1] == 0x80 {
-                    let marker = base[i + 2]
+
+            var index = 0
+            while index <= count - 3 {
+                if base[index] == 0xE2, base[index + 1] == 0x80 {
+                    let marker = base[index + 2]
                     if marker == 0xA8 || marker == 0xA9 {
-                        return true
+                        return sanitizeEncodedJSONForIDE(data, base: base, count: count, firstSeparatorIndex: index)
                     }
                 }
-                i += 1
+                index += 1
             }
-            return false
+
+            return data
         }
     }
 
-    private static func replaceAll(in data: Data, target: Data, replacement: Data) -> Data {
-        guard !target.isEmpty else { return data }
-        guard data.range(of: target) != nil else { return data }
-
-        var result = Data()
-        result.reserveCapacity(data.count)
-        var searchStart = data.startIndex
-        while searchStart < data.endIndex,
-              let range = data[searchStart...].range(of: target) {
-            result.append(data[searchStart..<range.lowerBound])
-            result.append(replacement)
-            searchStart = range.upperBound
+    private nonisolated static func sanitizeEncodedJSONForIDE(
+        _ data: Data,
+        base: UnsafePointer<UInt8>,
+        count: Int,
+        firstSeparatorIndex: Int
+    ) -> Data {
+        var sanitized = Data()
+        sanitized.reserveCapacity(data.count + 32)
+        if firstSeparatorIndex > 0 {
+            sanitized.append(base, count: firstSeparatorIndex)
         }
-        result.append(data[searchStart...])
-        return result
-    }
 
-    private static func sanitizeEncodedJSONForIDE(_ data: Data) -> Data {
-        guard containsJSONLineSeparators(data) else { return data }
+        var index = firstSeparatorIndex
+        while index < count {
+            if index <= count - 3, base[index] == 0xE2, base[index + 1] == 0x80 {
+                let marker = base[index + 2]
+                if marker == 0xA8 {
+                    sanitized.append(lineSeparatorLSEscaped)
+                    index += 3
+                    continue
+                } else if marker == 0xA9 {
+                    sanitized.append(lineSeparatorPSEscaped)
+                    index += 3
+                    continue
+                }
+            }
 
-        var sanitized = data
-        sanitized = replaceAll(in: sanitized, target: lineSeparatorLS, replacement: lineSeparatorLSEscaped)
-        sanitized = replaceAll(in: sanitized, target: lineSeparatorPS, replacement: lineSeparatorPSEscaped)
+            sanitized.append(base[index])
+            index += 1
+        }
+
         return sanitized
     }
 
@@ -228,7 +237,7 @@ final class DataExportService {
         }
     }
 
-    private static func exportLargeDataset(to outputURL: URL) async throws -> Int {
+    private nonisolated static func exportLargeDataset(to outputURL: URL) async throws -> Int {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
 

@@ -35,29 +35,35 @@
 //
 //  5. **性能与其它**
 //     - 列表模式通过 SQL 投影避免大 `data` blob 物化到 Swift
-//     - 大批量维护任务走 `withDBAsyncBackground`（`dbBackgroundQueue`，`.utility`），减轻与 UI 同 QoS 争抢
+//     - 大批量维护任务走 writer 的 `withDBAsyncBackground`（`.utility`），轻量列表/搜索/统计走 read-only 连接
 //     - 文件级：`Maintenance helpers` 扩展中的按批删除、blob 路径查询、页信息统计等
 //
 //  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  线程模型 (Threading Model)
 //  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //
-//  **原则：单个 SQLite `Connection` 非线程安全，所有触碰它的代码必须串行化。**
+//  **原则：单个 SQLite `Connection` 非线程安全；writer / reader 各自用独立串行队列隔离。**
 //
-//  1. **三层队列，同一串行目标**
-//     - `dbSerialQueue` — `com.deck.sqlite.queue.serial`，`.userInitiated`：实际串行执行点
-//     - `dbQueue` — `com.deck.sqlite.queue.interactive`，target 为 `dbSerialQueue`：默认交互路径（`withDB` / `withDBAsync`）
+//  1. **writer 三层队列，同一串行目标**
+//     - `dbSerialQueue` — `com.deck.sqlite.queue.serial`，`.userInitiated`：writer 实际串行执行点
+//     - `dbQueue` — `com.deck.sqlite.queue.interactive`，target 为 `dbSerialQueue`：写入/小型 writer 操作（`withDB` / `withDBAsync`）
 //     - `dbBackgroundQueue` — `com.deck.sqlite.queue.background`，`.utility`，target 同上：迁移、VACUUM、大批量回填等（`withDBAsyncBackground`）
-//     - `dbQueueKey` 同时标在以上三者上，`syncOnDBQueue` 等在任一条「DB 队列」上可检测并重入，避免死锁
+//     - `dbQueueKey` 标在 writer 三者上，`syncOnDBQueue` 等在 writer 队列上可检测并重入，避免死锁
 //
-//  2. **入口惯例**
-//     - 业务与大部分 API：`withDB` / `withDBAsync`（经 `dbQueue`）
+//  2. **reader 独立串行队列**
+//     - `dbReadQueue` — `com.deck.sqlite.queue.reader`，绑定只读 SQLite `Connection`
+//     - 纯读路径（列表、搜索、统计、单条/批量 fetch）走 `withReadDB` / `withReadDBAsync`
+//     - 只读连接不可用时自动回退到 writer，保证功能不降级
+//
+//  3. **入口惯例**
+//     - 纯读 API：`withReadDB` / `withReadDBAsync`（经 `dbReadQueue`，失败回退 writer）
+//     - 写入/维护 writer API：`withDB` / `withDBAsync`（经 `dbQueue`）
 //     - 重负载后台：`withDBAsyncBackground`（经 `dbBackgroundQueue`）
 //     - 内部需直接调度时：`syncOnDBQueue`、`asyncOnDBQueue`、`syncOnDBBackgroundQueue`、`asyncOnDBBackgroundQueue`
 //
-//  3. **embeddingQueue** — `com.deck.semantic.embedding`（`.utility`）：向量编码等 CPU 工作，与 DB 队列分离
+//  4. **embeddingQueue** — `com.deck.semantic.embedding`（`.utility`）：向量编码等 CPU 工作，与 DB 队列分离
 //
-//  4. **errorStateQueue** — `com.deck.sqlite.error.state`：错误计数、通知标志等状态的原子更新
+//  5. **errorStateQueue** — `com.deck.sqlite.error.state`：错误计数、通知标志等状态的原子更新
 //
 //  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //  安全模式：内存搜索上限 (Security mode scan caps)
@@ -502,12 +508,14 @@ private nonisolated struct DatabaseQueues: @unchecked Sendable {
     let serial: DispatchQueue
     let interactive: DispatchQueue
     let background: DispatchQueue
+    let reader: DispatchQueue
 
     init() {
         let serial = DispatchQueue(label: "com.deck.sqlite.queue.serial", qos: .userInitiated)
         self.serial = serial
         self.interactive = DispatchQueue(label: "com.deck.sqlite.queue.interactive", qos: .userInitiated, target: serial)
         self.background = DispatchQueue(label: "com.deck.sqlite.queue.background", qos: .utility, target: serial)
+        self.reader = DispatchQueue(label: "com.deck.sqlite.queue.reader", qos: .userInitiated)
     }
 }
 
@@ -528,23 +536,26 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     // MARK: - Thread Safety (线程安全)
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
-    /// 数据库操作队列：SQLite 连接非线程安全，所有 DB 操作必须串行执行。
+    /// 数据库操作队列：SQLite 单连接非线程安全，每个连接都必须由自己的串行队列隔离。
     ///
-    /// 这里拆分为 *交互* 与 *后台维护* 两个队列，但它们都 target 到同一个串行 `dbSerialQueue`：
+    /// writer 拆分为 *交互* 与 *后台维护* 两个队列，它们都 target 到同一个串行 `dbSerialQueue`；
+    /// reader 使用独立 `dbReadQueue` + read-only 连接，发挥 WAL 的读写并发能力：
     /// - 好处：
-    ///   - 用户触发的搜索/写入依然用 `.userInitiated` 保证响应
-    ///   - 后台 backfill / vacuum / migration 等用 `.utility`，避免抢占 CPU/能耗飙升
-    ///   - 仍然保证 SQLite 单连接串行访问（不会并发触碰 Connection）
+    ///   - 用户触发的搜索/列表/统计不再排在 writer 维护任务后面
+    ///   - 后台 backfill / vacuum / migration 等继续用 `.utility`，避免抢占 CPU/能耗飙升
+    ///   - writer 与 reader 各自串行访问自己的 Connection，不跨队列复用同一连接
     // Keep the serial queue user-initiated so panel-open queries are not downgraded.
     private nonisolated let dbQueues = DatabaseQueues()
     private nonisolated var dbSerialQueue: DispatchQueue { dbQueues.serial }
     private nonisolated var dbQueue: DispatchQueue { dbQueues.interactive }
     private nonisolated var dbBackgroundQueue: DispatchQueue { dbQueues.background }
+    private nonisolated var dbReadQueue: DispatchQueue { dbQueues.reader }
     
     /// 队列检测 Key：用于判断当前代码是否已在 dbQueue 上执行
     /// - 作用：防止重复 dispatch 导致死锁（如在 dbQueue 上再次 sync 到 dbQueue）
     /// - 使用：`DispatchQueue.getSpecific(key: dbQueueKey)` 检测
     private nonisolated let dbQueueKey = DispatchSpecificKey<Void>()
+    private nonisolated let dbReadQueueKey = DispatchSpecificKey<Void>()
     
     /// 语义向量计算队列：与 dbQueue 解耦，避免阻塞数据库操作
     /// - Label: "com.deck.semantic.embedding"
@@ -558,6 +569,13 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     
     /// SQLite 数据库连接（非线程安全，必须在 dbQueue 上访问）
     private nonisolated(unsafe) var db: Connection?
+
+    /// SQLite 只读连接（非线程安全，必须在 dbReadQueue 上访问）。
+    ///
+    /// 读连接与写连接分离后，WAL 模式下的列表/搜索/统计读查询不再排在
+    /// writer 的迁移、checkpoint、backfill 等维护任务后面。若只读连接打开失败，
+    /// `withReadDB*` 会自动回退到 writer 连接，保证功能不降级。
+    private nonisolated(unsafe) var readerDb: Connection?
     
     /// ClipboardHistory 主表引用
     private nonisolated(unsafe) var table: Table?
@@ -740,6 +758,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         dbSerialQueue.setSpecific(key: dbQueueKey, value: ())
         dbQueue.setSpecific(key: dbQueueKey, value: ())
         dbBackgroundQueue.setSpecific(key: dbQueueKey, value: ())
+        dbReadQueue.setSpecific(key: dbReadQueueKey, value: ())
         errorStateQueue.setSpecific(key: errorStateQueueKey, value: ())
     }
 
@@ -820,6 +839,32 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }
     }
 
+    /// 在只读 DB 队列上同步执行。
+    /// - Note: read queue 独立于 writer serial queue；不要给它设置 `dbQueueKey`，避免在读队列上误触 writer 连接。
+    private nonisolated func syncOnDBReadQueue<T>(_ work: () throws -> T) rethrows -> T {
+        if DispatchQueue.getSpecific(key: dbReadQueueKey) != nil {
+            return try work()
+        }
+        return try dbReadQueue.sync(execute: work)
+    }
+
+    /// 在只读 DB 队列上异步执行。
+    private nonisolated func asyncOnDBReadQueue<T>(_ work: @escaping () throws -> T) async throws -> T {
+        if DispatchQueue.getSpecific(key: dbReadQueueKey) != nil {
+            return try work()
+        }
+        let workBox = SQLWorkBox(work)
+        return try await withCheckedThrowingContinuation { continuation in
+            dbReadQueue.async {
+                do {
+                    continuation.resume(returning: try workBox.work())
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     /// 在错误状态队列上同步执行（避免 NSLock 在 async 上下文报错）
     private nonisolated func syncOnErrorStateQueue<T>(_ work: () -> T) -> T {
         if DispatchQueue.getSpecific(key: errorStateQueueKey) != nil {
@@ -861,6 +906,54 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }
     }
 
+    /// 在只读 SQLite 连接上同步执行数据库读取。
+    /// - Important: 只用于纯读查询；写入、迁移、checkpoint、FTS/vec 维护继续走 writer。
+    @discardableResult
+    private nonisolated func withReadDB<T>(_ work: @escaping (_ db: Connection, _ table: Table) throws -> T) -> T? {
+        if !isDatabaseFileValid() {
+            log.warn("Database file is invalid or missing, attempting to reinitialize...")
+            handleDBError(NSError(domain: "DeckSQL", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "Database file is invalid or missing"
+            ]))
+            DispatchQueue.main.async { [weak self] in
+                self?.reinitialize()
+            }
+            return nil
+        }
+
+        do {
+            let result: T?
+            if syncOnDBReadQueue({ readerDb != nil }) {
+                do {
+                    result = try syncOnDBReadQueue {
+                        guard self.table != nil, let db = self.readerDb else { return nil }
+                        return try work(db, Table("ClipboardHistory"))
+                    }
+                } catch {
+                    log.debug("Read-only DB operation failed; retrying on writer: \(error.localizedDescription)")
+                    result = try syncOnDBQueue {
+                        guard self.table != nil, let db = self.db else { return nil }
+                        return try work(db, Table("ClipboardHistory"))
+                    }
+                }
+            } else {
+                result = try syncOnDBQueue {
+                    guard self.table != nil, let db = self.db else { return nil }
+                    return try work(db, Table("ClipboardHistory"))
+                }
+            }
+            if result != nil {
+                syncOnErrorStateQueue {
+                    consecutiveErrorCount = 0
+                }
+            }
+            return result
+        } catch {
+            handleDBError(error)
+            return nil
+        }
+    }
+
     /// 在 dbQueue 上异步执行数据库操作（带错误处理和文件有效性检查）
     /// - Parameter work: 数据库操作代码块
     /// - Returns: 操作结果，失败时返回 nil
@@ -886,6 +979,54 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             // 操作成功，重置错误计数
             syncOnErrorStateQueue {
                 consecutiveErrorCount = 0
+            }
+            return result
+        } catch {
+            handleDBError(error)
+            return nil
+        }
+    }
+
+    /// 在只读 SQLite 连接上异步执行数据库读取。
+    /// - Important: 只用于纯读查询；只读连接不可用时回退到 writer，避免影响功能可用性。
+    @discardableResult
+    private nonisolated func withReadDBAsync<T>(_ work: @escaping (_ db: Connection, _ table: Table) throws -> T) async -> T? {
+        if !isDatabaseFileValid() {
+            await log.warn("Database file is invalid or missing, attempting to reinitialize...")
+            handleDBError(NSError(domain: "DeckSQL", code: -1, userInfo: [
+                NSLocalizedDescriptionKey: "Database file is invalid or missing"
+            ]))
+            DispatchQueue.main.async { [weak self] in
+                self?.reinitialize()
+            }
+            return nil
+        }
+
+        do {
+            let result: T?
+            if syncOnDBReadQueue({ readerDb != nil }) {
+                do {
+                    result = try await asyncOnDBReadQueue {
+                        guard self.table != nil, let db = self.readerDb else { return nil }
+                        return try work(db, Table("ClipboardHistory"))
+                    }
+                } catch {
+                    await log.debug("Read-only DB operation failed; retrying on writer: \(error.localizedDescription)")
+                    result = try await asyncOnDBQueue {
+                        guard self.table != nil, let db = self.db else { return nil }
+                        return try work(db, Table("ClipboardHistory"))
+                    }
+                }
+            } else {
+                result = try await asyncOnDBQueue {
+                    guard self.table != nil, let db = self.db else { return nil }
+                    return try work(db, Table("ClipboardHistory"))
+                }
+            }
+            if result != nil {
+                syncOnErrorStateQueue {
+                    consecutiveErrorCount = 0
+                }
             }
             return result
         } catch {
@@ -1138,6 +1279,9 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         Self.initLock.lock()
         Self.isInitialized = false
         Self.initLock.unlock()
+        syncOnDBReadQueue {
+            readerDb = nil
+        }
         syncOnDBQueue {
             db = nil
             table = nil
@@ -1228,6 +1372,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 var integrityOK = performIntegrityCheckIfNeeded(force: restoredFromBackupAtStartup)
                 if !integrityOK {
                     log.warn("Database integrity check failed, attempting to restore from backup")
+                    closeReadOnlyDatabase()
                     db = nil
                     if backupEnabled {
                         if restoreDatabaseFromBackup(dbPath: dbPath, backupPath: backupPath) {
@@ -1237,6 +1382,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                                 handleDBError(NSError(domain: "DeckSQL", code: -2, userInfo: [
                                     NSLocalizedDescriptionKey: "Database integrity check failed after restore"
                                 ]))
+                                closeReadOnlyDatabase()
                                 db = nil
                                 throw NSError(domain: "DeckSQL", code: -2, userInfo: [
                                     NSLocalizedDescriptionKey: "Database integrity check failed after restore"
@@ -1254,6 +1400,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                         handleDBError(NSError(domain: "DeckSQL", code: -4, userInfo: [
                             NSLocalizedDescriptionKey: "Database integrity check failed and automatic backups are disabled"
                         ]))
+                        closeReadOnlyDatabase()
                         db = nil
                         throw NSError(domain: "DeckSQL", code: -4, userInfo: [
                             NSLocalizedDescriptionKey: "Database integrity check failed and automatic backups are disabled"
@@ -1263,6 +1410,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
                 guard registerCustomFunctions() else {
                     log.error("registerCustomFunctions failed; database not fully initialized")
+                    closeReadOnlyDatabase()
                     db = nil
                     table = nil
                     throw NSError(domain: "DeckSQL", code: -5, userInfo: [
@@ -1271,6 +1419,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 }
                 guard createTable() else {
                     log.error("createTable failed; database not fully initialized")
+                    closeReadOnlyDatabase()
                     db = nil
                     table = nil
                     throw NSError(domain: "DeckSQL", code: -6, userInfo: [
@@ -1279,12 +1428,15 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 }
                 guard applyMigrations() else {
                     log.error("applyMigrations reported unhealthy state; database not fully initialized")
+                    closeReadOnlyDatabase()
                     db = nil
                     table = nil
                     throw NSError(domain: "DeckSQL", code: -7, userInfo: [
                         NSLocalizedDescriptionKey: "Database migrations did not complete in a healthy state"
                     ])
                 }
+
+                openReadOnlyDatabase(at: dbPath)
 
                 log.info("Database initialized at: \(dbPath)")
                 Self.isInitialized = true
@@ -1294,6 +1446,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             backfillFileSearchTextIfNeeded()
             let storageDirForCleanup = basePath
             Task.detached(priority: .utility) {
+                LANReceivedCleanup.cleanupStaleStagingDirectories(storagePath: storageDirForCleanup)
                 LANReceivedCleanup.cleanupExpiredDirectories(storagePath: storageDirForCleanup)
             }
             Task { @MainActor in
@@ -1425,7 +1578,70 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         return (dbPath, backupPath)
     }
 
+    private nonisolated func configureSQLiteConnection(_ connection: Connection, role: String, readOnly: Bool) {
+        connection.busyTimeout = 5.0
+
+        // Use a modest mmap size to reduce read overhead without inflating heap usage.
+        do {
+            try connection.run("PRAGMA mmap_size = 134217728") // 128MB
+        } catch {
+            log.debug("Failed to set mmap_size for \(role): \(error.localizedDescription)")
+        }
+
+        do {
+            try connection.run("PRAGMA temp_store = MEMORY")
+        } catch {
+            log.debug("Failed to set temp_store MEMORY for \(role): \(error.localizedDescription)")
+        }
+
+        do {
+            try connection.run("PRAGMA cache_size = -20000") // ~20MB
+        } catch {
+            log.debug("Failed to set cache_size for \(role): \(error.localizedDescription)")
+        }
+
+        if readOnly {
+            do {
+                try connection.run("PRAGMA query_only = ON")
+            } catch {
+                log.debug("Failed to set query_only for \(role): \(error.localizedDescription)")
+            }
+            return
+        }
+
+        // High-impact writer pragmas for a clipboard-history workload:
+        // - WAL: readers don't block writers; fewer "database is locked" stalls under frequent inserts.
+        // - synchronous NORMAL: good durability/perf tradeoff for WAL on desktop.
+        // - wal_autocheckpoint: cap WAL growth to keep checkpoint cost bounded.
+        do { _ = try connection.scalar("PRAGMA journal_mode = WAL") } catch { log.debug("Failed to set journal_mode WAL for \(role): \(error.localizedDescription)") }
+        do { _ = try connection.scalar("PRAGMA synchronous = NORMAL") } catch { log.debug("Failed to set synchronous NORMAL for \(role): \(error.localizedDescription)") }
+        do { _ = try connection.scalar("PRAGMA wal_autocheckpoint = 1000") } catch { log.debug("Failed to set wal_autocheckpoint for \(role): \(error.localizedDescription)") }
+    }
+
+    private func openReadOnlyDatabase(at dbPath: String) {
+        syncOnDBReadQueue {
+            readerDb = nil
+            do {
+                let readConnection = try Connection(dbPath, readonly: true)
+                configureSQLiteConnection(readConnection, role: "reader", readOnly: true)
+                installRegexpFunction(on: readConnection, role: "reader")
+                readerDb = readConnection
+                log.debug("Read-only SQLite connection opened")
+            } catch {
+                readerDb = nil
+                log.warn("Read-only SQLite connection unavailable; falling back to writer: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func closeReadOnlyDatabase() {
+        syncOnDBReadQueue {
+            readerDb = nil
+        }
+    }
+
     private func openDatabase(at dbPath: String) throws {
+        closeReadOnlyDatabase()
         vecIndexEnabled = false
         vecReadyDimensions.removeAll()
         vecLegacyTableCleaned = false
@@ -1437,7 +1653,6 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         vecRecoverySequence = 0
         loadPersistedVecActiveTables()
         db = try Connection(dbPath)
-        db?.busyTimeout = 5.0
         // Cache the opened db path so validity checks don't resolve security-scoped bookmarks on every query.
         dbPathLock.lock()
         currentDBPath = dbPath
@@ -1445,23 +1660,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         lastDBFileCheckResult = true
         dbPathLock.unlock()
         if let db = db {
-            // Use a modest mmap size to reduce read overhead without inflating heap usage.
-            do {
-                try db.run("PRAGMA mmap_size = 134217728") // 128MB
-            } catch {
-                log.debug("Failed to set mmap_size: \(error.localizedDescription)")
-            }
-            // High-impact pragmas for a clipboard-history workload:
-            // - WAL: readers don't block writers; fewer "database is locked" stalls under frequent inserts.
-            // - synchronous NORMAL: good durability/perf tradeoff for WAL on desktop.
-            // - temp_store MEMORY: reduce temp file I/O during sorts.
-            // - cache_size: keep hot pages in memory; negative means KB.
-            // - wal_autocheckpoint: cap WAL growth to keep checkpoint cost bounded.
-            do { _ = try db.scalar("PRAGMA journal_mode = WAL") } catch { log.debug("Failed to set journal_mode WAL: \(error.localizedDescription)") }
-            do { _ = try db.scalar("PRAGMA synchronous = NORMAL") } catch { log.debug("Failed to set synchronous NORMAL: \(error.localizedDescription)") }
-            do { _ = try db.scalar("PRAGMA temp_store = MEMORY") } catch { log.debug("Failed to set temp_store MEMORY: \(error.localizedDescription)") }
-            do { _ = try db.scalar("PRAGMA cache_size = -20000") } catch { log.debug("Failed to set cache_size: \(error.localizedDescription)") } // ~20MB
-            do { _ = try db.scalar("PRAGMA wal_autocheckpoint = 1000") } catch { log.debug("Failed to set wal_autocheckpoint: \(error.localizedDescription)") }
+            configureSQLiteConnection(db, role: "writer", readOnly: false)
         }
         initializeSQLiteVecOnConnection()
         loadSQLiteVecExtensionIfAvailable()
@@ -2105,7 +2304,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         let maxItems = DeckUserDefaults.securityModeEnabled ? 300 : 1000
         var attempted = 0
         var indexed = 0
-        var offset = 0
+        var lastSeenID = Int64.max
         var dimensionCounts: [Int: Int] = [:]
         while attempted < maxItems {
             guard !Task.isCancelled else { break }
@@ -2116,10 +2315,11 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                     let sql = """
                         SELECT e.id, e.embedding
                         FROM ClipboardHistory_embedding e
+                        WHERE e.id < ?
                         ORDER BY e.id DESC
-                        LIMIT ? OFFSET ?
+                        LIMIT ?
                     """
-                    let stmt = try db.prepare(sql).bind(batchSize, offset)
+                    let stmt = try db.prepare(sql).bind(lastSeenID, batchSize)
                     var result: [(Int64, Data)] = []
                     while let row = try stmt.failableNext() {
                         let idValue = row[0]
@@ -2142,6 +2342,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             }
 
             guard !rows.isEmpty else { break }
+            lastSeenID = rows.last?.id ?? lastSeenID
 
             for row in rows {
                 guard !Task.isCancelled else { break }
@@ -2155,7 +2356,6 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 if attempted >= maxItems { break }
             }
 
-            offset += rows.count
             await Task.yield()
             try? await Task.sleep(nanoseconds: 20_000_000)
         }
@@ -2244,6 +2444,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }
 
         return syncOnDBQueue {
+            closeReadOnlyDatabase()
             db = nil
             table = nil
             return restoreDatabaseFromBackup(dbPath: paths.dbPath, backupPath: paths.backupPath)
@@ -2373,33 +2574,44 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
     // MARK: - Custom SQL Functions
 
-    /// 注册自定义 SQL 函数（如正则匹配）
-    /// - Returns: 是否在有效 `db` 上完成注册
-    private func registerCustomFunctions() -> Bool {
-        syncOnDBQueue {
-            guard let db = db else { return false }
-
-            // 注册 REGEXP 函数：regexp(pattern, text) -> Bool
-            // 使用方式：WHERE search_text REGEXP 'pattern'
-            db.createFunction("regexp", argumentCount: 2, deterministic: true) { args in
-                guard args.count == 2,
-                      let pattern = args[0] as? String,
-                      let text = args[1] as? String else {
-                    return Int64(0)
-                }
-
-                // 使用缓存的正则表达式
-                guard let regex = RegexCache.shared.regex(for: pattern) else {
-                    return Int64(0)
-                }
-
-                let range = NSRange(text.startIndex..., in: text)
-                let isMatch = regex.firstMatch(in: text, range: range) != nil
-                return isMatch ? Int64(1) : Int64(0)
+    private nonisolated func installRegexpFunction(on connection: Connection, role: String) {
+        // 注册 REGEXP 函数：regexp(pattern, text) -> Bool
+        // 使用方式：WHERE search_text REGEXP 'pattern'
+        connection.createFunction("regexp", argumentCount: 2, deterministic: true) { args in
+            guard args.count == 2,
+                  let pattern = args[0] as? String,
+                  let text = args[1] as? String else {
+                return Int64(0)
             }
-            log.debug("Registered custom REGEXP function for SQLite")
+
+            // 使用缓存的正则表达式
+            guard let regex = RegexCache.shared.regex(for: pattern) else {
+                return Int64(0)
+            }
+
+            let range = NSRange(text.startIndex..., in: text)
+            let isMatch = regex.firstMatch(in: text, range: range) != nil
+            return isMatch ? Int64(1) : Int64(0)
+        }
+        log.debug("Registered custom REGEXP function for SQLite \(role)")
+    }
+
+    /// 注册自定义 SQL 函数（如正则匹配）
+    /// - Returns: 是否在有效 writer 上完成注册；reader 不可用时允许回退到 writer 读路径。
+    private func registerCustomFunctions() -> Bool {
+        let writerOK = syncOnDBQueue {
+            guard let db = db else { return false }
+            installRegexpFunction(on: db, role: "writer")
             return true
         }
+
+        let readerOK = syncOnDBReadQueue {
+            guard let readerDb else { return true }
+            installRegexpFunction(on: readerDb, role: "reader")
+            return true
+        }
+
+        return writerOK && readerOK
     }
 
     /// 使用正则表达式搜索（在数据库层执行）
@@ -2421,8 +2633,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             )
         }
 
-        return await withDBAsync {
-            guard let db = self.db, let table = self.table else { return [] }
+        return await withReadDBAsync { db, table in
             // 构建查询
             let escapedPattern = pattern.replacingOccurrences(of: "'", with: "''")
             var query = self.listModeBaseQuery(table: table).filter(
@@ -2468,8 +2679,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             // 支持任务取消
             guard !Task.isCancelled else { break }
 
-            let rows: [Row] = await withDBAsync {
-                guard let db = self.db, let table = self.table else { return [] }
+            let rows: [Row] = await withReadDBAsync { db, table in
                 // 构建基础查询
                 var query = table
                     .select(Col.id, Col.ts, Col.searchText, Col.appName, Col.customTitle)
@@ -2568,8 +2778,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         while start < matchingIds.count {
             let end = min(start + chunkSize, matchingIds.count)
             let chunk = Array(matchingIds[start..<end])
-            let chunkRows: [Row] = await withDBAsync {
-                guard let db = self.db, let table = self.table else { return [] }
+            let chunkRows: [Row] = await withReadDBAsync { db, table in
                 var query = self.listModeBaseQuery(table: table).filter(chunk.contains(Col.id))
 
                 if let types = typeFilter, !types.isEmpty {
@@ -3210,7 +3419,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
     private func performFileSearchTextBackfill() async {
         let batchSize = 200
-        var offset = 0
+        var lastSeenID: Int64 = 0
         var updated = 0
 
         while true {
@@ -3220,12 +3429,16 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 guard let db = self.db, let table = self.table else { return [] }
                 let query = table
                     .select(Col.id, Col.data, Col.searchText, Col.type)
-                    .filter(Col.type == PasteboardType.fileURL.rawValue)
-                    .limit(batchSize, offset: offset)
+                    .filter((Col.type == PasteboardType.fileURL.rawValue) && (Col.id > lastSeenID))
+                    .order(Col.id.asc)
+                    .limit(batchSize)
                 return Array(try db.prepare(query))
             } ?? []
 
             guard !rows.isEmpty else { break }
+            if let lastID = try? rows.last?.get(Col.id) {
+                lastSeenID = lastID
+            }
 
             for row in rows {
                 guard !Task.isCancelled else { break }
@@ -3261,7 +3474,6 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             }
 
             if rows.count < batchSize { break }
-            offset += batchSize
             await Task.yield()
         }
 
@@ -3491,7 +3703,11 @@ extension DeckSQLManager {
     /// - Returns: 解密后的数据（安全模式下），或原始数据（非安全模式）
     private func decryptData(_ data: Data, force: Bool = false) -> Data {
         guard force || DeckUserDefaults.securityModeEnabled else { return data }
-        return SecurityService.shared.decrypt(data) ?? data
+        // This is intentionally tolerant: several read paths call it while the
+        // database can contain mixed plaintext/encrypted rows (startup,
+        // security-mode migration windows, legacy rows). A failed probe falls
+        // back to the original payload, so it should not be logged as ERROR.
+        return SecurityService.shared.decryptSilently(data) ?? data
     }
     
     /// 加密字符串（用于 search_text、app_name、custom_title 列）
@@ -3518,7 +3734,7 @@ extension DeckSQLManager {
     private func decryptString(_ string: String, force: Bool = false) -> String {
         guard force || DeckUserDefaults.securityModeEnabled else { return string }
         guard let data = Data(base64Encoded: string),
-              let decrypted = SecurityService.shared.decrypt(data),
+              let decrypted = SecurityService.shared.decryptSilently(data),
               let result = String(data: decrypted, encoding: .utf8) else { return string }
         return result
     }
@@ -3826,8 +4042,7 @@ extension DeckSQLManager {
         let query = tab.select(EmbeddingCol.id, EmbeddingCol.textHash, EmbeddingCol.embedding)
             .filter(ids.contains(EmbeddingCol.id))
 
-        return await withDBAsync {
-            guard let db = self.db else { return [:] }
+        return await withReadDBAsync { db, _ in
             var result: [Int64: [Float]] = [:]
             let rows = Array(try db.prepare(query))
             for row in rows {
@@ -3955,6 +4170,42 @@ extension DeckSQLManager {
         return entry
     }
 
+    /// Build a lightweight, decrypted search snapshot for off-main fuzzy/mixed ranking.
+    ///
+    /// In security mode, rows store `search_text`, `app_name`, and `custom_title`
+    /// encrypted, so ranking raw SQL rows would compare against Base64 ciphertext and
+    /// make fuzzy/mixed search look empty. This mirrors `rowToClipboardItem`'s
+    /// lightweight-field decryption without materializing payload blobs.
+    func searchSnapshot(from row: Row) -> SearchSnapshot? {
+        do {
+            let uniqueId = try row.get(Col.uniqueId)
+            let rawSearchText = try row.get(Col.searchText)
+            let rawAppName = try row.get(Col.appName)
+            let rawCustomTitle = (try? row.get(Col.customTitle)) ?? nil
+            let storedIsEncrypted = try? row.get(Col.isEncrypted)
+            let shouldDecrypt = storedIsEncrypted ?? DeckUserDefaults.securityModeEnabled
+
+            let searchText = decryptString(rawSearchText, force: shouldDecrypt)
+            let appName = decryptString(rawAppName, force: shouldDecrypt)
+            let customTitle = rawCustomTitle
+                .map { decryptString($0, force: shouldDecrypt).trimmingCharacters(in: .whitespacesAndNewlines) }
+
+            return SearchSnapshot(
+                uniqueId: uniqueId,
+                title: customTitle ?? "",
+                text: searchText,
+                appName: appName
+            )
+        } catch {
+            log.error("Failed to build search snapshot: \(error)")
+            return nil
+        }
+    }
+
+    func searchSnapshots(from rows: [Row]) -> [SearchSnapshot] {
+        rows.compactMap { searchSnapshot(from: $0) }
+    }
+
     /// 使缓存失效
     /// - Parameter ids: 要失效的行 ID 列表。如果为 nil，则清空所有缓存
     private nonisolated func invalidateSearchCache(ids: [Int64]? = nil) {
@@ -3998,8 +4249,7 @@ extension DeckSQLManager {
     }
 
     var totalCount: Int {
-        return withDB {
-            guard let db = self.db, let table = self.table else { return 0 }
+        return withReadDB { db, table in
             return try db.scalar(table.count)
         } ?? 0
     }
@@ -4761,8 +5011,7 @@ extension DeckSQLManager {
         guard !Task.isCancelled else { return [] }
         let ord = order ?? [Col.ts.desc, Col.id.desc]
 
-        return await withDBAsync {
-            guard let db = self.db, let table = self.table else { return [] }
+        return await withReadDBAsync { db, table in
             var query = table.order(ord)
             if let f = filter { query = query.filter(f) }
             if let l = limit { query = query.limit(l, offset: offset ?? 0) }
@@ -4823,8 +5072,7 @@ extension DeckSQLManager {
     ) async -> [Row] {
         guard !Task.isCancelled else { return [] }
 
-        return await withDBAsync {
-            guard let db = self.db, let table = self.table else { return [] }
+        return await withReadDBAsync { db, table in
             var query = self.listModeBaseQuery(table: table)
 
             if let f = filter { query = query.filter(f) }
@@ -4846,8 +5094,7 @@ extension DeckSQLManager {
         guard !Task.isCancelled else { return [] }
         let safeLimit = max(1, limit)
 
-        return await withDBAsync {
-            guard let db = self.db, let table = self.table else { return [] }
+        return await withReadDBAsync { db, table in
             var query = self.listModeBaseQuery(table: table)
             if let f = filter { query = query.filter(f) }
             query = query.order(Col.ts.asc, Col.id.asc).limit(safeLimit)
@@ -4883,8 +5130,7 @@ extension DeckSQLManager {
         tagId: Int?,
         limit: Int
     ) async -> [Int64] {
-        return await withDBAsync {
-            guard let db = self.db else { return [] }
+        return await withReadDBAsync { db, _ in
             var filters = [
                 "ClipboardHistory_fts MATCH ?",
                 "h.is_encrypted = 0"
@@ -4894,7 +5140,9 @@ extension DeckSQLManager {
             if let types = typeFilter, !types.isEmpty {
                 let placeholders = Array(repeating: "?", count: types.count).joined(separator: ",")
                 filters.append("h.item_type IN (\(placeholders))")
-                bindings.append(contentsOf: types.map { $0 as Binding? })
+                for type in types {
+                    bindings.append(type)
+                }
             }
 
             if let tagId, tagId != -1 {
@@ -4955,8 +5203,7 @@ extension DeckSQLManager {
         let escaped = escapeForLike(keyword)
         let pattern = "%\(escaped)%"
 
-        return await withDBAsync {
-            guard let db = self.db else { return [] }
+        return await withReadDBAsync { db, _ in
             var filters = [
                 "(search_text LIKE ? ESCAPE '\\' OR app_name LIKE ? ESCAPE '\\' OR IFNULL(custom_title, '') LIKE ? ESCAPE '\\')"
             ]
@@ -4965,7 +5212,9 @@ extension DeckSQLManager {
             if let types = typeFilter, !types.isEmpty {
                 let placeholders = Array(repeating: "?", count: types.count).joined(separator: ",")
                 filters.append("item_type IN (\(placeholders))")
-                bindings.append(contentsOf: types.map { $0 as Binding? })
+                for type in types {
+                    bindings.append(type)
+                }
             }
 
             if let tagId, tagId != -1 {
@@ -5009,7 +5258,7 @@ extension DeckSQLManager {
         // 安全模式下 FTS 索引存储的是加密内容，无法直接匹配
         // 需要使用内存解密搜索
         if DeckUserDefaults.securityModeEnabled {
-            return await searchWithLike(keyword: trimmed, limit: limit)
+            return await searchWithLike(keyword: trimmed, typeFilter: typeFilter, tagId: tagId, limit: limit)
         }
 
         let usesTrigram = syncOnDBQueue { ftsUsesTrigram }
@@ -5047,7 +5296,12 @@ extension DeckSQLManager {
     /// 安全模式/无 trigram 时使用内存搜索，避免 FTS5 无法匹配
     /// 使用缓存避免重复解密和 lowercased 转换，显著提升频繁搜索性能
     /// 采用分批流式扫描，覆盖全量数据
-    private func searchWithLike(keyword: String, limit: Int) async -> [Int64] {
+    private func searchWithLike(
+        keyword: String,
+        typeFilter: [String]? = nil,
+        tagId: Int? = nil,
+        limit: Int
+    ) async -> [Int64] {
         var matchingIds: [Int64] = []
         let lowercasedKeyword = keyword.lowercased()
         let isSecurityMode = DeckUserDefaults.securityModeEnabled
@@ -5067,8 +5321,7 @@ extension DeckSQLManager {
             // 支持任务取消
             guard !Task.isCancelled else { break }
 
-            let rows: [Row] = await withDBAsync {
-                guard let db = self.db, let table = self.table else { return [] }
+            let rows: [Row] = await withReadDBAsync { db, table in
                 var query = table
                     .select(Col.id, Col.ts, Col.searchText, Col.appName, Col.customTitle)
                     .order(Col.ts.desc, Col.id.desc)
@@ -5078,6 +5331,15 @@ extension DeckSQLManager {
                     let cursorFilter = (Col.ts < cursor.timestamp) || (Col.ts == cursor.timestamp && Col.id < cursor.id)
                     query = query.filter(cursorFilter)
                 }
+
+                if let types = typeFilter, !types.isEmpty {
+                    query = query.filter(types.contains(Col.itemType))
+                }
+
+                if let tagId = tagId, tagId != -1 {
+                    query = query.filter(Col.tagId == tagId)
+                }
+
                 return Array(try db.prepare(query))
             } ?? []
 
@@ -5208,8 +5470,7 @@ extension DeckSQLManager {
             guard !Task.isCancelled else { break }
             let end = min(start + chunkSize, ids.count)
             let chunk = Array(ids[start..<end])
-            let chunkRows = await withDBAsync { () throws -> [Row] in
-                guard let db = self.db, let table = self.table else { return [Row]() }
+            let chunkRows: [Row] = await withReadDBAsync { db, table in
                 var query = self.listModeBaseQuery(table: table).filter(chunk.contains(Col.id))
 
                 if let types = typeFilter, !types.isEmpty {
@@ -5229,8 +5490,7 @@ extension DeckSQLManager {
     }
     
     func fetchAll(limit: Int = 10000, offset: Int = 0, loadFullData: Bool = false) async -> [ClipboardItem] {
-        let rows = await withDBAsync { () throws -> [Row] in
-            guard let db = self.db, let table = self.table else { return [Row]() }
+        let rows: [Row] = await withReadDBAsync { db, table in
             let query = table.order(Col.ts.desc).limit(limit, offset: offset)
             return Array(try db.prepare(query))
         } ?? []
@@ -5243,8 +5503,7 @@ extension DeckSQLManager {
         beforeId: Int64? = nil,
         loadFullData: Bool = false
     ) async -> [ClipboardItem] {
-        let rows = await withDBAsync { () throws -> [Row] in
-            guard let db = self.db, let table = self.table else { return [Row]() }
+        let rows: [Row] = await withReadDBAsync { db, table in
             var query = table
             if let beforeTimestamp, let beforeId {
                 let cursorFilter = (Col.ts < beforeTimestamp) || (Col.ts == beforeTimestamp && Col.id < beforeId)
@@ -5288,8 +5547,7 @@ extension DeckSQLManager {
         beforeTimestamp: Int64? = nil,
         beforeId: Int64? = nil
     ) async -> [ExportRow] {
-        let rows = await withDBAsync { () throws -> [Row] in
-            guard let db = self.db, let table = self.table else { return [Row]() }
+        let rows: [Row] = await withReadDBAsync { db, table in
             var query = table.select(
                 Col.id,
                 Col.uniqueId,
@@ -5402,8 +5660,7 @@ extension DeckSQLManager {
     }
 
     func fetchAll(limit: Int = 10000, offset: Int = 0, loadFullData: Bool = false) -> [ClipboardItem] {
-        let rows = withDB { () throws -> [Row] in
-            guard let db = self.db, let table = self.table else { return [Row]() }
+        let rows: [Row] = withReadDB { db, table in
             let query = table.order(Col.ts.desc).limit(limit, offset: offset)
             return Array(try db.prepare(query))
         } ?? []
@@ -5411,24 +5668,21 @@ extension DeckSQLManager {
     }
     
     func fetch(id: Int64) async -> Row? {
-        return await withDBAsync { () throws -> Row? in
-            guard let db = self.db, let table = self.table else { return nil }
+        return await withReadDBAsync { db, table in
             let query = table.filter(Col.id == id)
             return try db.pluck(query)
         } ?? nil
     }
 
     func fetchRow(uniqueId: String) async -> Row? {
-        return await withDBAsync { () throws -> Row? in
-            guard let db = self.db, let table = self.table else { return nil }
+        return await withReadDBAsync { db, table in
             let query = table.filter(Col.uniqueId == uniqueId).order(Col.ts.desc).limit(1)
             return try db.pluck(query)
         } ?? nil
     }
 
     func fetchTagId(uniqueId: String) async -> Int? {
-        return await withDBAsync { () throws -> Int? in
-            guard let db = self.db, let table = self.table else { return nil }
+        return await withReadDBAsync { db, table in
             let query = table.select(Col.tagId).filter(Col.uniqueId == uniqueId).order(Col.ts.desc).limit(1)
             return try db.pluck(query)?.get(Col.tagId)
         } ?? nil
@@ -5460,13 +5714,12 @@ extension DeckSQLManager {
 
     /// Fetch raw data payload for a single item (used for lazy loading).
     func fetchData(for id: Int64, isEncrypted: Bool? = nil) -> Data? {
-        return withDB { () -> Data? in
-            guard let db = self.db, let table = self.table else { return nil }
+        return withReadDB { db, table in
             let query = table.select(Col.data).filter(Col.id == id).limit(1)
             guard let row = try db.pluck(query) else { return nil }
             let rawData = try row.get(Col.data)
             let shouldDecrypt = isEncrypted ?? DeckUserDefaults.securityModeEnabled
-            return decryptData(rawData, force: shouldDecrypt)
+            return self.decryptData(rawData, force: shouldDecrypt)
         } ?? nil
     }
 
@@ -5482,8 +5735,7 @@ extension DeckSQLManager {
         while start < ids.count {
             let end = min(start + chunkSize, ids.count)
             let chunk = Array(ids[start..<end])
-            let rows: [Row] = await withDBAsync {
-                guard let db = self.db, let table = self.table else { return [Row]() }
+            let rows: [Row] = await withReadDBAsync { db, table in
                 let query = self.listModeBaseQuery(table: table).filter(chunk.contains(Col.id))
                 return Array(try db.prepare(query))
             } ?? []
@@ -5495,8 +5747,7 @@ extension DeckSQLManager {
     }
 
     func count(typeFilter: [String]? = nil) async -> Int {
-        return await withDBAsync {
-            guard let db = self.db, let table = self.table else { return 0 }
+        return await withReadDBAsync { db, table in
             var query = table
             if let types = typeFilter, !types.isEmpty {
                 query = query.filter(types.contains(Col.itemType))
@@ -5508,8 +5759,7 @@ extension DeckSQLManager {
     // MARK: - Lightweight Statistics Queries (avoid loading large blobs)
 
     func count(since timestamp: Int64) async -> Int {
-        return await withDBAsync {
-            guard let db = self.db, let table = self.table else { return 0 }
+        return await withReadDBAsync { db, table in
             let query = table.filter(Col.ts >= timestamp)
             return try db.scalar(query.count)
         } ?? 0
@@ -5526,18 +5776,16 @@ extension DeckSQLManager {
         let end: Int64
     }
 
-    /// Summary counters in one SQLite pass. This avoids serializing three
-    /// independent count queries through the same database queue.
+    /// Summary counters in one SQLite statement. Keep each count as an
+    /// independent subquery so timestamp ranges can use the timestamp index
+    /// instead of forcing a full-table SUM(CASE...) scan.
     func fetchStatisticsSummary(todayStart: Int64, weekStart: Int64) async -> StatisticsSummaryRow {
-        return await withDBAsync {
-            guard let db = self.db else { return StatisticsSummaryRow(total: 0, today: 0, week: 0) }
-
+        return await withReadDBAsync { db, _ in
             let sql = """
             SELECT
-                COUNT(*) AS total_count,
-                COALESCE(SUM(CASE WHEN timestamp >= ? THEN 1 ELSE 0 END), 0) AS today_count,
-                COALESCE(SUM(CASE WHEN timestamp >= ? THEN 1 ELSE 0 END), 0) AS week_count
-            FROM ClipboardHistory
+                (SELECT COUNT(*) FROM ClipboardHistory) AS total_count,
+                (SELECT COUNT(*) FROM ClipboardHistory WHERE timestamp >= ?) AS today_count,
+                (SELECT COUNT(*) FROM ClipboardHistory WHERE timestamp >= ?) AS week_count
             """
 
             let stmt = try db.prepare(sql).bind(todayStart, weekStart)
@@ -5563,9 +5811,7 @@ extension DeckSQLManager {
         }
 
         let rangeQuery = Self.timestampRangeCountQuery(for: ranges)
-        return await withDBAsync {
-            guard let db = self.db else { return Array(repeating: 0, count: ranges.count) }
-
+        return await withReadDBAsync { db, _ in
             let sql = """
             SELECT \(rangeQuery.selectClauses)
             FROM ClipboardHistory
@@ -5609,8 +5855,7 @@ extension DeckSQLManager {
     /// Only selects the `ts` column to keep memory stable.
     func fetchTimestamps(since timestamp: Int64) async -> [Int64] {
         guard !Task.isCancelled else { return [] }
-        return await withDBAsync {
-            guard let db = self.db, let table = self.table else { return [] }
+        return await withReadDBAsync { db, table in
             let query = table
                 .select(Col.ts)
                 .filter(Col.ts >= timestamp)
@@ -5640,9 +5885,7 @@ extension DeckSQLManager {
     /// Type distribution across the whole database (metadata-only, no blobs).
     func fetchTypeCounts() async -> [TypeCountRow] {
         guard !Task.isCancelled else { return [] }
-        return await withDBAsync {
-            guard let db = self.db else { return [] }
-
+        return await withReadDBAsync { db, _ in
             let sql = """
             SELECT item_type, COUNT(*) AS c
             FROM ClipboardHistory
@@ -5678,9 +5921,7 @@ extension DeckSQLManager {
         // Avoid pathological values.
         let safeLimit = max(1, min(limit, 50))
 
-        return await withDBAsync {
-            guard let db = self.db else { return [] }
-
+        return await withReadDBAsync { db, _ in
             let sql = """
             SELECT app_path, COUNT(*) AS c
             FROM ClipboardHistory
