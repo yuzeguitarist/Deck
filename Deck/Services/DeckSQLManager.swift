@@ -6223,6 +6223,10 @@ extension DeckSQLManager {
         }
         guard shouldSchedule else { return }
 
+        enqueueReadPathMetadataBackfillTask()
+    }
+
+    private nonisolated func enqueueReadPathMetadataBackfillTask() {
         Task.detached(priority: .utility) { [weak self] in
             await self?.performReadPathMetadataBackfill()
         }
@@ -6232,9 +6236,16 @@ extension DeckSQLManager {
         let batchSize = 200
         let maxUniqueRowsPerRun = 5_000
         var totalUniqueBackfilled = 0
+        var shouldScheduleNextRun = false
         defer {
-            syncOnDBQueue {
+            let shouldSchedule = syncOnDBQueue { () -> Bool in
                 readPathMetadataBackfillScheduled = false
+                guard shouldScheduleNextRun else { return false }
+                readPathMetadataBackfillScheduled = true
+                return true
+            }
+            if shouldSchedule {
+                enqueueReadPathMetadataBackfillTask()
             }
         }
 
@@ -6298,6 +6309,8 @@ extension DeckSQLManager {
             try db.run(sql, DeckTag.importantTagId)
             return Int(db.changes)
         } ?? 0
+
+        shouldScheduleNextRun = !Task.isCancelled && totalUniqueBackfilled >= maxUniqueRowsPerRun
 
         if totalUniqueBackfilled > 0 || fixedTemporary > 0 {
             await log.info("Read-path metadata backfill completed: unique_id=\(totalUniqueBackfilled), temporary=\(fixedTemporary)")
