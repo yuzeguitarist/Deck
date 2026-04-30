@@ -5713,16 +5713,18 @@ extension DeckSQLManager {
             return Array(try db.prepare(query))
         } ?? []
 
-        return rows.compactMap { exportRow(from: $0) }
+        let generatedUniqueIds = generatedUniqueIdsForLegacyExportRows(rows)
+        let resolvedGeneratedUniqueIds = await persistGeneratedUniqueIdsForExport(generatedUniqueIds)
+        return rows.compactMap { exportRow(from: $0, generatedUniqueIds: resolvedGeneratedUniqueIds) }
     }
 
-    private func exportRow(from row: Row) -> ExportRow? {
+    private func exportRow(from row: Row, generatedUniqueIds: [Int64: String]) -> ExportRow? {
         do {
             let id = try row.get(Col.id)
             let storedUniqueId = try row.get(Col.uniqueId)
             let uniqueId: String
             if storedUniqueId.isEmpty {
-                uniqueId = stablePendingUniqueId(for: id)
+                uniqueId = generatedUniqueIds[id] ?? stablePendingUniqueId(for: id)
             } else {
                 uniqueId = storedUniqueId
             }
@@ -5786,6 +5788,66 @@ extension DeckSQLManager {
             log.error("Failed to convert row for export: \(error)")
             return nil
         }
+    }
+
+    private nonisolated func generatedUniqueIdsForLegacyExportRows(_ rows: [Row]) -> [Int64: String] {
+        var uniqueIdsByRowId: [Int64: String] = [:]
+        uniqueIdsByRowId.reserveCapacity(rows.count)
+
+        for row in rows {
+            guard let id = try? row.get(Col.id),
+                  let storedUniqueId = try? row.get(Col.uniqueId),
+                  storedUniqueId.isEmpty else {
+                continue
+            }
+            uniqueIdsByRowId[id] = stablePendingUniqueId(for: id)
+        }
+
+        return uniqueIdsByRowId
+    }
+
+    private nonisolated func persistGeneratedUniqueIdsForExport(_ uniqueIdsByRowId: [Int64: String]) async -> [Int64: String] {
+        guard !uniqueIdsByRowId.isEmpty else { return [:] }
+
+        let result = await withDBAsync {
+            guard let db = self.db else {
+                return uniqueIdsByRowId
+            }
+
+            let updateSQL = "UPDATE ClipboardHistory SET unique_id = ? WHERE id = ? AND unique_id = ''"
+            let selectSQL = "SELECT unique_id FROM ClipboardHistory WHERE id = ? LIMIT 1"
+            let updateStmt = try db.prepare(updateSQL)
+            var resolvedUniqueIds = uniqueIdsByRowId
+            var removablePendingUniqueIds: [Int64: String] = [:]
+            removablePendingUniqueIds.reserveCapacity(uniqueIdsByRowId.count)
+
+            try db.transaction {
+                for (id, generatedUniqueId) in uniqueIdsByRowId.sorted(by: { $0.key < $1.key }) {
+                    try updateStmt.run(generatedUniqueId, id)
+                    if Int(db.changes) > 0 {
+                        resolvedUniqueIds[id] = generatedUniqueId
+                        removablePendingUniqueIds[id] = generatedUniqueId
+                        continue
+                    }
+
+                    // If another maintenance path won the race after the export
+                    // read saw an empty unique_id, export the committed DB value
+                    // instead of a stale pending UUID.
+                    let selectStmt = try db.prepare(selectSQL).bind(id)
+                    if let row = try selectStmt.failableNext(),
+                       let existingUniqueId = row[0] as? String,
+                       !existingUniqueId.isEmpty {
+                        resolvedUniqueIds[id] = existingUniqueId
+                        removablePendingUniqueIds[id] = generatedUniqueId
+                    }
+                }
+            }
+
+            self.removePendingUniqueIdsIfMatching(removablePendingUniqueIds)
+            return resolvedUniqueIds
+        }
+
+        return result ?? uniqueIdsByRowId
     }
 
     func fetchAll(limit: Int = 10000, offset: Int = 0, loadFullData: Bool = false) -> [ClipboardItem] {
