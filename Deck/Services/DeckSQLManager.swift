@@ -407,6 +407,38 @@ extension DeckSQLManager {
         } ?? false
     }
 
+    /// Schedule a low-priority passive WAL checkpoint after the app becomes idle.
+    /// PASSIVE avoids blocking active readers/writers; TRUNCATE remains reserved for explicit maintenance.
+    func scheduleIdleWALCheckpoint(reason: String) {
+        idleWALCheckpointTask?.cancel()
+        idleWALCheckpointTask = Task(priority: .utility) { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            _ = await self?.walCheckpointPassive(reason: reason)
+        }
+    }
+
+    private func walCheckpointPassive(reason: String) async -> Bool {
+        let didCheckpoint = await withDBAsyncBackground {
+            guard let db = self.db else { return false }
+            do {
+                try db.execute("PRAGMA wal_checkpoint(PASSIVE)")
+                return true
+            } catch {
+                return false
+            }
+        } ?? false
+
+        if didCheckpoint {
+            await log.debug("Passive WAL checkpoint completed (\(reason))")
+        }
+        return didCheckpoint
+    }
+
     /// Run SQLite `PRAGMA optimize`.
     func pragmaOptimize() async -> Bool {
         await withDBAsyncBackground {
@@ -590,6 +622,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     private nonisolated(unsafe) var lastDBFileCheckAt: TimeInterval = 0
     private nonisolated(unsafe) var lastDBFileCheckResult: Bool = true
     private nonisolated let dbFileCheckThrottle: TimeInterval = 0.5
+    private var idleWALCheckpointTask: Task<Void, Never>?
 
     /// 是否可用 UPSERT(unique_id) + RETURNING（取决于 SQLite 版本与 unique index 是否就绪）
     /// - 第一次失败后会自动降级为 delete+insert，避免每次都走异常路径
@@ -597,6 +630,8 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     // nonisolated because hot-path inserts execute on `com.deck.sqlite.queue.*`,
     // not on MainActor under Swift 6 default actor isolation.
     private nonisolated(unsafe) var supportsUniqueIdUpsert: Bool = true
+    private nonisolated(unsafe) var upsertClipboardHistoryStatement: OpaquePointer?
+    private nonisolated static let sqliteTransient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
     /// 列表模式下 Data 列投影阈值（与 `rowToClipboardItem(loadFullData: false)` 保持一致）
     private nonisolated static let listInlineBytesForNonImage = 32 * 1024
@@ -651,10 +686,10 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     
     /// 向量表基础名称（实际表名会加上维度后缀，如 _384, _1024）
-    private let vecTableBaseName = "ClipboardHistory_embedding_vec"
+    private nonisolated let vecTableBaseName = "ClipboardHistory_embedding_vec"
     
     /// sqlite-vec 扩展文件候选名称（按优先级搜索）
-    private let vecExtensionFileNames = [
+    private nonisolated let vecExtensionFileNames = [
         "vec0",
         "vec0.dylib",
         "sqlite-vec",
@@ -666,43 +701,43 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     private nonisolated let vecNumberLocale = Locale(identifier: "en_US_POSIX")
     
     /// 向量索引是否启用（安全模式下强制禁用）
-    private var vecIndexEnabled = false
+    private nonisolated(unsafe) var vecIndexEnabled = false
     
     /// 已创建的向量表维度集合（如 [384, 1024]）
-    private var vecReadyDimensions: Set<Int> = []
+    private nonisolated(unsafe) var vecReadyDimensions: Set<Int> = []
     
     /// 是否已清理旧版向量表（无维度后缀的表）
-    private var vecLegacyTableCleaned = false
+    private nonisolated(unsafe) var vecLegacyTableCleaned = false
     
     /// 向量索引回填是否正在进行（防止重复启动）
-    private var vecBackfillInProgress = false
+    private nonisolated(unsafe) var vecBackfillInProgress = false
     
     /// 向量回填状态队列（保护 vecBackfillInProgress 的并发访问）
-    private let vecBackfillStateQueue = DispatchQueue(label: "com.deck.vec.backfill.state")
+    private nonisolated let vecBackfillStateQueue = DispatchQueue(label: "com.deck.vec.backfill.state")
     
     /// 已记录缺失维度警告的集合（避免重复日志）
-    private var vecMissingDimensionLogged: Set<Int> = []
+    private nonisolated(unsafe) var vecMissingDimensionLogged: Set<Int> = []
 
     /// 已判定不可用的向量维度（当前会话内熔断，避免重复 rebuild 风暴）
-    private var vecBrokenDimensions: Set<Int> = []
+    private nonisolated(unsafe) var vecBrokenDimensions: Set<Int> = []
 
     /// 已记录不可用维度警告的集合（避免重复日志）
-    private var vecBrokenDimensionLogged: Set<Int> = []
+    private nonisolated(unsafe) var vecBrokenDimensionLogged: Set<Int> = []
 
     /// 当前维度对应的活跃 vec 表名（支持恢复后切换到新表名）
-    private var vecActiveTableNames: [Int: String] = [:]
+    private nonisolated(unsafe) var vecActiveTableNames: [Int: String] = [:]
 
     /// 正在进行恢复回填的维度集合（防止重复恢复任务）
-    private var vecRecoveryInProgressDimensions: Set<Int> = []
+    private nonisolated(unsafe) var vecRecoveryInProgressDimensions: Set<Int> = []
 
     /// 恢复表序号（用于生成唯一表名）
-    private var vecRecoverySequence: Int64 = 0
+    private nonisolated(unsafe) var vecRecoverySequence: Int64 = 0
 
     /// 持久化活跃 vec 表映射（跨重启保持恢复后的读写目标）
-    private let vecActiveTablesDefaultsKey = "com.deck.vec.activeTables.v2"
+    private nonisolated let vecActiveTablesDefaultsKey = "com.deck.vec.activeTables.v2"
 
     /// 无法立即清理的旧 vec 表（避免每次恢复都重复尝试）
-    private var vecCleanupDeferredTables: Set<String> = []
+    private nonisolated(unsafe) var vecCleanupDeferredTables: Set<String> = []
 
     // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     // MARK: - Error Tracking (错误追踪与恢复)
@@ -747,7 +782,11 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
     /// Backfill cache for legacy rows with empty unique_id values.
     /// Keeps a stable generated UUID per row until the DB update succeeds.
+    /// - Important: Access only through the pending-unique-id helpers below so
+    ///   read mapping and background metadata backfill stay serialized on the
+    ///   writer DB queue.
     private nonisolated(unsafe) var pendingUniqueIdBackfill: [Int64: String] = [:]
+    private nonisolated(unsafe) var readPathMetadataBackfillScheduled = false
     private var hasConfiguredSensitiveCacheObservation = false
 
     /// 单例初始化（设置队列检测机制）
@@ -879,7 +918,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     /// - Note: 自动处理错误、重置错误计数、触发恢复机制
     /// - Warning: 操作失败时会调用 `handleDBError()`，可能触发数据库恢复
     @discardableResult
-    private func withDB<T>(_ work: () throws -> T) -> T? {
+    private nonisolated func withDB<T>(_ work: () throws -> T) -> T? {
         // 在执行数据库操作前检查文件有效性，防止 try! 崩溃
         if !isDatabaseFileValid() {
             log.warn("Database file is invalid or missing, attempting to reinitialize...")
@@ -1040,7 +1079,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     /// 适用场景：migrations / backfills / VACUUM / 大批量重算等。
     /// 这样可以避免这些任务在 `.userInitiated` 下和用户交互抢 CPU，显著降低能耗与卡顿风险。
     @discardableResult
-    private func withDBAsyncBackground<T>(_ work: @escaping () throws -> T) async -> T? {
+    private nonisolated func withDBAsyncBackground<T>(_ work: @escaping () throws -> T) async -> T? {
         if !isDatabaseFileValid() {
             await log.warn("Database file is invalid or missing, attempting to reinitialize...")
             handleDBError(NSError(domain: "DeckSQL", code: -1, userInfo: [
@@ -1283,6 +1322,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             readerDb = nil
         }
         syncOnDBQueue {
+            finalizeCachedStatements()
             db = nil
             table = nil
             dbPathLock.lock()
@@ -1444,6 +1484,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             }
 
             backfillFileSearchTextIfNeeded()
+            scheduleReadPathMetadataBackfillIfNeeded()
             let storageDirForCleanup = basePath
             Task.detached(priority: .utility) {
                 LANReceivedCleanup.cleanupStaleStagingDirectories(storagePath: storageDirForCleanup)
@@ -1616,6 +1657,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         do { _ = try connection.scalar("PRAGMA journal_mode = WAL") } catch { log.debug("Failed to set journal_mode WAL for \(role): \(error.localizedDescription)") }
         do { _ = try connection.scalar("PRAGMA synchronous = NORMAL") } catch { log.debug("Failed to set synchronous NORMAL for \(role): \(error.localizedDescription)") }
         do { _ = try connection.scalar("PRAGMA wal_autocheckpoint = 1000") } catch { log.debug("Failed to set wal_autocheckpoint for \(role): \(error.localizedDescription)") }
+        do { _ = try connection.scalar("PRAGMA journal_size_limit = 16777216") } catch { log.debug("Failed to set journal_size_limit for \(role): \(error.localizedDescription)") }
     }
 
     private func openReadOnlyDatabase(at dbPath: String) {
@@ -1796,7 +1838,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         vecActiveTableNames = mapped
     }
 
-    private func persistVecActiveTables() {
+    private nonisolated func persistVecActiveTables() {
         var persisted: [Int: String] = [:]
         for (dimension, tableName) in vecActiveTableNames {
             if !tableName.isEmpty, tableName != vecDefaultTableName(for: dimension) {
@@ -1817,21 +1859,21 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }
     }
 
-    private func vecDefaultTableName(for dimension: Int) -> String {
+    private nonisolated func vecDefaultTableName(for dimension: Int) -> String {
         "\(vecTableBaseName)_\(dimension)"
     }
 
-    private func vecRecoveryTableName(for dimension: Int) -> String {
+    private nonisolated func vecRecoveryTableName(for dimension: Int) -> String {
         vecRecoverySequence += 1
         let ts = Int(Date().timeIntervalSince1970)
         return "\(vecTableBaseName)_recovery_\(dimension)_\(ts)_\(vecRecoverySequence)"
     }
 
-    private func vecTableName(for dimension: Int) -> String {
+    private nonisolated func vecTableName(for dimension: Int) -> String {
         vecActiveTableNames[dimension] ?? vecDefaultTableName(for: dimension)
     }
 
-    private func setVecActiveTableName(dimension: Int, tableName: String) {
+    private nonisolated func setVecActiveTableName(dimension: Int, tableName: String) {
         guard dimension > 0 else { return }
         let defaultName = vecDefaultTableName(for: dimension)
         if tableName == defaultName {
@@ -1844,21 +1886,21 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         persistVecActiveTables()
     }
 
-    private func vecLegacyTriggerName(for dimension: Int) -> String {
+    private nonisolated func vecLegacyTriggerName(for dimension: Int) -> String {
         "\(vecTableBaseName)_ad_\(dimension)"
     }
 
-    private func vecTriggerName(for tableName: String) -> String {
+    private nonisolated func vecTriggerName(for tableName: String) -> String {
         "\(tableName)_ad"
     }
 
-    private func vecTriggerName(for tableName: String, dimension: Int) -> String {
+    private nonisolated func vecTriggerName(for tableName: String, dimension: Int) -> String {
         tableName == vecDefaultTableName(for: dimension)
             ? vecLegacyTriggerName(for: dimension)
             : vecTriggerName(for: tableName)
     }
 
-    private func vecTableExists(_ tableName: String, db: Connection) -> Bool {
+    private nonisolated func vecTableExists(_ tableName: String, db: Connection) -> Bool {
         let sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=? LIMIT 1"
         return (try? db.scalar(sql, tableName) as? String) != nil
     }
@@ -1886,7 +1928,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }) ?? []
     }
 
-    private func listVecTables(for dimension: Int, db: Connection) -> [String] {
+    private nonisolated func listVecTables(for dimension: Int, db: Connection) -> [String] {
         guard dimension > 0 else { return [] }
         let defaultName = vecDefaultTableName(for: dimension)
         let recoveryPattern = "\(vecTableBaseName)_recovery_\(dimension)_%"
@@ -1913,7 +1955,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }
     }
 
-    private func resolveVecActiveTableName(dimension: Int, db: Connection) -> String {
+    private nonisolated func resolveVecActiveTableName(dimension: Int, db: Connection) -> String {
         let defaultName = vecDefaultTableName(for: dimension)
         let recoveryPrefix = "\(vecTableBaseName)_recovery_\(dimension)_"
         let tables = listVecTables(for: dimension, db: db)
@@ -2067,7 +2109,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         return Int(dimensionPart)
     }
 
-    private func isVecInternalSQLiteError(_ error: Error) -> Bool {
+    private nonisolated func isVecInternalSQLiteError(_ error: Error) -> Bool {
         let nsError = error as NSError
         let merged = "\(nsError.localizedDescription) \(String(reflecting: error))".lowercased()
         return merged.contains("sqlite-vec") ||
@@ -2078,7 +2120,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                merged.contains("vector blob")
     }
 
-    private func isVecDimensionUsable(_ dimension: Int) -> Bool {
+    private nonisolated func isVecDimensionUsable(_ dimension: Int) -> Bool {
         guard dimension > 0 else { return false }
         guard !vecBrokenDimensions.contains(dimension) else {
             if vecBrokenDimensionLogged.insert(dimension).inserted {
@@ -2089,7 +2131,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         return true
     }
 
-    private func scheduleVecRecoveryBackfill(dimension: Int, db: Connection, reason: String) {
+    private nonisolated func scheduleVecRecoveryBackfill(dimension: Int, db: Connection, reason: String) {
         guard dimension > 0 else { return }
         guard !vecRecoveryInProgressDimensions.contains(dimension) else { return }
 
@@ -2193,7 +2235,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 }
                 let normalized = normalizeVector(vector)
                 guard !normalized.isEmpty else { continue }
-                let payload = vectorToJSONString(normalized)
+                let payload = vectorToFloat32Blob(normalized)
                 try db.run(
                     "INSERT OR REPLACE INTO \(recoveryTableName)(rowid, embedding) VALUES (?, ?)",
                     id,
@@ -2206,14 +2248,14 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     }
 
     @discardableResult
-    private func rebuildVecTable(dimension: Int, db: Connection, reason: String) -> Bool {
+    private nonisolated func rebuildVecTable(dimension: Int, db: Connection, reason: String) -> Bool {
         guard dimension > 0 else { return false }
         scheduleVecRecoveryBackfill(dimension: dimension, db: db, reason: reason)
         // Recovery is asynchronous; caller should not retry vec write in current call.
         return false
     }
 
-    private func ensureVecTable(dimension: Int) {
+    private nonisolated func ensureVecTable(dimension: Int) {
         syncOnDBQueue {
             guard vecIndexEnabled, dimension > 0 else { return }
             guard isVecDimensionUsable(dimension) else { return }
@@ -2445,6 +2487,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
         return syncOnDBQueue {
             closeReadOnlyDatabase()
+            finalizeCachedStatements()
             db = nil
             table = nil
             return restoreDatabaseFromBackup(dbPath: paths.dbPath, backupPath: paths.backupPath)
@@ -3669,6 +3712,9 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     deinit {
         NotificationCenter.default.removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+        syncOnDBQueue {
+            finalizeCachedStatements()
+        }
         stopSecurityScopedAccess()
     }
 }
@@ -3857,7 +3903,7 @@ extension DeckSQLManager {
         return nil
     }
 
-    private func encodeEmbedding(_ vector: [Float]) -> Data {
+    private nonisolated func encodeEmbedding(_ vector: [Float]) -> Data {
         vector.withUnsafeBufferPointer { Data(buffer: $0) }
     }
 
@@ -3881,17 +3927,17 @@ extension DeckSQLManager {
         return normalized
     }
 
-    private nonisolated func vectorToJSONString(_ vector: [Float]) -> String {
-        var parts: [String] = []
-        parts.reserveCapacity(vector.count)
+    private nonisolated func vectorToFloat32Blob(_ vector: [Float]) -> SQLite.Blob {
+        var data = Data(capacity: vector.count * MemoryLayout<Float>.size)
         for value in vector {
-            parts.append(String(format: "%.6f", locale: vecNumberLocale, value))
+            var bits = value.bitPattern.littleEndian
+            withUnsafeBytes(of: &bits) { data.append(contentsOf: $0) }
         }
-        return "[\(parts.joined(separator: ","))]"
+        return SQLite.Blob(bytes: [UInt8](data))
     }
 
     @discardableResult
-    private func updateVecIndex(id: Int64, vector: [Float]) -> Bool {
+    private nonisolated func updateVecIndex(id: Int64, vector: [Float]) -> Bool {
         guard !vector.isEmpty else { return false }
         let canIndex = syncOnDBQueue { vecIndexEnabled } && !DeckUserDefaults.securityModeEnabled
         guard canIndex else { return false }
@@ -3904,8 +3950,8 @@ extension DeckSQLManager {
         let dimensionUsable = syncOnDBQueue { self.isVecDimensionUsable(dimension) }
         guard dimensionUsable else { return false }
 
-        // Serialize outside dbQueue to avoid blocking DB operations on CPU work.
-        let payload = vectorToJSONString(normalized)
+        // sqlite-vec accepts raw float32 BLOBs; avoid hot-path JSON formatting/parsing.
+        let payload = vectorToFloat32Blob(normalized)
 
         let outcome = withDB { () -> (succeeded: Bool, shouldLogFailure: Bool) in
             guard vecIndexEnabled, !DeckUserDefaults.securityModeEnabled else { return (false, false) }
@@ -3978,11 +4024,15 @@ extension DeckSQLManager {
         return succeeded
     }
 
-    private func storeSemanticEmbedding(id: Int64, textHash: String, vector: [Float]) {
+    private nonisolated func storeSemanticEmbedding(id: Int64, textHash: String, vector: [Float]) {
         let encoded = encodeEmbedding(vector)
         let storedData: Data
         if DeckUserDefaults.securityModeEnabled {
-            guard let encrypted = encryptData(encoded) else { return }
+            guard let encrypted = SecurityService.backgroundEncryptSilently(encoded) else {
+                log.error("Security mode enabled but semantic embedding encryption failed; rejecting plaintext write")
+                notifyEncryptionFailureIfNeeded()
+                return
+            }
             storedData = encrypted
         } else {
             storedData = encoded
@@ -4010,17 +4060,13 @@ extension DeckSQLManager {
             guard let vector = SemanticSearchService.shared.vector(for: normalized, cacheKey: "i:\(id)-\(textHash)") else {
                 return
             }
-            Task { @MainActor [weak self] in
-                self?.storeSemanticEmbedding(id: id, textHash: textHash, vector: vector)
-            }
+            self.storeSemanticEmbedding(id: id, textHash: textHash, vector: vector)
         }
     }
 
     nonisolated func scheduleSemanticEmbeddingStore(id: Int64, textHash: String, vector: [Float]) {
         embeddingQueue.async { [weak self] in
-            Task { @MainActor [weak self] in
-                self?.storeSemanticEmbedding(id: id, textHash: textHash, vector: vector)
-            }
+            self?.storeSemanticEmbedding(id: id, textHash: textHash, vector: vector)
         }
     }
 
@@ -4087,7 +4133,7 @@ extension DeckSQLManager {
         }
         guard isReady else { return [] }
 
-        let payload = vectorToJSONString(normalized)
+        let payload = vectorToFloat32Blob(normalized)
         await log.debug("Vec search: dim=\(normalized.count), limit=\(limit)")
         let results: [(id: Int64, distance: Double)] = await withDBAsync({ () throws -> [(id: Int64, distance: Double)] in
             guard let db = self.db else { return [] }
@@ -4485,6 +4531,168 @@ extension DeckSQLManager {
         }
     }
 
+    private nonisolated func sqliteError(_ db: Connection, operation: String) -> NSError {
+        let message = String(cString: sqlite3_errmsg(db.handle))
+        return NSError(domain: "DeckSQLite", code: Int(sqlite3_errcode(db.handle)), userInfo: [
+            NSLocalizedDescriptionKey: "\(operation): \(message)"
+        ])
+    }
+
+    private nonisolated func checkSQLite(_ rc: Int32, db: Connection, operation: String) throws {
+        guard rc == SQLITE_OK else {
+            throw sqliteError(db, operation: operation)
+        }
+    }
+
+    private nonisolated func finalizeCachedStatements() {
+        if let stmt = upsertClipboardHistoryStatement {
+            sqlite3_finalize(stmt)
+            upsertClipboardHistoryStatement = nil
+        }
+    }
+
+    private nonisolated var cachedUpsertClipboardHistorySQL: String {
+        """
+        INSERT INTO ClipboardHistory (
+            unique_id,
+            type,
+            item_type,
+            data,
+            preview_data,
+            timestamp,
+            app_path,
+            app_name,
+            custom_title,
+            source_anchor,
+            search_text,
+            content_length,
+            tag_id,
+            blob_path,
+            is_temporary,
+            is_encrypted,
+            received_from_lan
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(unique_id) WHERE unique_id <> '' DO UPDATE SET
+            type = excluded.type,
+            item_type = excluded.item_type,
+            data = excluded.data,
+            preview_data = excluded.preview_data,
+            timestamp = excluded.timestamp,
+            app_path = excluded.app_path,
+            app_name = excluded.app_name,
+            custom_title = excluded.custom_title,
+            source_anchor = excluded.source_anchor,
+            search_text = excluded.search_text,
+            content_length = excluded.content_length,
+            tag_id = CASE
+                WHEN excluded.tag_id = -1 AND ClipboardHistory.tag_id != -1
+                THEN ClipboardHistory.tag_id
+                ELSE excluded.tag_id
+            END,
+            blob_path = excluded.blob_path,
+            is_temporary = excluded.is_temporary,
+            is_encrypted = excluded.is_encrypted,
+            received_from_lan = MAX(ClipboardHistory.received_from_lan, excluded.received_from_lan)
+        RETURNING id
+        """
+    }
+
+    private nonisolated func cachedUpsertStatement(using db: Connection) throws -> OpaquePointer {
+        if let stmt = upsertClipboardHistoryStatement {
+            return stmt
+        }
+
+        var statement: OpaquePointer?
+        let rc = sqlite3_prepare_v2(db.handle, cachedUpsertClipboardHistorySQL, -1, &statement, nil)
+        guard rc == SQLITE_OK, let statement else {
+            throw sqliteError(db, operation: "prepare cached clipboard upsert")
+        }
+        upsertClipboardHistoryStatement = statement
+        return statement
+    }
+
+    private nonisolated func bindText(_ value: String?, to index: Int32, statement: OpaquePointer, db: Connection) throws {
+        guard let value else {
+            try checkSQLite(sqlite3_bind_null(statement, index), db: db, operation: "bind null text \(index)")
+            return
+        }
+        let rc = value.withCString { cString in
+            sqlite3_bind_text(statement, index, cString, -1, Self.sqliteTransient)
+        }
+        try checkSQLite(rc, db: db, operation: "bind text \(index)")
+    }
+
+    private nonisolated func bindBlob(_ value: Data?, to index: Int32, statement: OpaquePointer, db: Connection) throws {
+        guard let value else {
+            try checkSQLite(sqlite3_bind_null(statement, index), db: db, operation: "bind null blob \(index)")
+            return
+        }
+        if value.isEmpty {
+            try checkSQLite(sqlite3_bind_zeroblob(statement, index, 0), db: db, operation: "bind empty blob \(index)")
+            return
+        }
+        let rc = value.withUnsafeBytes { rawBuffer in
+            sqlite3_bind_blob(statement, index, rawBuffer.baseAddress, Int32(value.count), Self.sqliteTransient)
+        }
+        try checkSQLite(rc, db: db, operation: "bind blob \(index)")
+    }
+
+    private nonisolated func bindInt64(_ value: Int64, to index: Int32, statement: OpaquePointer, db: Connection) throws {
+        try checkSQLite(sqlite3_bind_int64(statement, index, value), db: db, operation: "bind int64 \(index)")
+    }
+
+    private nonisolated func bindInt(_ value: Int, to index: Int32, statement: OpaquePointer, db: Connection) throws {
+        try checkSQLite(sqlite3_bind_int64(statement, index, Int64(value)), db: db, operation: "bind int \(index)")
+    }
+
+    private nonisolated func bindBool(_ value: Bool, to index: Int32, statement: OpaquePointer, db: Connection) throws {
+        try bindInt(value ? 1 : 0, to: index, statement: statement, db: db)
+    }
+
+    private nonisolated func runCachedUpsert(
+        _ payload: InsertPayload,
+        using db: Connection
+    ) throws -> Int64 {
+        let statement = try cachedUpsertStatement(using: db)
+        var finalizeAfterReset = false
+        defer {
+            sqlite3_reset(statement)
+            sqlite3_clear_bindings(statement)
+            if finalizeAfterReset {
+                finalizeCachedStatements()
+            }
+        }
+
+        try bindText(payload.uniqueId, to: 1, statement: statement, db: db)
+        try bindText(payload.pasteboardType, to: 2, statement: statement, db: db)
+        try bindText(payload.itemType, to: 3, statement: statement, db: db)
+        try bindBlob(payload.data, to: 4, statement: statement, db: db)
+        try bindBlob(payload.previewData, to: 5, statement: statement, db: db)
+        try bindInt64(payload.timestamp, to: 6, statement: statement, db: db)
+        try bindText(payload.appPath, to: 7, statement: statement, db: db)
+        try bindText(payload.appName, to: 8, statement: statement, db: db)
+        try bindText(payload.customTitle, to: 9, statement: statement, db: db)
+        try bindText(payload.sourceAnchor, to: 10, statement: statement, db: db)
+        try bindText(payload.searchText, to: 11, statement: statement, db: db)
+        try bindInt(payload.contentLength, to: 12, statement: statement, db: db)
+        try bindInt(payload.tagId, to: 13, statement: statement, db: db)
+        try bindText(payload.blobPath, to: 14, statement: statement, db: db)
+        try bindBool(payload.isTemporary, to: 15, statement: statement, db: db)
+        try bindBool(payload.isEncrypted, to: 16, statement: statement, db: db)
+        try bindBool(payload.receivedFromLAN, to: 17, statement: statement, db: db)
+
+        let rc = sqlite3_step(statement)
+        if rc == SQLITE_ROW {
+            return sqlite3_column_int64(statement, 0)
+        }
+        if rc == SQLITE_SCHEMA {
+            // Reprepare on next insert, but only after the active statement has
+            // passed through the normal reset/clear cleanup above.
+            finalizeAfterReset = true
+        }
+        throw sqliteError(db, operation: "execute cached clipboard upsert")
+    }
+
     private nonisolated func insertPreparedPayload(
         _ payload: InsertPayload,
         using db: Connection,
@@ -4493,84 +4701,13 @@ extension DeckSQLManager {
         // Prefer UPSERT to avoid delete+insert write amplification on hot-path inserts.
         if supportsUniqueIdUpsert {
             do {
-                let sql = """
-                INSERT INTO ClipboardHistory (
-                    unique_id,
-                    type,
-                    item_type,
-                    data,
-                    preview_data,
-                    timestamp,
-                    app_path,
-                    app_name,
-                    custom_title,
-                    source_anchor,
-                    search_text,
-                    content_length,
-                    tag_id,
-                    blob_path,
-                    is_temporary,
-                    is_encrypted,
-                    received_from_lan
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(unique_id) WHERE unique_id <> '' DO UPDATE SET
-                    type = excluded.type,
-                    item_type = excluded.item_type,
-                    data = excluded.data,
-                    preview_data = excluded.preview_data,
-                    timestamp = excluded.timestamp,
-                    app_path = excluded.app_path,
-                    app_name = excluded.app_name,
-                    custom_title = excluded.custom_title,
-                    source_anchor = excluded.source_anchor,
-                    search_text = excluded.search_text,
-                    content_length = excluded.content_length,
-                    tag_id = CASE
-                        WHEN excluded.tag_id = -1 AND ClipboardHistory.tag_id != -1
-                        THEN ClipboardHistory.tag_id
-                        ELSE excluded.tag_id
-                    END,
-                    blob_path = excluded.blob_path,
-                    is_temporary = excluded.is_temporary,
-                    is_encrypted = excluded.is_encrypted,
-                    received_from_lan = MAX(ClipboardHistory.received_from_lan, excluded.received_from_lan)
-                RETURNING id
-                """
-
-                let dataBlob = SQLite.Blob(bytes: [UInt8](payload.data))
-                let previewBlob: SQLite.Blob?
-                if let previewData = payload.previewData {
-                    previewBlob = SQLite.Blob(bytes: [UInt8](previewData))
-                } else {
-                    previewBlob = nil
-                }
-                let stmt = try db.prepare(sql).bind(
-                    payload.uniqueId,
-                    payload.pasteboardType,
-                    payload.itemType,
-                    dataBlob,
-                    previewBlob,
-                    payload.timestamp,
-                    payload.appPath,
-                    payload.appName,
-                    payload.customTitle,
-                    payload.sourceAnchor,
-                    payload.searchText,
-                    payload.contentLength,
-                    payload.tagId,
-                    payload.blobPath,
-                    payload.isTemporary,
-                    payload.isEncrypted,
-                    payload.receivedFromLAN
-                )
-
-                if let row = try stmt.failableNext(), let rowId = row[0] as? Int64 {
-                    return (rowId, true)
-                }
+                let rowId = try runCachedUpsert(payload, using: db)
+                return (rowId, true)
             } catch {
                 // Likely reasons:
                 // - SQLite < 3.24 (no UPSERT) / < 3.35 (no RETURNING)
                 // - Unique constraint not present / not matched
+                finalizeCachedStatements()
                 supportsUniqueIdUpsert = false
                 log.debug("UPSERT(unique_id) unavailable, fallback to delete+insert: \(error.localizedDescription)")
             }
@@ -5576,24 +5713,18 @@ extension DeckSQLManager {
             return Array(try db.prepare(query))
         } ?? []
 
-        return rows.compactMap { exportRow(from: $0) }
+        let generatedUniqueIds = generatedUniqueIdsForLegacyExportRows(rows)
+        let resolvedGeneratedUniqueIds = await persistGeneratedUniqueIdsForExport(generatedUniqueIds)
+        return rows.compactMap { exportRow(from: $0, generatedUniqueIds: resolvedGeneratedUniqueIds) }
     }
 
-    private func exportRow(from row: Row) -> ExportRow? {
+    private func exportRow(from row: Row, generatedUniqueIds: [Int64: String]) -> ExportRow? {
         do {
             let id = try row.get(Col.id)
             let storedUniqueId = try row.get(Col.uniqueId)
             let uniqueId: String
             if storedUniqueId.isEmpty {
-                uniqueId = syncOnDBQueue {
-                    if let pending = pendingUniqueIdBackfill[id] {
-                        return pending
-                    }
-                    let newId = UUID().uuidString
-                    pendingUniqueIdBackfill[id] = newId
-                    return newId
-                }
-                backfillUniqueIdIfNeeded(id: id, uniqueId: uniqueId)
+                uniqueId = generatedUniqueIds[id] ?? stablePendingUniqueId(for: id)
             } else {
                 uniqueId = storedUniqueId
             }
@@ -5659,6 +5790,66 @@ extension DeckSQLManager {
         }
     }
 
+    private nonisolated func generatedUniqueIdsForLegacyExportRows(_ rows: [Row]) -> [Int64: String] {
+        var uniqueIdsByRowId: [Int64: String] = [:]
+        uniqueIdsByRowId.reserveCapacity(rows.count)
+
+        for row in rows {
+            guard let id = try? row.get(Col.id),
+                  let storedUniqueId = try? row.get(Col.uniqueId),
+                  storedUniqueId.isEmpty else {
+                continue
+            }
+            uniqueIdsByRowId[id] = stablePendingUniqueId(for: id)
+        }
+
+        return uniqueIdsByRowId
+    }
+
+    private nonisolated func persistGeneratedUniqueIdsForExport(_ uniqueIdsByRowId: [Int64: String]) async -> [Int64: String] {
+        guard !uniqueIdsByRowId.isEmpty else { return [:] }
+
+        let result = await withDBAsync {
+            guard let db = self.db else {
+                return uniqueIdsByRowId
+            }
+
+            let updateSQL = "UPDATE ClipboardHistory SET unique_id = ? WHERE id = ? AND unique_id = ''"
+            let selectSQL = "SELECT unique_id FROM ClipboardHistory WHERE id = ? LIMIT 1"
+            let updateStmt = try db.prepare(updateSQL)
+            var resolvedUniqueIds = uniqueIdsByRowId
+            var removablePendingUniqueIds: [Int64: String] = [:]
+            removablePendingUniqueIds.reserveCapacity(uniqueIdsByRowId.count)
+
+            try db.transaction {
+                for (id, generatedUniqueId) in uniqueIdsByRowId.sorted(by: { $0.key < $1.key }) {
+                    try updateStmt.run(generatedUniqueId, id)
+                    if Int(db.changes) > 0 {
+                        resolvedUniqueIds[id] = generatedUniqueId
+                        removablePendingUniqueIds[id] = generatedUniqueId
+                        continue
+                    }
+
+                    // If another maintenance path won the race after the export
+                    // read saw an empty unique_id, export the committed DB value
+                    // instead of a stale pending UUID.
+                    let selectStmt = try db.prepare(selectSQL).bind(id)
+                    if let row = try selectStmt.failableNext(),
+                       let existingUniqueId = row[0] as? String,
+                       !existingUniqueId.isEmpty {
+                        resolvedUniqueIds[id] = existingUniqueId
+                        removablePendingUniqueIds[id] = generatedUniqueId
+                    }
+                }
+            }
+
+            self.removePendingUniqueIdsIfMatching(removablePendingUniqueIds)
+            return resolvedUniqueIds
+        }
+
+        return result ?? uniqueIdsByRowId
+    }
+
     func fetchAll(limit: Int = 10000, offset: Int = 0, loadFullData: Bool = false) -> [ClipboardItem] {
         let rows: [Row] = withReadDB { db, table in
             let query = table.order(Col.ts.desc).limit(limit, offset: offset)
@@ -5699,14 +5890,7 @@ extension DeckSQLManager {
             return existing
         }
 
-        let resolvedUniqueId = syncOnDBQueue {
-            if let pending = pendingUniqueIdBackfill[id] {
-                return pending
-            }
-            let newId = UUID().uuidString
-            pendingUniqueIdBackfill[id] = newId
-            return newId
-        }
+        let resolvedUniqueId = stablePendingUniqueId(for: id)
 
         backfillUniqueIdIfNeeded(id: id, uniqueId: resolvedUniqueId)
         return resolvedUniqueId
@@ -5737,6 +5921,34 @@ extension DeckSQLManager {
             let chunk = Array(ids[start..<end])
             let rows: [Row] = await withReadDBAsync { db, table in
                 let query = self.listModeBaseQuery(table: table).filter(chunk.contains(Col.id))
+                return Array(try db.prepare(query))
+            } ?? []
+            results.append(contentsOf: rows)
+            start = end
+        }
+
+        return results
+    }
+
+    /// Fetch lightweight list rows by id without adding timestamp ordering.
+    /// The caller owns final ordering (e.g. semantic/vector ranking), so this
+    /// avoids the extra timestamp sort that `fetchListPage` always performs.
+    func fetchRowsByIdsUnordered(ids: [Int64], filter: Expression<Bool>? = nil) async -> [Row] {
+        guard !ids.isEmpty else { return [] }
+        let chunkSize = 900
+        var results: [Row] = []
+        results.reserveCapacity(ids.count)
+
+        var start = 0
+        while start < ids.count {
+            guard !Task.isCancelled else { break }
+            let end = min(start + chunkSize, ids.count)
+            let chunk = Array(ids[start..<end])
+            let rows: [Row] = await withReadDBAsync { db, table in
+                var query = self.listModeBaseQuery(table: table).filter(chunk.contains(Col.id))
+                if let filter {
+                    query = query.filter(filter)
+                }
                 return Array(try db.prepare(query))
             } ?? []
             results.append(contentsOf: rows)
@@ -5950,6 +6162,44 @@ extension DeckSQLManager {
         } ?? []
     }
 
+    private nonisolated func stablePendingUniqueId(for id: Int64) -> String {
+        syncOnDBQueue {
+            if let pending = pendingUniqueIdBackfill[id] {
+                return pending
+            }
+            let newId = UUID().uuidString
+            pendingUniqueIdBackfill[id] = newId
+            return newId
+        }
+    }
+
+    private nonisolated func existingPendingUniqueIds(for ids: [Int64]) -> [Int64: String] {
+        syncOnDBQueue {
+            var result: [Int64: String] = [:]
+            result.reserveCapacity(ids.count)
+            for id in ids {
+                if let pending = pendingUniqueIdBackfill[id] {
+                    result[id] = pending
+                }
+            }
+            return result
+        }
+    }
+
+    private nonisolated func removePendingUniqueIdIfMatching(id: Int64, uniqueId: String) {
+        removePendingUniqueIdsIfMatching([id: uniqueId])
+    }
+
+    private nonisolated func removePendingUniqueIdsIfMatching(_ uniqueIdsByRowId: [Int64: String]) {
+        guard !uniqueIdsByRowId.isEmpty else { return }
+        syncOnDBQueue {
+            for (id, uniqueId) in uniqueIdsByRowId {
+                guard pendingUniqueIdBackfill[id] == uniqueId else { continue }
+                pendingUniqueIdBackfill.removeValue(forKey: id)
+            }
+        }
+    }
+
     private func backfillUniqueIdIfNeeded(id: Int64, uniqueId: String) {
         Task { [weak self] in
             guard let self else { return }
@@ -5960,10 +6210,110 @@ extension DeckSQLManager {
             } ?? false
 
             if didUpdate {
-                _ = self.syncOnDBQueue {
-                    self.pendingUniqueIdBackfill.removeValue(forKey: id)
-                }
+                self.removePendingUniqueIdIfMatching(id: id, uniqueId: uniqueId)
             }
+        }
+    }
+
+    private nonisolated func scheduleReadPathMetadataBackfillIfNeeded() {
+        let shouldSchedule = syncOnDBQueue { () -> Bool in
+            guard !readPathMetadataBackfillScheduled else { return false }
+            readPathMetadataBackfillScheduled = true
+            return true
+        }
+        guard shouldSchedule else { return }
+
+        enqueueReadPathMetadataBackfillTask()
+    }
+
+    private nonisolated func enqueueReadPathMetadataBackfillTask() {
+        Task.detached(priority: .utility) { [weak self] in
+            await self?.performReadPathMetadataBackfill()
+        }
+    }
+
+    private nonisolated func performReadPathMetadataBackfill() async {
+        let batchSize = 200
+        let maxUniqueRowsPerRun = 5_000
+        var totalUniqueBackfilled = 0
+        var shouldScheduleNextRun = false
+        defer {
+            let shouldSchedule = syncOnDBQueue { () -> Bool in
+                readPathMetadataBackfillScheduled = false
+                guard shouldScheduleNextRun else { return false }
+                readPathMetadataBackfillScheduled = true
+                return true
+            }
+            if shouldSchedule {
+                enqueueReadPathMetadataBackfillTask()
+            }
+        }
+
+        while !Task.isCancelled && totalUniqueBackfilled < maxUniqueRowsPerRun {
+            let remainingLimit = max(1, min(batchSize, maxUniqueRowsPerRun - totalUniqueBackfilled))
+            let updated = await withDBAsyncBackground {
+                guard let db = self.db else { return 0 }
+                let selectSQL = """
+                    SELECT id
+                    FROM ClipboardHistory
+                    WHERE unique_id = ''
+                    ORDER BY id ASC
+                    LIMIT ?
+                """
+                let stmt = try db.prepare(selectSQL).bind(remainingLimit)
+                var ids: [Int64] = []
+                ids.reserveCapacity(batchSize)
+                while let row = try stmt.failableNext() {
+                    if let id = self.bindingToInt64(row[0]) {
+                        ids.append(id)
+                    }
+                }
+                guard !ids.isEmpty else { return 0 }
+
+                let updateSQL = "UPDATE ClipboardHistory SET unique_id = ? WHERE id = ? AND unique_id = ''"
+                let updateStmt = try db.prepare(updateSQL)
+                let pendingUniqueIds = self.existingPendingUniqueIds(for: ids)
+                var committedPendingUniqueIds: [Int64: String] = [:]
+                committedPendingUniqueIds.reserveCapacity(pendingUniqueIds.count)
+                var updated = 0
+                try db.transaction {
+                    for id in ids {
+                        let pendingUniqueId = pendingUniqueIds[id]
+                        let uniqueId = pendingUniqueId ?? UUID().uuidString
+                        try updateStmt.run(uniqueId, id)
+                        let changes = Int(db.changes)
+                        if changes > 0 {
+                            updated += changes
+                            if let pendingUniqueId {
+                                committedPendingUniqueIds[id] = pendingUniqueId
+                            }
+                        }
+                    }
+                }
+                self.removePendingUniqueIdsIfMatching(committedPendingUniqueIds)
+                return updated
+            } ?? 0
+
+            guard updated > 0 else { break }
+            totalUniqueBackfilled += updated
+            await Task.yield()
+        }
+
+        let fixedTemporary = await withDBAsyncBackground {
+            guard let db = self.db else { return 0 }
+            let sql = """
+                UPDATE ClipboardHistory
+                SET is_temporary = 0
+                WHERE tag_id = ? AND is_temporary = 1
+            """
+            try db.run(sql, DeckTag.importantTagId)
+            return Int(db.changes)
+        } ?? 0
+
+        shouldScheduleNextRun = !Task.isCancelled && totalUniqueBackfilled >= maxUniqueRowsPerRun
+
+        if totalUniqueBackfilled > 0 || fixedTemporary > 0 {
+            await log.info("Read-path metadata backfill completed: unique_id=\(totalUniqueBackfilled), temporary=\(fixedTemporary)")
         }
     }
     
@@ -5991,15 +6341,7 @@ extension DeckSQLManager {
             let storedUniqueId = try row.get(Col.uniqueId)
             let resolvedUniqueId: String
             if storedUniqueId.isEmpty {
-                resolvedUniqueId = syncOnDBQueue {
-                    if let pending = pendingUniqueIdBackfill[id] {
-                        return pending
-                    }
-                    let newId = UUID().uuidString
-                    pendingUniqueIdBackfill[id] = newId
-                    return newId
-                }
-                backfillUniqueIdIfNeeded(id: id, uniqueId: resolvedUniqueId)
+                resolvedUniqueId = stablePendingUniqueId(for: id)
             } else {
                 resolvedUniqueId = storedUniqueId
             }
@@ -6008,11 +6350,6 @@ extension DeckSQLManager {
             let receivedFromLAN = (try? row.get(Col.receivedFromLan)) ?? false
             let storedIsEncrypted = try? row.get(Col.isEncrypted)
             let isTemporary = tagId == DeckTag.importantTagId ? false : rawIsTemporary
-            if tagId == DeckTag.importantTagId && rawIsTemporary {
-                Task { [weak self] in
-                    await self?.updateItemTemporary(id: id, isTemporary: false)
-                }
-            }
             
             // Decrypt lightweight fields up-front (needed for list rendering / filtering).
             let shouldDecrypt = isEncrypted ?? storedIsEncrypted ?? DeckUserDefaults.securityModeEnabled
