@@ -191,13 +191,14 @@ brew install --cask deckclip
 
 本项目采用**双许可证**策略：
 
-- `Deck/deckclip` 目录下的代码以 **GNU AGPL v3.0 only** 发布 — 详见 [`deckclip/LICENSE`](deckclip/LICENSE)。
+- `deckclip/` 目录下的代码以 **GNU AGPL v3.0 only** 发布 — 详见 [`deckclip/LICENSE`](deckclip/LICENSE)。
 - 其他目录与文件为 **源码可见**，并且 **保留所有权利（All Rights Reserved）** — 详见 [LICENSE](LICENSE)。
 
 ### 使用与权利说明
 
-- 本仓库公开源码，仅供查看与参考。
-- 未经作者书面许可，不授予对源码的使用、修改、再分发或商业化权利。
+- **`deckclip/` 之外的文件**，源码仅供查看与参考。
+- **`deckclip/` 之外的文件**，未经作者书面许可，不授予使用、修改、再分发或商业化权利。
+- **`deckclip/`** 目录可遵循 **AGPL-3.0-only** 使用、复制、修改与再分发。
 - 你可以使用作者发布的官方编译版 Deck App。
 - 欢迎通过 Issue 提交反馈或问题报告。
 

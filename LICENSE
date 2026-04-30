@@ -3,18 +3,18 @@ Copyright (c) 2024-2026 Yuze Pan
 
 This repository uses the following licensing terms:
 
-1. Deck/deckclip
+1. deckclip/
 
-The Deck/deckclip directory is licensed under the GNU Affero General Public License v3.0 only (AGPL-3.0-only).
+The deckclip/ directory is licensed under the GNU Affero General Public License v3.0 only (AGPL-3.0-only).
 
-You may use, copy, modify, and redistribute the source code in Deck/deckclip only under the terms of the AGPL-3.0-only license:
+You may use, copy, modify, and redistribute the source code in deckclip/ only under the terms of the AGPL-3.0-only license:
 https://www.gnu.org/licenses/agpl-3.0.html
 
 2. All other files and directories
 
-All files and directories outside Deck/deckclip are source-available and All Rights Reserved.
+All files and directories outside deckclip/ are source-available and All Rights Reserved.
 
-You may view the source code outside Deck/deckclip for reference only.
+You may view the source code outside deckclip/ for reference only.
 
 For those files and directories, you may not, without prior written permission from the copyright holder:
 - use the source code;

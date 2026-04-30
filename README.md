@@ -183,13 +183,14 @@ More shortcuts and Vim mode are in Settings.
 
 This project uses **dual licensing**:
 
-- `Deck/deckclip` is licensed under **GNU AGPL v3.0 only** — see [`deckclip/LICENSE`](deckclip/LICENSE).
+- `deckclip/` is licensed under **GNU AGPL v3.0 only** — see [`deckclip/LICENSE`](deckclip/LICENSE).
 - All other files and directories are **source-available** and **All Rights Reserved** — see [LICENSE](LICENSE).
 
 ### Usage and Rights
 
-- The source code is published for viewing and reference only.
-- No permission is granted to use, modify, redistribute, or commercialize the source code.
+- For files **outside `deckclip/`**, the source code is published for viewing and reference only.
+- For files **outside `deckclip/`**, no permission is granted to use, modify, redistribute, or commercialize the source code without prior written permission.
+- The **`deckclip/`** directory may be used, copied, modified, and redistributed under **AGPL-3.0-only**.
 - Use of the official compiled Deck app released by the author is allowed.
 - Feedback and bug reports are welcome through Issues.
 
