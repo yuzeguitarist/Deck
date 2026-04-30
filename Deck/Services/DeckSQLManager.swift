@@ -4651,9 +4651,13 @@ extension DeckSQLManager {
         using db: Connection
     ) throws -> Int64 {
         let statement = try cachedUpsertStatement(using: db)
+        var finalizeAfterReset = false
         defer {
             sqlite3_reset(statement)
             sqlite3_clear_bindings(statement)
+            if finalizeAfterReset {
+                finalizeCachedStatements()
+            }
         }
 
         try bindText(payload.uniqueId, to: 1, statement: statement, db: db)
@@ -4679,7 +4683,9 @@ extension DeckSQLManager {
             return sqlite3_column_int64(statement, 0)
         }
         if rc == SQLITE_SCHEMA {
-            finalizeCachedStatements()
+            // Reprepare on next insert, but only after the active statement has
+            // passed through the normal reset/clear cleanup above.
+            finalizeAfterReset = true
         }
         throw sqliteError(db, operation: "execute cached clipboard upsert")
     }
