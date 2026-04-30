@@ -4642,7 +4642,7 @@ extension DeckSQLManager {
     }
 
     private nonisolated func bindInt(_ value: Int, to index: Int32, statement: OpaquePointer, db: Connection) throws {
-        try checkSQLite(sqlite3_bind_int(statement, index, Int32(value)), db: db, operation: "bind int \(index)")
+        try checkSQLite(sqlite3_bind_int64(statement, index, Int64(value)), db: db, operation: "bind int \(index)")
     }
 
     private nonisolated func bindBool(_ value: Bool, to index: Int32, statement: OpaquePointer, db: Connection) throws {
