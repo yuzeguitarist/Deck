@@ -199,7 +199,7 @@ brew install --cask deckclip
 - 本仓库公开源码，仅供查看与参考。
 - 未经作者书面许可，不授予对源码的使用、修改、再分发或商业化权利。
 - 你可以使用作者发布的官方编译版 Deck App。
-- 欢迎通过 Issue 提交反馈或问题报告，但本仓库不接受 Pull Request。
+- 欢迎通过 Issue 提交反馈或问题报告。
 
 如有疑问或授权需求，请联系：hi@deckclip.app
 
@@ -208,7 +208,6 @@ brew install --cask deckclip
 - [报告 Bug](https://github.com/yuzeguitarist/Deck/issues/new?template=bug_report_cn.yml)
 - [功能建议](https://github.com/yuzeguitarist/Deck/issues/new?template=feature_request_cn.yml)
 - [讨论区](https://github.com/yuzeguitarist/Deck/discussions)
-- 本仓库不接受 Pull Request
 
 ---
 

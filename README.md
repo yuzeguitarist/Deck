@@ -191,7 +191,7 @@ This project uses **dual licensing**:
 - The source code is published for viewing and reference only.
 - No permission is granted to use, modify, redistribute, or commercialize the source code.
 - Use of the official compiled Deck app released by the author is allowed.
-- Feedback and bug reports are welcome through Issues; pull requests are not accepted.
+- Feedback and bug reports are welcome through Issues.
 
 Questions or licensing inquiries → hi@deckclip.app
 
@@ -200,7 +200,6 @@ Questions or licensing inquiries → hi@deckclip.app
 - [Report a Bug](https://github.com/yuzeguitarist/Deck/issues/new?template=bug_report_en.yml)
 - [Request a Feature](https://github.com/yuzeguitarist/Deck/issues/new?template=feature_request_en.yml)
 - [Discussions](https://github.com/yuzeguitarist/Deck/discussions)
-- Pull requests are not accepted for this repository.
 
 ---
 
