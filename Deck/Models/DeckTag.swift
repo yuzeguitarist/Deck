@@ -15,7 +15,7 @@ struct DeckTag: Identifiable, Equatable, Codable {
     var colorIndex: Int
     var isSystem: Bool
 
-    static let importantTagId: Int = -2
+    nonisolated static let importantTagId: Int = -2
     
     static let colorPalette: [Color] = [
         .gray.opacity(0.8),

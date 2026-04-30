@@ -33,7 +33,7 @@ extension Data {
 // MARK: - String Extensions
 
 extension String {
-    func asCompleteURL() -> URL? {
+    nonisolated func asCompleteURL() -> URL? {
         var candidate = self.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !candidate.isEmpty else { return nil }
 
@@ -154,17 +154,17 @@ extension String {
         return nil
     }
 
-    private static let urlTrailingPunctuation: Set<Character> = [
+    private nonisolated static let urlTrailingPunctuation: Set<Character> = [
         ".", ",", ";", ":", "!", "?", "'", "\"",
         "，", "。", "；", "：", "！", "？", "、", "…"
     ]
 
-    private static let urlTrailingBracketPairs: [Character: Character] = [
+    private nonisolated static let urlTrailingBracketPairs: [Character: Character] = [
         ")": "(", "]": "[", "}": "{", ">": "<",
         "）": "（", "】": "【", "》": "《"
     ]
 
-    private static let blockedBareDomainTLDs: Set<String> = [
+    private nonisolated static let blockedBareDomainTLDs: Set<String> = [
         // Common file / code extensions to reduce false positives for bare-domain detection.
         "swift", "js", "ts", "py", "json", "yaml", "yml", "md", "txt", "csv", "log", "plist",
         "c", "h", "m", "mm", "cpp", "hpp", "java", "kt", "cs", "rs", "go", "rb", "php",
@@ -174,7 +174,7 @@ extension String {
         "pdf", "zip", "tar", "gz", "bz2", "7z", "dmg", "pkg", "app"
     ]
 
-    private static let commonBareDomainTLDs: Set<String> = [
+    private nonisolated static let commonBareDomainTLDs: Set<String> = [
         "com", "net", "org", "edu", "gov", "mil",
         "io", "ai", "app", "dev", "co", "me", "info", "biz", "name", "pro",
         "cn", "jp", "kr", "uk", "de", "fr", "es", "it", "nl", "ru", "br", "in", "au", "ca", "us",
@@ -182,7 +182,7 @@ extension String {
         "tech", "site", "online", "store", "blog", "cloud"
     ]
 
-    private func trimTrailingURLPunctuation(_ input: String) -> String {
+    nonisolated private func trimTrailingURLPunctuation(_ input: String) -> String {
         var output = input
         while let last = output.last {
             if Self.urlTrailingPunctuation.contains(last) {
@@ -202,7 +202,7 @@ extension String {
         return output
     }
     
-    var isHexColor: Bool {
+    nonisolated var isHexColor: Bool {
         let pattern = "^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{8}|[A-Fa-f0-9]{3})$"
         return self.range(of: pattern, options: .regularExpression) != nil
     }
@@ -237,7 +237,7 @@ extension String {
         }
     }
     
-    private static let codeSnippetPatterns: [String] = [
+    private nonisolated static let codeSnippetPatterns: [String] = [
         "^\\s*(func|class|struct|enum|protocol|extension|import|var|let|if|else|for|while|switch|case|return|guard|defer|do|try|catch|throw|async|await)\\s",
         "^\\s*(def|class|import|from|if|elif|else|for|while|try|except|return|yield|async|await|lambda)\\s",
         "^\\s*(function|const|let|var|if|else|for|while|switch|case|return|async|await|import|export|class)\\s",
@@ -248,11 +248,11 @@ extension String {
         "\\w+\\(.*\\)\\s*[{;]?$"
     ]
 
-    private static let codeSnippetRegexes: [NSRegularExpression] = codeSnippetPatterns.compactMap {
+    private nonisolated static let codeSnippetRegexes: [NSRegularExpression] = codeSnippetPatterns.compactMap {
         try? NSRegularExpression(pattern: $0)
     }
 
-    var isCodeSnippet: Bool {
+    nonisolated var isCodeSnippet: Bool {
         guard !isEmpty else { return false }
         let range = NSRange(startIndex..., in: self)
         for regex in Self.codeSnippetRegexes {
@@ -425,7 +425,7 @@ extension Notification.Name {
 // MARK: - NSAttributedString Extensions
 
 extension NSAttributedString {
-    convenience init?(with data: Data?, type: NSPasteboard.PasteboardType) {
+    nonisolated convenience init?(with data: Data?, type: NSPasteboard.PasteboardType) {
         guard let data = data else { return nil }
 
         do {
@@ -457,7 +457,7 @@ extension NSAttributedString {
         }
     }
     
-    func toData(with type: NSPasteboard.PasteboardType) -> Data? {
+    nonisolated func toData(with type: NSPasteboard.PasteboardType) -> Data? {
         switch type {
         case .rtf:
             return try? data(from: NSRange(location: 0, length: length),
