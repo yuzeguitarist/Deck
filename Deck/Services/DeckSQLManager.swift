@@ -85,7 +85,7 @@
 //  2. **Blob**
 //     - 超大 payload：`BlobStorage` + `blob_path`；`migrateLargeImagesIfNeeded` 等在低 QoS 下分批迁移历史数据
 //
-//  3. **版本历史（与代码内注释一致；当前 `currentSchemaVersion == 7`）**
+//  3. **版本历史（与代码内注释一致；当前 `currentSchemaVersion == 9`）**
 //     - 0：初始
 //     - 1：`blob_path` + 大图迁移流程
 //     - 2：语义向量缓存表 `ClipboardHistory_embedding`
@@ -94,6 +94,8 @@
 //     - 5：`is_encrypted`（逐行加密标记）
 //     - 6：`custom_title`（自定义标题，伴随 FTS 重建）
 //     - 7：`received_from_lan`（局域网接收标记，供过滤）
+//     - 8：语义向量模型版本升级（CJK 短文本 word-embedding 策略），重建向量缓存
+//     - 9：CJK 统一 word-embedding 向量空间，重建向量缓存
 //
 //  4. **向量表（sqlite-vec）**
 //     - 命名：`ClipboardHistory_embedding_vec_{dimension}`；按需 `ensureVecTable`；级联删除触发器；`cleanupLegacyVecTableIfNeeded` 清理无后缀旧表；
@@ -714,6 +716,23 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     
     /// 向量回填状态队列（保护 vecBackfillInProgress 的并发访问）
     private nonisolated let vecBackfillStateQueue = DispatchQueue(label: "com.deck.vec.backfill.state")
+
+    /// 语义向量缓存回填是否正在进行（防止 schema 迁移与启动补漏重复启动）
+    private nonisolated(unsafe) var semanticEmbeddingBackfillInProgress = false
+
+    /// 语义向量回填状态队列
+    private nonisolated let semanticEmbeddingBackfillStateQueue = DispatchQueue(label: "com.deck.semantic.backfill.state")
+
+    private nonisolated struct SemanticEmbeddingBackfillResult: Sendable {
+        let attempted: Int
+        let advanced: Int
+        let retryableFailures: Int
+    }
+
+    private nonisolated enum BackgroundStringDecryptionResult: Sendable {
+        case text(String)
+        case retry
+    }
     
     /// 已记录缺失维度警告的集合（避免重复日志）
     private nonisolated(unsafe) var vecMissingDimensionLogged: Set<Int> = []
@@ -1477,6 +1496,8 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 }
 
                 openReadOnlyDatabase(at: dbPath)
+                scheduleVecIndexBackfillIfNeeded()
+                scheduleSemanticEmbeddingBackfillIfNeeded()
 
                 log.info("Database initialized at: \(dbPath)")
                 Self.isInitialized = true
@@ -1739,7 +1760,6 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 log.info("sqlite-vec initialized via sqlite3_vec_init (static)")
                 log.debug("sqlite-vec registered on db handle: \(String(describing: db.handle))")
                 cleanupLegacyVecTableIfNeeded()
-                scheduleVecIndexBackfillIfNeeded()
                 return
             }
 
@@ -1791,7 +1811,6 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
         if didEnable {
             cleanupLegacyVecTableIfNeeded()
-            scheduleVecIndexBackfillIfNeeded()
         }
     }
 
@@ -2293,7 +2312,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             guard vecIndexEnabled, !DeckUserDefaults.securityModeEnabled else { return false }
             guard let db = db else { return false }
 
-            guard (try? db.scalar("SELECT 1 FROM ClipboardHistory_embedding LIMIT 1")) != nil else {
+            guard (try? db.scalar("SELECT 1 FROM ClipboardHistory_embedding WHERE text_hash NOT LIKE 'skip:%' LIMIT 1")) != nil else {
                 return false
             }
 
@@ -2358,6 +2377,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                         SELECT e.id, e.embedding
                         FROM ClipboardHistory_embedding e
                         WHERE e.id < ?
+                          AND e.text_hash NOT LIKE 'skip:%'
                         ORDER BY e.id DESC
                         LIMIT ?
                     """
@@ -3194,7 +3214,9 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     /// - 5: 添加 is_encrypted 列（逐行加密状态）
     /// - 6: 添加 custom_title 列（自定义标题）
     /// - 7: 添加 received_from_lan 列（局域网共享接收标记，供 type:lan 过滤）
-    private static let currentSchemaVersion: Int32 = 7
+    /// - 8: 语义向量模型版本升级，清理旧缓存并后台重建
+    /// - 9: CJK 统一 word-embedding 向量空间，清理旧缓存并后台重建
+    private static let currentSchemaVersion: Int32 = 9
     private static let fileSearchTextBackfillTargetVersion = 1
 
     private func getSchemaVersion() -> Int32 {
@@ -3204,7 +3226,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         } ?? 0
     }
 
-    private func setSchemaVersion(_ version: Int32) {
+    private nonisolated func setSchemaVersion(_ version: Int32) {
         withDB {
             guard let db = self.db else { return }
             try db.run("PRAGMA user_version = \(version)")
@@ -3238,6 +3260,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         let needsEncryptionStateMigration = currentVersion < 5
         let needsCustomTitleMigration = currentVersion < 6
         let needsReceivedFromLanMigration = currentVersion < 7
+        let needsSemanticEmbeddingModelMigration = currentVersion < 9
 
         let applyCustomTitleMigrationIfNeeded = { [weak self] in
             guard let self, needsCustomTitleMigration else { return }
@@ -3288,7 +3311,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             let postMigration: (() async -> Void)?
             if needsEmbeddingMigration {
                 postMigration = { [weak self] in
-                    await self?.performSemanticEmbeddingBackfill()
+                    _ = await self?.performSemanticEmbeddingBackfill()
                 }
             } else {
                 postMigration = nil
@@ -3318,7 +3341,7 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             return migrationStoresLookHealthy()
         }
 
-        if needsTemporaryMigration || needsSourceAnchorMigration || needsEncryptionStateMigration || needsCustomTitleMigration || needsReceivedFromLanMigration {
+        if needsTemporaryMigration || needsSourceAnchorMigration || needsEncryptionStateMigration || needsCustomTitleMigration || needsReceivedFromLanMigration || needsSemanticEmbeddingModelMigration {
             if needsTemporaryMigration {
                 addTemporaryColumnIfNeeded()
             }
@@ -3330,11 +3353,31 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             }
             applyCustomTitleMigrationIfNeeded()
             applyReceivedFromLanMigrationIfNeeded()
+            if needsSemanticEmbeddingModelMigration {
+                resetSemanticEmbeddingCachesForModelUpgrade()
+                // Persist the schema/model marker immediately after the destructive
+                // reset. Backfill is resumable and bounded; if the app exits before it
+                // completes, the next launch must continue backfilling without clearing
+                // the cache again.
+                setSchemaVersion(Self.currentSchemaVersion)
+                scheduleSemanticEmbeddingBackfillIfNeeded()
+                return migrationStoresLookHealthy()
+            }
             setSchemaVersion(Self.currentSchemaVersion)
         }
 
         // 未来的迁移可以继续添加:
         return migrationStoresLookHealthy()
+    }
+
+    private func resetSemanticEmbeddingCachesForModelUpgrade() {
+        withDB {
+            guard let db = self.db else { return }
+            try db.run("DELETE FROM ClipboardHistory_embedding")
+        }
+        dropVecTables()
+        SemanticSearchService.shared.clearCache()
+        log.info("Semantic embedding cache reset for \(SemanticSearchService.embeddingModelVersion)")
     }
 
     private func addReceivedFromLanColumnIfNeeded() {
@@ -3620,65 +3663,156 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         return true
     }
 
-    private func backfillSemanticEmbeddingsIfNeeded(targetVersion: Int32) {
+    private nonisolated func backfillSemanticEmbeddingsIfNeeded(targetVersion: Int32) {
+        // Schema/table creation is complete before this point; semantic embedding
+        // population is resumable maintenance and must not gate user_version.
+        // Otherwise an empty history (or an interrupted bounded chunk) repeats the
+        // migration/backup path on every launch.
+        setSchemaVersion(targetVersion)
+        log.info("Database schema updated to version \(targetVersion)")
+        scheduleSemanticEmbeddingBackfillIfNeeded()
+    }
+
+    private nonisolated func scheduleSemanticEmbeddingBackfillIfNeeded() {
+        guard shouldScheduleSemanticEmbeddingBackfill() else { return }
+        let shouldStart = semanticEmbeddingBackfillStateQueue.sync {
+            guard !semanticEmbeddingBackfillInProgress else { return false }
+            semanticEmbeddingBackfillInProgress = true
+            return true
+        }
+        guard shouldStart else { return }
         Task(priority: .background) { [weak self] in
             guard let self else { return }
-            await self.performSemanticEmbeddingBackfill()
-            self.setSchemaVersion(targetVersion)
-            await log.info("Database schema updated to version \(targetVersion)")
+            let result = await self.performSemanticEmbeddingBackfill()
+
+            let shouldContinue = !Task.isCancelled && self.shouldScheduleSemanticEmbeddingBackfill()
+            self.semanticEmbeddingBackfillStateQueue.sync {
+                self.semanticEmbeddingBackfillInProgress = false
+            }
+
+            if shouldContinue {
+                let retryOnlyDelay: UInt64 = 5_000_000_000
+                let normalDelay: UInt64 = 250_000_000
+                let delay = result.advanced == 0 && result.retryableFailures > 0 ? retryOnlyDelay : normalDelay
+                try? await Task.sleep(nanoseconds: delay)
+                self.scheduleSemanticEmbeddingBackfillIfNeeded()
+            }
         }
     }
 
-    private func performSemanticEmbeddingBackfill() async {
-        let batchSize = 100
-        let maxItems = DeckUserDefaults.securityModeEnabled ? 300 : 1000
+    private nonisolated func shouldScheduleSemanticEmbeddingBackfill() -> Bool {
+        syncOnDBBackgroundQueue {
+            guard let db = db else { return false }
+            let sql = """
+                SELECT 1
+                FROM ClipboardHistory ch
+                LEFT JOIN ClipboardHistory_embedding e ON ch.id = e.id
+                WHERE e.id IS NULL
+                LIMIT 1
+            """
+            return (try? db.scalar(sql) as? Int64) != nil
+        }
+    }
+
+    private nonisolated func performSemanticEmbeddingBackfill() async -> SemanticEmbeddingBackfillResult {
+        let batchSize = 50
+        let maxItems = DeckUserDefaults.securityModeEnabled ? 100 : 200
         var processed = 0
+        var advanced = 0
+        var retryableFailures = 0
+        var lastSeenID: Int64 = 0
 
         while processed < maxItems {
             guard !Task.isCancelled else { break }
 
-            let rows: [(id: Int64, searchText: String)] = await withDBAsyncBackground {
+            let startAfterID = lastSeenID
+            let rows: [(id: Int64, searchText: String, isEncrypted: Bool?)] = await withDBAsyncBackground {
                 guard let db = self.db else { return [] }
                 let sql = """
-                    SELECT ch.id, ch.search_text
+                    SELECT ch.id, ch.search_text, ch.is_encrypted
                     FROM ClipboardHistory ch
                     LEFT JOIN ClipboardHistory_embedding e ON ch.id = e.id
                     WHERE e.id IS NULL
+                      AND ch.id > ?
                     ORDER BY ch.id ASC
                     LIMIT ?
                 """
-                let stmt = try db.prepare(sql).bind(batchSize)
-                var result: [(Int64, String)] = []
+                let stmt = try db.prepare(sql).bind(startAfterID, batchSize)
+                var result: [(Int64, String, Bool?)] = []
                 while let row = try stmt.failableNext() {
                     if let id = row[0] as? Int64, let text = row[1] as? String {
-                        result.append((id, text))
+                        let rawEncrypted = row[2]
+                        let isEncrypted: Bool?
+                        if let value = rawEncrypted as? Bool {
+                            isEncrypted = value
+                        } else if let value = rawEncrypted as? Int64 {
+                            isEncrypted = value != 0
+                        } else if let value = rawEncrypted as? Int {
+                            isEncrypted = value != 0
+                        } else {
+                            isEncrypted = nil
+                        }
+                        result.append((id, text, isEncrypted))
                     }
                 }
                 return result
             } ?? []
 
             guard !rows.isEmpty else { break }
+            lastSeenID = rows.last?.id ?? lastSeenID
 
             for row in rows {
                 guard !Task.isCancelled else { break }
-                let rawText = decryptString(row.searchText)
+                let rawText: String
+                switch decryptStringForBackgroundBackfill(row.searchText, isEncrypted: row.isEncrypted) {
+                case .text(let text):
+                    rawText = text
+                case .retry:
+                    retryableFailures += 1
+                    processed += 1
+                    continue
+                }
+
                 let normalized = SemanticSearchService.normalizedSemanticText(rawText)
-                guard !normalized.isEmpty else { continue }
+                guard !normalized.isEmpty else {
+                    storeSemanticEmbeddingSkipMarker(id: row.id, normalizedText: normalized, reason: "empty")
+                    processed += 1
+                    advanced += 1
+                    continue
+                }
 
                 let textHash = SemanticSearchService.semanticTextHash(normalizedText: normalized)
                 guard let vector = SemanticSearchService.shared.vector(for: normalized, cacheKey: "i:\(row.id)-\(textHash)") else {
+                    storeSemanticEmbeddingSkipMarker(id: row.id, normalizedText: normalized, reason: "unavailable")
+                    processed += 1
+                    advanced += 1
                     continue
                 }
                 storeSemanticEmbedding(id: row.id, textHash: textHash, vector: vector)
                 processed += 1
+                advanced += 1
+                if processed >= maxItems { break }
             }
 
             await Task.yield()
+            try? await Task.sleep(nanoseconds: 50_000_000)
         }
 
         if processed > 0 {
-            await log.info("Semantic embedding backfill completed: \(processed) items processed")
+            await log.info("Semantic embedding backfill completed: attempted=\(processed), advanced=\(advanced), retryable=\(retryableFailures)")
         }
+        return SemanticEmbeddingBackfillResult(attempted: processed, advanced: advanced, retryableFailures: retryableFailures)
+    }
+
+    private nonisolated func decryptStringForBackgroundBackfill(_ string: String, isEncrypted: Bool?) -> BackgroundStringDecryptionResult {
+        let shouldDecrypt = isEncrypted ?? DeckUserDefaults.securityModeEnabled
+        guard shouldDecrypt else { return .text(string) }
+        guard let data = Data(base64Encoded: string) else { return .text(string) }
+        guard let decrypted = SecurityService.backgroundDecryptSilently(data),
+              let result = String(data: decrypted, encoding: .utf8) else {
+            return .retry
+        }
+        return .text(result)
     }
 
     private func vacuumDatabase(reason: String) async {
@@ -4049,6 +4183,31 @@ extension DeckSQLManager {
         }
 
         updateVecIndex(id: id, vector: vector)
+    }
+
+    private nonisolated func storeSemanticEmbeddingSkipMarker(id: Int64, normalizedText: String, reason: String) {
+        let textHash = "skip:\(reason):\(SemanticSearchService.semanticTextHash(normalizedText: normalizedText))"
+        let storedData: Data
+        if DeckUserDefaults.securityModeEnabled {
+            guard let encrypted = SecurityService.backgroundEncryptSilently(Data()) else {
+                log.error("Security mode enabled but semantic embedding skip marker encryption failed; rejecting plaintext write")
+                notifyEncryptionFailureIfNeeded()
+                return
+            }
+            storedData = encrypted
+        } else {
+            storedData = Data()
+        }
+
+        withDB {
+            guard let db = self.db else { return }
+            let tab = Table("ClipboardHistory_embedding")
+            let insert = tab.insert(or: .replace,
+                                    EmbeddingCol.id <- id,
+                                    EmbeddingCol.textHash <- textHash,
+                                    EmbeddingCol.embedding <- storedData)
+            try db.run(insert)
+        }
     }
 
     nonisolated func scheduleSemanticEmbeddingUpdate(id: Int64, searchText: String) {
