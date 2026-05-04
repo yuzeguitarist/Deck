@@ -7,7 +7,7 @@ pub const MAGIC: [u8; 2] = [0xDE, 0xCC];
 const HEADER_SIZE: usize = 6;
 
 /// Maximum payload size: 16 MB
-const MAX_PAYLOAD_SIZE: u32 = 16 * 1024 * 1024;
+pub const MAX_PAYLOAD_SIZE: u32 = 16 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum CodecError {
@@ -32,17 +32,23 @@ pub enum CodecError {
 /// │ 0xDE 0xCC    │ big-endian   │  UTF-8 encoded     │
 /// └──────────────┴──────────────┴────────────────────┘
 /// ```
+///
+/// The header is reserved up-front and the JSON payload is serialized
+/// directly into the same buffer to avoid an extra `Vec` allocation and
+/// copy on every outbound frame.
 pub fn encode_frame<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, CodecError> {
-    let payload = serde_json::to_vec(value)?;
-    let len = payload.len() as u32;
-    if len > MAX_PAYLOAD_SIZE {
-        return Err(CodecError::PayloadTooLarge(len));
-    }
-
-    let mut buf = Vec::with_capacity(HEADER_SIZE + payload.len());
+    let mut buf = Vec::with_capacity(HEADER_SIZE + 256);
+    // Reserve header space so the JSON writer appends right after it.
     buf.extend_from_slice(&MAGIC);
-    buf.extend_from_slice(&len.to_be_bytes());
-    buf.extend_from_slice(&payload);
+    buf.extend_from_slice(&[0u8; 4]);
+
+    serde_json::to_writer(&mut buf, value)?;
+
+    let payload_len = buf.len() - HEADER_SIZE;
+    if payload_len > MAX_PAYLOAD_SIZE as usize {
+        return Err(CodecError::PayloadTooLarge(payload_len as u32));
+    }
+    buf[2..6].copy_from_slice(&(payload_len as u32).to_be_bytes());
     Ok(buf)
 }
 
@@ -103,6 +109,16 @@ mod tests {
         let (decoded, consumed): (TestMsg, _) = decode_frame(&encoded).unwrap();
         assert_eq!(decoded, msg);
         assert_eq!(consumed, encoded.len());
+    }
+
+    #[test]
+    fn header_length_matches_payload() {
+        let msg = TestMsg {
+            hello: "world".into(),
+        };
+        let encoded = encode_frame(&msg).unwrap();
+        let length = u32::from_be_bytes([encoded[2], encoded[3], encoded[4], encoded[5]]) as usize;
+        assert_eq!(length, encoded.len() - HEADER_SIZE);
     }
 
     #[test]

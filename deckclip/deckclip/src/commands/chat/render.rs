@@ -98,6 +98,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
     );
 }
 
+#[allow(clippy::if_same_then_else)]
 fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut ChatApp) {
     let title = if app.auto_scroll {
         chat_text("chat.body.title.following")
@@ -322,7 +323,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
         Some(FooterTag::SlashSelected) if app.slash_query().is_none() => None,
         _ => app.footer_message.clone(),
     };
-    let (text, tone) = footer_message.unwrap_or_else(|| (default_footer, MetaTone::Dim));
+    let (text, tone) = footer_message.unwrap_or((default_footer, MetaTone::Dim));
     let line = Line::from(Span::styled(text, tone.style()));
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -1199,7 +1200,7 @@ pub(super) struct InputViewport {
 pub(super) fn input_panel_height(app: &ChatApp, width: u16) -> u16 {
     let input_width = width.saturating_sub(4) as usize;
     let layout = wrapped_input_layout(&app.input, app.input_cursor, input_width.max(1));
-    let visible_lines = layout.rows.len().clamp(1, MAX_INPUT_VISIBLE_LINES as usize);
+    let visible_lines = layout.rows.len().clamp(1, MAX_INPUT_VISIBLE_LINES);
     let attachment_height =
         pending_attachment_preview_height(width.saturating_sub(2), app.pending_attachment_count());
     let pending_paste_height =
@@ -1408,6 +1409,7 @@ pub(super) fn point_in_rect(column: u16, row: u16, rect: Rect) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
+#[allow(clippy::manual_checked_ops)]
 pub(super) fn scrollbar_thumb_metrics(
     total_lines: usize,
     visible_lines: usize,
@@ -1555,6 +1557,92 @@ pub(super) fn delete_at_cursor(text: &mut String, cursor: usize) {
     let start = byte_index_from_char(text, cursor);
     let end = byte_index_from_char(text, cursor + 1);
     text.replace_range(start..end, "");
+}
+
+/// Returns true for characters that count as part of a "word" for word-wise
+/// cursor movement and deletion. ASCII alphanumerics and `_` follow the
+/// readline / Emacs convention; non-ASCII characters (CJK, emoji, etc.) are
+/// also treated as word characters because punctuation is the only thing
+/// users typically expect a word jump to stop at.
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+/// Compute the cursor position one word to the left of `cursor`.
+///
+/// Skips trailing whitespace/punctuation, then skips the contiguous run of
+/// word characters. The returned index points to the first character of
+/// the previous word.
+pub(super) fn previous_word_boundary(text: &str, cursor: usize) -> usize {
+    if cursor == 0 {
+        return 0;
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let mut idx = cursor.min(chars.len());
+    while idx > 0 && !is_word_char(chars[idx - 1]) {
+        idx -= 1;
+    }
+    while idx > 0 && is_word_char(chars[idx - 1]) {
+        idx -= 1;
+    }
+    idx
+}
+
+/// Compute the cursor position one word to the right of `cursor`.
+///
+/// Skips the current run of word characters, then skips the run of
+/// non-word characters. The returned index points to the first character of
+/// the next word (or the end of `text`).
+pub(super) fn next_word_boundary(text: &str, cursor: usize) -> usize {
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut idx = cursor.min(len);
+    while idx < len && is_word_char(chars[idx]) {
+        idx += 1;
+    }
+    while idx < len && !is_word_char(chars[idx]) {
+        idx += 1;
+    }
+    idx
+}
+
+/// Delete the word immediately preceding the cursor. No-op when at the start
+/// of the buffer.
+pub(super) fn delete_word_before_cursor(text: &mut String, cursor: &mut usize) {
+    if *cursor == 0 {
+        return;
+    }
+    let target = previous_word_boundary(text, *cursor);
+    if target == *cursor {
+        return;
+    }
+    let byte_start = byte_index_from_char(text, target);
+    let byte_end = byte_index_from_char(text, *cursor);
+    text.replace_range(byte_start..byte_end, "");
+    *cursor = target;
+}
+
+/// Delete from the cursor to the end of the current line (not the buffer).
+/// Mirrors readline's `kill-line` (Ctrl+K). When the cursor sits at the end
+/// of a line that has a trailing newline, the newline itself is removed so
+/// repeated Ctrl+K eventually empties the buffer.
+pub(super) fn delete_to_line_end_in_text(text: &mut String, cursor: usize) {
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    if cursor >= len {
+        return;
+    }
+    let mut end = cursor;
+    while end < len && chars[end] != '\n' {
+        end += 1;
+    }
+    if end == cursor {
+        // We're on a newline; consume it so the line collapses upward.
+        end = cursor + 1;
+    }
+    let byte_start = byte_index_from_char(text, cursor);
+    let byte_end = byte_index_from_char(text, end);
+    text.replace_range(byte_start..byte_end, "");
 }
 
 pub(super) fn display_width(text: &str) -> usize {

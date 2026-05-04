@@ -1,3 +1,4 @@
+#[allow(dead_code)] // referenced only on macOS non-test builds and in tests; harmless on other targets
 const AI_DONE_WAV: &[u8] = include_bytes!("assets/ai_done.wav");
 
 #[cfg(any(test, not(target_os = "macos")))]

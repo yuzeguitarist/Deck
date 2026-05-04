@@ -751,9 +751,7 @@ pub async fn run(output: OutputMode) -> Result<()> {
             let resume_result = terminal.resume_after_child_tui();
             needs_redraw = true;
 
-            if let Err(error) = resume_result {
-                return Err(error);
-            }
+            resume_result?;
 
             match login_result {
                 Ok(()) => match fetch_bootstrap(primary_client.clone()).await {
@@ -925,17 +923,15 @@ fn handle_key_event(
                     app.clear_quit_hint();
                     app.set_footer(chat_text("chat.footer.history_closed"), MetaTone::Dim);
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if overlay.selected > 0 {
-                        overlay.selected -= 1;
-                        moved = true;
-                    }
+                KeyCode::Up | KeyCode::Char('k') if overlay.selected > 0 => {
+                    overlay.selected -= 1;
+                    moved = true;
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if overlay.selected + 1 < overlay.items.len() {
-                        overlay.selected += 1;
-                        moved = true;
-                    }
+                KeyCode::Down | KeyCode::Char('j')
+                    if overlay.selected + 1 < overlay.items.len() =>
+                {
+                    overlay.selected += 1;
+                    moved = true;
                 }
                 KeyCode::PageUp => {
                     overlay.selected = overlay.selected.saturating_sub(8);
@@ -1214,6 +1210,12 @@ fn handle_key_event(
                 app.delete_to_line_start();
                 return;
             }
+            if key.modifiers.contains(KeyModifiers::ALT)
+                || key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                app.delete_word_back();
+                return;
+            }
             if app.input.is_empty() && app.clear_pending_attachment() {
                 app.set_footer(chat_text("chat.footer.attachment_removed"), MetaTone::Dim);
                 return;
@@ -1222,6 +1224,24 @@ fn handle_key_event(
         }
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.delete_to_line_start();
+        }
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.move_cursor_start();
+        }
+        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.move_cursor_end();
+        }
+        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.delete_to_line_end();
+        }
+        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.delete_word_back();
+        }
+        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {
+            app.move_cursor_word_left();
+        }
+        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
+            app.move_cursor_word_right();
         }
         KeyCode::Delete => {
             if key.modifiers.contains(KeyModifiers::SUPER) {
@@ -1233,6 +1253,18 @@ fn handle_key_event(
                 return;
             }
             app.delete_forward();
+        }
+        KeyCode::Left
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            app.move_cursor_word_left();
+        }
+        KeyCode::Right
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            app.move_cursor_word_right();
         }
         KeyCode::Left => {
             app.move_cursor_left();
@@ -1694,10 +1726,9 @@ fn spawn_approval_dispatch(dispatch: ApprovalDispatch, ui_tx: UnboundedSender<Ui
             match respond_to_approval(&dispatch.session_id, &dispatch.call_id, dispatch.approved)
                 .await
             {
-                Ok(()) => match dispatch.completion {
-                    Some((message, tone)) => Some(UiEvent::FooterMessage(message, tone)),
-                    None => None,
-                },
+                Ok(()) => dispatch
+                    .completion
+                    .map(|(message, tone)| UiEvent::FooterMessage(message, tone)),
                 Err(error) => Some(ui_error(error)),
             };
         if let Some(event) = event {
@@ -2197,7 +2228,7 @@ fn slash_command_matches(command: &SlashCommand, query: &str) -> bool {
 fn normalize_slash_command(command: &str) -> Option<&'static str> {
     let trimmed = command.trim();
     SLASH_COMMANDS.iter().find_map(|candidate| {
-        if candidate.name == trimmed || candidate.aliases.iter().any(|alias| *alias == trimmed) {
+        if candidate.name == trimmed || candidate.aliases.contains(&trimmed) {
             Some(candidate.name)
         } else {
             None

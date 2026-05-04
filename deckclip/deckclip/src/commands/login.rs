@@ -586,7 +586,7 @@ impl LoginApp {
         let values = form.values();
         let validation_error = match provider {
             ProviderKind::OpenAI | ProviderKind::Anthropic => {
-                if values.get(0).is_none_or(|value| value.is_empty()) {
+                if values.first().is_none_or(|value| value.is_empty()) {
                     Some(login_text(LoginText::ErrorBaseUrlRequired).to_string())
                 } else if values.get(1).is_none_or(|value| value.is_empty()) {
                     Some(login_text(LoginText::ErrorApiKeyRequired).to_string())
@@ -597,7 +597,7 @@ impl LoginApp {
                 }
             }
             ProviderKind::Ollama => {
-                if values.get(0).is_none_or(|value| value.is_empty()) {
+                if values.first().is_none_or(|value| value.is_empty()) {
                     Some(login_text(LoginText::ErrorBaseUrlRequired).to_string())
                 } else if values.get(1).is_none_or(|value| value.is_empty()) {
                     Some(login_text(LoginText::ErrorModelRequired).to_string())
@@ -832,6 +832,7 @@ impl TerminalGuard {
         })
     }
 
+    #[allow(clippy::drop_non_drop)]
     fn render(&mut self, app: &LoginApp) -> Result<()> {
         let layout = RenderLayout::detect();
         let logo_rows = if layout.show_logo {
@@ -1210,10 +1211,8 @@ pub async fn run(output: OutputMode) -> Result<()> {
             .context(login_text(LoginText::ErrorReadKeyPoll))?
         {
             match event::read().context(login_text(LoginText::ErrorReadEvent))? {
-                Event::Key(key) => {
-                    if app.handle_key_event(key).await? {
-                        break;
-                    }
+                Event::Key(key) if app.handle_key_event(key).await? => {
+                    break;
                 }
                 Event::Paste(text) => app.handle_paste(text),
                 Event::Resize(_, _) => {}

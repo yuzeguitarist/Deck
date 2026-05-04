@@ -1,3 +1,4 @@
+use std::io;
 use std::path::Path;
 
 use hmac::{Hmac, Mac};
@@ -11,21 +12,30 @@ use crate::error::DeckError;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Read the auth token from the token file.
+///
+/// Reads the file directly to avoid the TOCTOU race that an `exists()` probe
+/// would introduce. `NotFound` is mapped to `DeckError::TokenNotFound` so the
+/// CLI can surface a precise error message; every other IO error becomes a
+/// generic auth failure with the underlying reason.
 pub async fn read_token(path: &Path) -> Result<String, DeckError> {
-    if !path.exists() {
-        return Err(DeckError::TokenNotFound {
+    match fs::read_to_string(path).await {
+        Ok(content) => {
+            let token = content.trim().to_string();
+            if token.is_empty() {
+                return Err(DeckError::Auth("token 文件为空".into()));
+            }
+            debug!("token loaded from {}", path.display());
+            Ok(token)
+        }
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Err(DeckError::TokenNotFound {
             path: path.display().to_string(),
-        });
+        }),
+        Err(err) => Err(DeckError::Auth(format!(
+            "无法读取 token 文件 {}: {}",
+            path.display(),
+            err
+        ))),
     }
-    let content = fs::read_to_string(path)
-        .await
-        .map_err(|e| DeckError::Auth(format!("无法读取 token 文件 {}: {}", path.display(), e)))?;
-    let token = content.trim().to_string();
-    if token.is_empty() {
-        return Err(DeckError::Auth("token 文件为空".into()));
-    }
-    debug!("token loaded from {}", path.display());
-    Ok(token)
 }
 
 /// Generate a random hex nonce (16 bytes → 32 hex chars).
@@ -64,32 +74,61 @@ pub fn sign_request(
     hex::encode(mac.finalize().into_bytes())
 }
 
+/// Serialize `value` into the canonical JSON form used for signing.
+///
+/// Keys are sorted lexicographically and there is no insignificant
+/// whitespace. The implementation streams output into a single `String`
+/// buffer rather than collecting intermediate `Vec<String>` per nesting
+/// level, which keeps allocations linear in input size and avoids the
+/// O(n²) cost of recursive `Vec::join` calls on deep payloads.
 pub fn canonical_json(value: &Value) -> String {
+    let mut out = String::new();
+    write_canonical_json(value, &mut out);
+    out
+}
+
+fn write_canonical_json(value: &Value, out: &mut String) {
     match value {
-        Value::Null => "null".to_string(),
-        Value::Bool(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
-        Value::String(value) => serde_json::to_string(value).expect("serializing string cannot fail"),
+        Value::Null => out.push_str("null"),
+        Value::Bool(value) => {
+            if *value {
+                out.push_str("true");
+            } else {
+                out.push_str("false");
+            }
+        }
+        Value::Number(value) => {
+            // serde_json::Number's Display matches its serialised form.
+            use std::fmt::Write;
+            let _ = write!(out, "{value}");
+        }
+        Value::String(value) => {
+            // Reuse serde_json's string escaping for full RFC 8259 compliance.
+            out.push_str(&serde_json::to_string(value).expect("serializing string cannot fail"));
+        }
         Value::Array(values) => {
-            let body = values
-                .iter()
-                .map(canonical_json)
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("[{body}]")
+            out.push('[');
+            for (idx, item) in values.iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                write_canonical_json(item, out);
+            }
+            out.push(']');
         }
         Value::Object(map) => {
-            let mut entries = map.iter().collect::<Vec<_>>();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
-            let body = entries
-                .into_iter()
-                .map(|(key, value)| {
-                    let key = serde_json::to_string(key).expect("serializing key cannot fail");
-                    format!("{key}:{}", canonical_json(value))
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("{{{body}}}")
+            out.push('{');
+            let mut entries: Vec<(&String, &Value)> = map.iter().collect();
+            entries.sort_by_key(|(key, _)| key.as_str());
+            for (idx, (key, item)) in entries.into_iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                out.push_str(&serde_json::to_string(key).expect("serializing key cannot fail"));
+                out.push(':');
+                write_canonical_json(item, out);
+            }
+            out.push('}');
         }
     }
 }
@@ -144,5 +183,20 @@ mod tests {
             canonical_json(&args),
             r#"{"a":"x","b":2,"nested":{"c":null,"z":true}}"#
         );
+    }
+
+    #[test]
+    fn canonical_json_handles_arrays_and_specials() {
+        let args = json!([1, "a", null, true, false, {"k": "v"}]);
+        assert_eq!(
+            canonical_json(&args),
+            r#"[1,"a",null,true,false,{"k":"v"}]"#
+        );
+    }
+
+    #[test]
+    fn canonical_json_escapes_strings() {
+        let args = json!({"text": "hello \"world\"\n你好"});
+        assert_eq!(canonical_json(&args), r#"{"text":"hello \"world\"\n你好"}"#);
     }
 }
