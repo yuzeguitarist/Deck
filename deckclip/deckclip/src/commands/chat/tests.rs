@@ -154,6 +154,58 @@ fn wrapped_input_layout_keeps_ascii_after_cjk_at_visual_end() {
 }
 
 #[test]
+fn previous_word_boundary_skips_punctuation_then_word() {
+    let text = "hello world  foo";
+    assert_eq!(previous_word_boundary(text, text.chars().count()), 13);
+    assert_eq!(previous_word_boundary(text, 13), 6);
+    assert_eq!(previous_word_boundary(text, 6), 0);
+    assert_eq!(previous_word_boundary(text, 0), 0);
+}
+
+#[test]
+fn next_word_boundary_skips_word_then_punctuation() {
+    let text = "hello world  foo";
+    assert_eq!(next_word_boundary(text, 0), 6);
+    assert_eq!(next_word_boundary(text, 6), 13);
+    assert_eq!(next_word_boundary(text, 13), text.chars().count());
+}
+
+#[test]
+fn word_boundary_handles_cjk() {
+    let text = "你好 world";
+    assert_eq!(next_word_boundary(text, 0), 3);
+    assert_eq!(previous_word_boundary(text, text.chars().count()), 3);
+}
+
+#[test]
+fn delete_word_before_cursor_removes_one_word() {
+    let mut text = String::from("hello world foo");
+    let mut cursor = text.chars().count();
+    delete_word_before_cursor(&mut text, &mut cursor);
+    assert_eq!(text, "hello world ");
+    assert_eq!(cursor, 12);
+
+    delete_word_before_cursor(&mut text, &mut cursor);
+    assert_eq!(text, "hello ");
+    assert_eq!(cursor, 6);
+
+    delete_word_before_cursor(&mut text, &mut cursor);
+    assert_eq!(text, "");
+    assert_eq!(cursor, 0);
+}
+
+#[test]
+fn delete_to_line_end_in_text_collapses_newline() {
+    let mut text = String::from("first\nsecond");
+    delete_to_line_end_in_text(&mut text, 5);
+    assert_eq!(text, "firstsecond");
+
+    let mut text = String::from("hello world");
+    delete_to_line_end_in_text(&mut text, 5);
+    assert_eq!(text, "hello");
+}
+
+#[test]
 fn cursor_from_visual_position_prefers_nearest_boundary() {
     let layout = wrapped_input_layout("你好", 0, 12);
     assert_eq!(cursor_from_visual_position(&layout, 0, 0), 0);

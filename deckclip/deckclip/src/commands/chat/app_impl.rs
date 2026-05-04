@@ -960,6 +960,34 @@ impl ChatApp {
         self.sync_footer_after_input_change();
     }
 
+    fn delete_to_line_end(&mut self) {
+        delete_to_line_end_in_text(&mut self.input, self.input_cursor);
+        self.prune_pending_pastes();
+        self.input_history_index = None;
+        self.refresh_slash_selection();
+        self.clear_quit_hint();
+        self.sync_footer_after_input_change();
+    }
+
+    fn delete_word_back(&mut self) {
+        delete_word_before_cursor(&mut self.input, &mut self.input_cursor);
+        self.prune_pending_pastes();
+        self.input_history_index = None;
+        self.refresh_slash_selection();
+        self.clear_quit_hint();
+        self.sync_footer_after_input_change();
+    }
+
+    fn move_cursor_word_left(&mut self) {
+        self.input_cursor = previous_word_boundary(&self.input, self.input_cursor);
+        self.clear_quit_hint();
+    }
+
+    fn move_cursor_word_right(&mut self) {
+        self.input_cursor = next_word_boundary(&self.input, self.input_cursor);
+        self.clear_quit_hint();
+    }
+
     fn request_login(&mut self) {
         self.pending_login_request = true;
         self.clear_quit_hint();
