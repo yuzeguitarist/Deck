@@ -98,6 +98,7 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
     );
 }
 
+#[allow(clippy::if_same_then_else)]
 fn render_body(frame: &mut Frame<'_>, area: Rect, app: &mut ChatApp) {
     let title = if app.auto_scroll {
         chat_text("chat.body.title.following")
@@ -322,7 +323,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &ChatApp) {
         Some(FooterTag::SlashSelected) if app.slash_query().is_none() => None,
         _ => app.footer_message.clone(),
     };
-    let (text, tone) = footer_message.unwrap_or_else(|| (default_footer, MetaTone::Dim));
+    let (text, tone) = footer_message.unwrap_or((default_footer, MetaTone::Dim));
     let line = Line::from(Span::styled(text, tone.style()));
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -1199,7 +1200,7 @@ pub(super) struct InputViewport {
 pub(super) fn input_panel_height(app: &ChatApp, width: u16) -> u16 {
     let input_width = width.saturating_sub(4) as usize;
     let layout = wrapped_input_layout(&app.input, app.input_cursor, input_width.max(1));
-    let visible_lines = layout.rows.len().clamp(1, MAX_INPUT_VISIBLE_LINES as usize);
+    let visible_lines = layout.rows.len().clamp(1, MAX_INPUT_VISIBLE_LINES);
     let attachment_height =
         pending_attachment_preview_height(width.saturating_sub(2), app.pending_attachment_count());
     let pending_paste_height =
@@ -1408,6 +1409,7 @@ pub(super) fn point_in_rect(column: u16, row: u16, rect: Rect) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
+#[allow(clippy::manual_checked_ops)]
 pub(super) fn scrollbar_thumb_metrics(
     total_lines: usize,
     visible_lines: usize,

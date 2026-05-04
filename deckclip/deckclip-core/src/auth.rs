@@ -69,7 +69,9 @@ pub fn canonical_json(value: &Value) -> String {
         Value::Null => "null".to_string(),
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
-        Value::String(value) => serde_json::to_string(value).expect("serializing string cannot fail"),
+        Value::String(value) => {
+            serde_json::to_string(value).expect("serializing string cannot fail")
+        }
         Value::Array(values) => {
             let body = values
                 .iter()
@@ -80,7 +82,7 @@ pub fn canonical_json(value: &Value) -> String {
         }
         Value::Object(map) => {
             let mut entries = map.iter().collect::<Vec<_>>();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(left, _)| *left);
             let body = entries
                 .into_iter()
                 .map(|(key, value)| {

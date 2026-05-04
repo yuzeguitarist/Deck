@@ -200,7 +200,7 @@ impl DeckClient {
             json!({}),
             QUICK_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn read(&mut self) -> Result<Response, DeckError> {
@@ -209,7 +209,7 @@ impl DeckClient {
             json!({}),
             QUICK_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn clipboard_latest(&mut self) -> Result<Response, DeckError> {
@@ -352,7 +352,7 @@ impl DeckClient {
             json!({}),
             DEFAULT_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn ai_run(
@@ -416,7 +416,7 @@ impl DeckClient {
             json!({}),
             DEFAULT_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn login_clear(&mut self, provider: &str) -> Result<Response, DeckError> {
@@ -434,7 +434,7 @@ impl DeckClient {
             json!({}),
             DEFAULT_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn login_chatgpt_wait(&mut self) -> Result<Response, DeckError> {
@@ -448,7 +448,7 @@ impl DeckClient {
             json!({}),
             DEFAULT_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn login_openai_configure(
@@ -509,7 +509,7 @@ impl DeckClient {
             json!({}),
             DEFAULT_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn chat_open(
@@ -534,7 +534,7 @@ impl DeckClient {
             args,
             DEFAULT_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn chat_clipboard_read(&mut self) -> Result<Response, DeckError> {
@@ -543,7 +543,7 @@ impl DeckClient {
             json!({}),
             QUICK_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn chat_send(
@@ -613,7 +613,7 @@ impl DeckClient {
             args,
             DEFAULT_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn chat_history_load(

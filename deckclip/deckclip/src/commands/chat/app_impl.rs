@@ -27,7 +27,7 @@ impl ChatApp {
             slash_popup_hitboxes: Vec::new(),
             history_hitboxes: Vec::new(),
             overlay: OverlayState::None,
-            approval_input_guard: ApprovalInputGuard::default(),
+            approval_input_guard: ApprovalInputGuard,
             mode: ChatMode::Ready,
             execution_mode: ExecutionMode::Agent,
             footer_message: None,
@@ -725,6 +725,7 @@ impl ChatApp {
         }
     }
 
+    #[allow(clippy::manual_checked_ops)]
     fn scroll_to_body_pointer(&mut self, row: u16) {
         let Some(area) = self.body_scrollbar_area else {
             return;

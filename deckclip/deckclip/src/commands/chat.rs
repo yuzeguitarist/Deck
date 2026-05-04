@@ -751,9 +751,7 @@ pub async fn run(output: OutputMode) -> Result<()> {
             let resume_result = terminal.resume_after_child_tui();
             needs_redraw = true;
 
-            if let Err(error) = resume_result {
-                return Err(error);
-            }
+            resume_result?;
 
             match login_result {
                 Ok(()) => match fetch_bootstrap(primary_client.clone()).await {
@@ -925,17 +923,15 @@ fn handle_key_event(
                     app.clear_quit_hint();
                     app.set_footer(chat_text("chat.footer.history_closed"), MetaTone::Dim);
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if overlay.selected > 0 {
-                        overlay.selected -= 1;
-                        moved = true;
-                    }
+                KeyCode::Up | KeyCode::Char('k') if overlay.selected > 0 => {
+                    overlay.selected -= 1;
+                    moved = true;
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if overlay.selected + 1 < overlay.items.len() {
-                        overlay.selected += 1;
-                        moved = true;
-                    }
+                KeyCode::Down | KeyCode::Char('j')
+                    if overlay.selected + 1 < overlay.items.len() =>
+                {
+                    overlay.selected += 1;
+                    moved = true;
                 }
                 KeyCode::PageUp => {
                     overlay.selected = overlay.selected.saturating_sub(8);
@@ -1694,10 +1690,9 @@ fn spawn_approval_dispatch(dispatch: ApprovalDispatch, ui_tx: UnboundedSender<Ui
             match respond_to_approval(&dispatch.session_id, &dispatch.call_id, dispatch.approved)
                 .await
             {
-                Ok(()) => match dispatch.completion {
-                    Some((message, tone)) => Some(UiEvent::FooterMessage(message, tone)),
-                    None => None,
-                },
+                Ok(()) => dispatch
+                    .completion
+                    .map(|(message, tone)| UiEvent::FooterMessage(message, tone)),
                 Err(error) => Some(ui_error(error)),
             };
         if let Some(event) = event {
@@ -2197,7 +2192,7 @@ fn slash_command_matches(command: &SlashCommand, query: &str) -> bool {
 fn normalize_slash_command(command: &str) -> Option<&'static str> {
     let trimmed = command.trim();
     SLASH_COMMANDS.iter().find_map(|candidate| {
-        if candidate.name == trimmed || candidate.aliases.iter().any(|alias| *alias == trimmed) {
+        if candidate.name == trimmed || candidate.aliases.contains(&trimmed) {
             Some(candidate.name)
         } else {
             None

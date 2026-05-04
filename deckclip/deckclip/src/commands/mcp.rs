@@ -10,9 +10,7 @@ use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::queue;
-use crossterm::style::{
-    Attribute, Color, ResetColor, SetAttribute, SetForegroundColor,
-};
+use crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen,
     LeaveAlternateScreen,
@@ -250,9 +248,13 @@ fn is_client_installed(client: McpSetupClient) -> bool {
     }
 
     match client {
-        McpSetupClient::ClaudeDesktop => {
-            app_bundle_exists(&["/Applications/Claude.app", "/Applications/Claude Desktop.app"], &["Claude.app", "Claude Desktop.app"])
-        }
+        McpSetupClient::ClaudeDesktop => app_bundle_exists(
+            &[
+                "/Applications/Claude.app",
+                "/Applications/Claude Desktop.app",
+            ],
+            &["Claude.app", "Claude Desktop.app"],
+        ),
         McpSetupClient::Cursor => app_bundle_exists(&["/Applications/Cursor.app"], &["Cursor.app"]),
         McpSetupClient::Codex => find_command_in_path("codex").is_some(),
         McpSetupClient::Opencode => find_command_in_path("opencode").is_some(),
@@ -292,26 +294,23 @@ fn run_setup_wizard(detected: &[DetectedSetupClient]) -> Result<SetupWizardResul
     loop {
         terminal.draw(&state)?;
 
-        match event::read()? {
-            Event::Key(key) => {
-                if matches!(key.kind, KeyEventKind::Release) {
-                    continue;
-                }
-
-                match key.code {
-                    KeyCode::Up => state.move_up(),
-                    KeyCode::Down => state.move_down(),
-                    KeyCode::Char(' ') => state.toggle(),
-                    KeyCode::Enter => {
-                        return Ok(SetupWizardResult::Submit(state.selected_clients()));
-                    }
-                    KeyCode::Esc | KeyCode::Char('q') => {
-                        return Ok(SetupWizardResult::Cancelled);
-                    }
-                    _ => {}
-                }
+        if let Event::Key(key) = event::read()? {
+            if matches!(key.kind, KeyEventKind::Release) {
+                continue;
             }
-            _ => {}
+
+            match key.code {
+                KeyCode::Up => state.move_up(),
+                KeyCode::Down => state.move_down(),
+                KeyCode::Char(' ') => state.toggle(),
+                KeyCode::Enter => {
+                    return Ok(SetupWizardResult::Submit(state.selected_clients()));
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    return Ok(SetupWizardResult::Cancelled);
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -2041,10 +2040,7 @@ mod tests {
 
         let plan = build_setup_plan(McpSetupClient::Cursor, Some(&file_path), "deckclip").unwrap();
         assert!(plan.snippet.contains("\"type\": \"stdio\""));
-        assert!(plan
-            .note_keys
-            .iter()
-            .any(|key| *key == "mcp.setup.note.cursor_global"));
+        assert!(plan.note_keys.contains(&"mcp.setup.note.cursor_global"));
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
