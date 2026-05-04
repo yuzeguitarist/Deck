@@ -149,6 +149,12 @@ struct ScriptResult: Sendable {
     let error: String?
 }
 
+nonisolated private struct ScriptPluginSubprocessResult: Decodable {
+    let success: Bool
+    let output: String?
+    let error: String?
+}
+
 nonisolated struct PluginSharePayload: Codable, Sendable {
     let manifest: ScriptManifest
     let files: [String: String]
@@ -1138,6 +1144,14 @@ nonisolated final class ScriptPluginService: @unchecked Sendable {
         )
     }
 
+    private static func scriptInterruptedResult() -> ScriptResult {
+        ScriptResult(
+            success: false,
+            output: nil,
+            error: NSLocalizedString("脚本已被中断", comment: "Script interrupted")
+        )
+    }
+
     private static func scriptTimeoutResult(timeout: TimeInterval) -> ScriptResult {
         ScriptResult(
             success: false,
@@ -1332,6 +1346,15 @@ nonisolated final class ScriptPluginService: @unchecked Sendable {
         executionState: ExecutionState,
         timeout: TimeInterval
     ) -> ScriptResult {
+        if let subprocessResult = executeScriptInSubprocess(
+            plugin: plugin,
+            input: input,
+            executionState: executionState,
+            timeout: timeout
+        ) {
+            return subprocessResult
+        }
+
         // 每次执行都创建新的 JSContext，确保干净的执行环境
         // 这样超时后旧的 context 会被丢弃，不影响后续执行
         guard let context = createContext(for: plugin, executionState: executionState, timeout: timeout) else {
@@ -1391,6 +1414,244 @@ nonisolated final class ScriptPluginService: @unchecked Sendable {
 
         return ScriptResult(success: true, output: outputString, error: nil)
     }
+
+    /// Runs non-network script plugins in a short-lived JavaScriptCore shell process.
+    ///
+    /// JavaScriptCore reserves a large VM Gigacage when a JS VM is created. Running
+    /// the plugin in `jsc` keeps that reservation out of Deck's long-lived app
+    /// process, so the reservation disappears when the child process exits.
+    private func executeScriptInSubprocess(
+        plugin: ScriptPlugin,
+        input: String,
+        executionState: ExecutionState,
+        timeout: TimeInterval
+    ) -> ScriptResult? {
+        guard !plugin.requiresNetwork else {
+            return nil
+        }
+        guard let jscURL = Self.javaScriptCoreShellURL() else {
+            return nil
+        }
+        guard let scriptContent = scriptContentForExecution(plugin) else {
+            return nil
+        }
+
+        let fileManager = FileManager.default
+        let tempDirectory = fileManager.temporaryDirectory
+            .appendingPathComponent("deck-script-\(UUID().uuidString)", isDirectory: true)
+
+        do {
+            try fileManager.createDirectory(at: tempDirectory, withIntermediateDirectories: true)
+            defer {
+                try? fileManager.removeItem(at: tempDirectory)
+            }
+
+            let runnerURL = tempDirectory.appendingPathComponent("runner.js", isDirectory: false)
+            let inputURL = tempDirectory.appendingPathComponent("input.txt", isDirectory: false)
+            let scriptURL = tempDirectory.appendingPathComponent("plugin.js", isDirectory: false)
+            let outputURL = tempDirectory.appendingPathComponent("result.json", isDirectory: false)
+
+            try Self.subprocessRunnerScript.write(to: runnerURL, atomically: true, encoding: .utf8)
+            try input.write(to: inputURL, atomically: true, encoding: .utf8)
+            try scriptContent.write(to: scriptURL, atomically: true, encoding: .utf8)
+
+            let process = Process()
+            process.executableURL = jscURL
+            process.arguments = [
+                "--destroy-vm",
+                runnerURL.path,
+                "--",
+                inputURL.path,
+                scriptURL.path,
+                outputURL.path
+            ]
+
+            let stderrPipe = Pipe()
+            process.standardError = stderrPipe
+            process.standardOutput = Pipe()
+
+            try process.run()
+
+            let deadline = Date().addingTimeInterval(max(0.1, timeout))
+            var didTimeout = false
+            while process.isRunning {
+                if executionState.isInterrupted() {
+                    process.terminate()
+                    return Self.scriptInterruptedResult()
+                }
+                if Date() >= deadline {
+                    didTimeout = true
+                    process.terminate()
+                    break
+                }
+                Thread.sleep(forTimeInterval: 0.02)
+            }
+
+            if process.isRunning {
+                Thread.sleep(forTimeInterval: 0.08)
+            }
+            if process.isRunning {
+                kill(process.processIdentifier, SIGKILL)
+            }
+            process.waitUntilExit()
+
+            if didTimeout {
+                return Self.scriptTimeoutResult(timeout: timeout)
+            }
+
+            guard process.terminationStatus == 0 else {
+                let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                let stderr = String(data: stderrData, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return ScriptResult(
+                    success: false,
+                    output: nil,
+                    error: stderr?.isEmpty == false ? stderr : NSLocalizedString("执行失败", comment: "Script execution failed")
+                )
+            }
+
+            let outputData = try Data(contentsOf: outputURL)
+            let decoded = try JSONDecoder().decode(ScriptPluginSubprocessResult.self, from: outputData)
+            return ScriptResult(success: decoded.success, output: decoded.output, error: decoded.error)
+        } catch {
+            log.warn("Script \(plugin.id) subprocess execution unavailable: \(error.localizedDescription). Falling back to in-process JavaScriptCore.")
+            return nil
+        }
+    }
+
+    private static func javaScriptCoreShellURL() -> URL? {
+        let candidates = [
+            "/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc",
+            "/System/Library/Frameworks/JavaScriptCore.framework/Versions/A/Helpers/jsc"
+        ]
+
+        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
+            return URL(fileURLWithPath: path, isDirectory: false)
+        }
+        return nil
+    }
+
+    private static let subprocessRunnerScript = #"""
+    (function(commandLineArguments) {
+        const inputPath = commandLineArguments[0];
+        const scriptPath = commandLineArguments[1];
+        const outputPath = commandLineArguments[2];
+        const nativeReadFile = readFile;
+        const nativeWriteFile = writeFile;
+
+        globalThis.readFile = undefined;
+        globalThis.writeFile = undefined;
+        globalThis.load = undefined;
+        globalThis.quit = undefined;
+        globalThis.print = function() {};
+
+        function finish(payload) {
+            nativeWriteFile(outputPath, JSON.stringify(payload));
+        }
+
+        function utf8Bytes(value) {
+            const encoded = encodeURIComponent(String(value));
+            const bytes = [];
+            for (let i = 0; i < encoded.length; i += 1) {
+                if (encoded[i] === "%") {
+                    bytes.push(parseInt(encoded.slice(i + 1, i + 3), 16));
+                    i += 2;
+                } else {
+                    bytes.push(encoded.charCodeAt(i));
+                }
+            }
+            return bytes;
+        }
+
+        const base64Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        function deckBtoa(value) {
+            const bytes = utf8Bytes(value);
+            let output = "";
+            for (let i = 0; i < bytes.length; i += 3) {
+                const a = bytes[i];
+                const b = i + 1 < bytes.length ? bytes[i + 1] : 0;
+                const c = i + 2 < bytes.length ? bytes[i + 2] : 0;
+                const triplet = (a << 16) | (b << 8) | c;
+                output += base64Alphabet[(triplet >> 18) & 63];
+                output += base64Alphabet[(triplet >> 12) & 63];
+                output += i + 1 < bytes.length ? base64Alphabet[(triplet >> 6) & 63] : "=";
+                output += i + 2 < bytes.length ? base64Alphabet[triplet & 63] : "=";
+            }
+            return output;
+        }
+
+        function deckAtob(value) {
+            const clean = String(value).replace(/\s+/g, "");
+            const bytes = [];
+            for (let i = 0; i < clean.length; i += 4) {
+                const c1 = base64Alphabet.indexOf(clean[i]);
+                const c2 = base64Alphabet.indexOf(clean[i + 1]);
+                const c3 = clean[i + 2] === "=" ? -1 : base64Alphabet.indexOf(clean[i + 2]);
+                const c4 = clean[i + 3] === "=" ? -1 : base64Alphabet.indexOf(clean[i + 3]);
+                if (c1 < 0 || c2 < 0 || (c3 < 0 && clean[i + 2] !== "=") || (c4 < 0 && clean[i + 3] !== "=")) {
+                    throw new Error("Invalid base64 input");
+                }
+                const triplet = (c1 << 18) | (c2 << 12) | (Math.max(c3, 0) << 6) | Math.max(c4, 0);
+                bytes.push((triplet >> 16) & 255);
+                if (c3 >= 0) bytes.push((triplet >> 8) & 255);
+                if (c4 >= 0) bytes.push(triplet & 255);
+            }
+            return decodeURIComponent(bytes.map(function(byte) {
+                return "%" + byte.toString(16).padStart(2, "0");
+            }).join(""));
+        }
+
+        const console = {
+            log: function() {},
+            warn: function() {},
+            error: function() {}
+        };
+        const Deck = {
+            shouldStop: function() { return false; },
+            checkInterrupt: function() { return false; },
+            detectURLs: function(text) {
+                return String(text || "").match(/https?:\/\/[^\s<>"']+/g)?.join("\n") || "";
+            },
+            detectEmails: function(text) {
+                return String(text || "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi)?.join("\n") || "";
+            }
+        };
+        const fetch = function() {
+            throw new Error("fetch is only available for authorized network plugins inside Deck");
+        };
+
+        try {
+            const input = nativeReadFile(inputPath);
+            const source = nativeReadFile(scriptPath);
+            const factory = new Function(
+                "Deck",
+                "console",
+                "btoa",
+                "atob",
+                "fetch",
+                source + "\n; return (typeof transform === 'function') ? transform : undefined;\n//# sourceURL=" + scriptPath
+            );
+            const transform = factory(Deck, console, deckBtoa, deckAtob, fetch);
+            if (typeof transform !== "function") {
+                finish({ success: false, error: "脚本中未定义 transform 函数" });
+                return;
+            }
+
+            const result = transform(input);
+            if (result && typeof result.then === "function") {
+                finish({ success: false, error: "transform(input) 必须同步返回字符串，不能返回 Promise" });
+                return;
+            }
+            if (result === undefined || result === null) {
+                finish({ success: false, error: "转换结果无效" });
+                return;
+            }
+            finish({ success: true, output: String(result) });
+        } catch (error) {
+            finish({ success: false, error: String(error && error.stack ? error.stack : error) });
+        }
+    })(arguments);
+    """#
 
     /// 创建 JSContext
     private func createContext(
@@ -1489,20 +1750,7 @@ nonisolated final class ScriptPluginService: @unchecked Sendable {
             setupNetworkAPI(context: context, pluginId: plugin.id, executionState: executionState)
         }
 
-        // 优先使用预加载缓存，未命中时回退磁盘读取并回填缓存。
-        let scriptContent: String
-        scriptCacheLock.lock()
-        let cachedScript = scriptContentCache[plugin.id]
-        scriptCacheLock.unlock()
-        if let cachedScript {
-            scriptContent = cachedScript
-        } else {
-            guard let loaded = readScriptContentFromDisk(for: plugin) else { return nil }
-            scriptCacheLock.lock()
-            scriptContentCache[plugin.id] = loaded
-            scriptCacheLock.unlock()
-            scriptContent = loaded
-        }
+        guard let scriptContent = scriptContentForExecution(plugin) else { return nil }
 
         context.evaluateScript(scriptContent)
 
@@ -1512,6 +1760,21 @@ nonisolated final class ScriptPluginService: @unchecked Sendable {
         }
 
         return context
+    }
+
+    private func scriptContentForExecution(_ plugin: ScriptPlugin) -> String? {
+        scriptCacheLock.lock()
+        let cachedScript = scriptContentCache[plugin.id]
+        scriptCacheLock.unlock()
+        if let cachedScript {
+            return cachedScript
+        }
+
+        guard let loaded = readScriptContentFromDisk(for: plugin) else { return nil }
+        scriptCacheLock.lock()
+        scriptContentCache[plugin.id] = loaded
+        scriptCacheLock.unlock()
+        return loaded
     }
 
     /// 设置网络 API (fetch)
