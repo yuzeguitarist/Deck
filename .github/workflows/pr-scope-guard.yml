@@ -34,6 +34,13 @@ jobs:
     steps:
       - name: Evaluate scope and post sticky comment
         uses: actions/github-script@v7
+        env:
+          # Optional comma- or whitespace-separated list of additional trusted
+          # login names (exact match, case-insensitive). Configure via
+          # GitHub → Settings → Secrets and variables → Actions → Variables
+          # with name `SCOPE_GUARD_TRUSTED_LOGINS`. Use this to whitelist
+          # specific AI-agent USER accounts that don't carry the `[bot]` suffix.
+          SCOPE_GUARD_TRUSTED_LOGINS: ${{ vars.SCOPE_GUARD_TRUSTED_LOGINS }}
         with:
           script: |
             const OWNER_LOGIN = 'yuzeguitarist';
@@ -46,9 +53,29 @@ jobs:
             // "I do not allow this" do NOT trigger approval.
             const APPROVAL_RE = /^\s*\/?\s*(?:allow(?:[-_ ]?edit)?|approved?|lgtm|批准|允许|放行)\s*[.!]?\s*$/im;
 
-            // Bot login patterns: GitHub-classified bots, common AI-agent
-            // accounts, and `*[bot]` suffixes.
-            const BOT_LOGIN_RE = /^(?:claude|devin|copilot|codex|cursor|chatgpt|github-actions|dependabot|renovate|deepsource|sourcery|gemini|openai|anthropic|aider|sweep|mentat|graphite-app|qodo)\b|\[bot\]$/i;
+            // Trusted-bot detection. To avoid prefix-bypass attacks (e.g. a
+            // contributor registering a username like `codex-reviewer`), we do
+            // NOT use prefix matching. Instead we trust an account if any of:
+            //
+            //   1. The GitHub API marks pr.user.type === 'Bot'
+            //      (covers GitHub App installations like dependabot[bot],
+            //      claude[bot], devin-ai-integration[bot], etc.).
+            //   2. The login ends with the literal `[bot]` suffix
+            //      (defense in depth — every GitHub App login carries this).
+            //   3. The login matches an entry in TRUSTED_AGENT_LOGINS below
+            //      (exact, case-insensitive). Add USER accounts here only.
+            //   4. The login matches an entry in the env-provided variable
+            //      `SCOPE_GUARD_TRUSTED_LOGINS` (comma/whitespace-separated,
+            //      configured at the repo level). This lets the owner manage
+            //      the trust list without editing this workflow file.
+            const TRUSTED_AGENT_LOGINS = new Set([
+              // Add bare USER logins here as needed, e.g. 'some-ai-tool-account'.
+              // GitHub Apps with a `[bot]` suffix do NOT need to be listed.
+            ].map((s) => s.toLowerCase()));
+            for (const raw of (process.env.SCOPE_GUARD_TRUSTED_LOGINS || '').split(/[,\s]+/)) {
+              const v = raw.trim().toLowerCase();
+              if (v) TRUSTED_AGENT_LOGINS.add(v);
+            }
 
             const owner = context.repo.owner;
             const repo = context.repo.repo;
@@ -127,8 +154,12 @@ jobs:
             }
 
             // ---- Trust check -------------------------------------------------------
-            const isOwner = author.toLowerCase() === OWNER_LOGIN.toLowerCase();
-            const isBot = authorType === 'Bot' || BOT_LOGIN_RE.test(author);
+            const authorLower = author.toLowerCase();
+            const isOwner = authorLower === OWNER_LOGIN.toLowerCase();
+            const isBot =
+              authorType === 'Bot' ||
+              authorLower.endsWith('[bot]') ||
+              TRUSTED_AGENT_LOGINS.has(authorLower);
 
             if (isOwner) {
               await setStatus('success', 'Owner PR — auto-approved');

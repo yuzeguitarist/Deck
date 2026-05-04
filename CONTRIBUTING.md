@@ -25,8 +25,12 @@ explaining how to unblock it. You have two options:
    `批准`, `允许`, or `放行` on its own line). The check will re-run automatically
    and turn green — no need to push another commit.
 
-Pull requests authored by the repository owner or by recognized AI-agent bots
-(Claude, Devin, Copilot, Codex, Cursor, etc.) bypass the scope check.
+Pull requests authored by the repository owner or by recognized GitHub-App bots
+(GitHub `type: Bot`, e.g. `dependabot[bot]`, `claude[bot]`, `devin-ai-integration[bot]`)
+bypass the scope check. Additional AI-agent **user accounts** can be trusted
+by populating the repo variable `SCOPE_GUARD_TRUSTED_LOGINS` (comma- or
+whitespace-separated, exact match, case-insensitive) under
+*Settings → Secrets and variables → Actions → Variables*.
 
 ## Required CI Checks
 

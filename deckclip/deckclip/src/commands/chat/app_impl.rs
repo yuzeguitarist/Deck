@@ -1,4 +1,9 @@
 impl ChatApp {
+    // ApprovalInputGuard is a unit struct on non-macOS but a non-unit struct on
+    // macOS (see commands/chat/approval.rs). Use ::default() so the call site
+    // compiles on both targets; allow the clippy lint that would suggest
+    // collapsing to the unit-struct literal.
+    #[allow(clippy::default_constructed_unit_structs)]
     fn from_bootstrap(bootstrap: BootstrapData) -> Self {
         Self {
             session_id: String::new(),
@@ -27,7 +32,7 @@ impl ChatApp {
             slash_popup_hitboxes: Vec::new(),
             history_hitboxes: Vec::new(),
             overlay: OverlayState::None,
-            approval_input_guard: ApprovalInputGuard,
+            approval_input_guard: ApprovalInputGuard::default(),
             mode: ChatMode::Ready,
             execution_mode: ExecutionMode::Agent,
             footer_message: None,
