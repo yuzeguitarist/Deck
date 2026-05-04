@@ -1,0 +1,240 @@
+name: PR Scope Guard
+
+# Gates non-owner, non-bot pull requests so they can only modify files inside
+# `deckclip/`. The repository owner can override the gate by leaving an
+# approval comment (see APPROVAL_RE in the script below).
+#
+# This workflow does NOT check out PR code. It only calls the GitHub API,
+# so `pull_request_target` is safe.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  statuses: write
+
+concurrency:
+  group: pr-scope-guard-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  scope-guard:
+    # Only run for PR events or for comments on a PR (issue_comment fires for
+    # both issues and PRs; we filter to PR comments only).
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Evaluate scope and post sticky comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const OWNER_LOGIN = 'yuzeguitarist';
+            const ALLOWED_ROOT = 'deckclip';
+            const STATUS_CONTEXT = 'PR Scope Guard';
+            const STICKY_MARKER = '<!-- pr-scope-guard:sticky -->';
+
+            // Approval keywords (case-insensitive). Each must appear on its own
+            // line (optionally with surrounding whitespace) so phrases like
+            // "I do not allow this" do NOT trigger approval.
+            const APPROVAL_RE = /^\s*\/?\s*(?:allow(?:[-_ ]?edit)?|approved?|lgtm|批准|允许|放行)\s*[.!]?\s*$/im;
+
+            // Bot login patterns: GitHub-classified bots, common AI-agent
+            // accounts, and `*[bot]` suffixes.
+            const BOT_LOGIN_RE = /^(?:claude|devin|copilot|codex|cursor|chatgpt|github-actions|dependabot|renovate|deepsource|sourcery|gemini|openai|anthropic|aider|sweep|mentat|graphite-app|qodo)\b|\[bot\]$/i;
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            // ---- Resolve PR number -------------------------------------------------
+            let prNumber;
+            if (context.eventName === 'pull_request_target') {
+              prNumber = context.payload.pull_request.number;
+            } else {
+              prNumber = context.payload.issue.number;
+            }
+
+            const { data: pr } = await github.rest.pulls.get({
+              owner, repo, pull_number: prNumber,
+            });
+            const headSha = pr.head.sha;
+            const author = pr.user.login;
+            const authorType = pr.user.type; // 'User' | 'Bot'
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+
+            core.info(`PR #${prNumber} by @${author} (${authorType}); head=${headSha}`);
+
+            // ---- Helpers -----------------------------------------------------------
+            async function setStatus(state, description) {
+              // Truncate to GitHub's 140-char limit.
+              const desc = (description || '').slice(0, 140);
+              await github.rest.repos.createCommitStatus({
+                owner, repo, sha: headSha,
+                state, description: desc,
+                context: STATUS_CONTEXT,
+                target_url: runUrl,
+              });
+            }
+
+            async function upsertStickyComment(body) {
+              const comments = await github.paginate(
+                github.rest.issues.listComments,
+                { owner, repo, issue_number: prNumber, per_page: 100 },
+              );
+              const existing = comments.find(
+                (c) => c.body && c.body.includes(STICKY_MARKER),
+              );
+              const fullBody = `${STICKY_MARKER}\n${body}`;
+              if (existing) {
+                await github.rest.issues.updateComment({
+                  owner, repo, comment_id: existing.id, body: fullBody,
+                });
+                return existing.id;
+              }
+              const { data } = await github.rest.issues.createComment({
+                owner, repo, issue_number: prNumber, body: fullBody,
+              });
+              return data.id;
+            }
+
+            async function markStickyResolvedIfPresent() {
+              const comments = await github.paginate(
+                github.rest.issues.listComments,
+                { owner, repo, issue_number: prNumber, per_page: 100 },
+              );
+              const existing = comments.find(
+                (c) => c.body && c.body.includes(STICKY_MARKER),
+              );
+              if (!existing) return;
+              const resolvedBody = [
+                STICKY_MARKER,
+                '### PR Scope Guard — Resolved',
+                '',
+                'This pull request now passes the scope guard. ✅',
+                '',
+                '_(This comment is updated automatically by the PR Scope Guard workflow.)_',
+              ].join('\n');
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body: resolvedBody,
+              });
+            }
+
+            // ---- Trust check -------------------------------------------------------
+            const isOwner = author.toLowerCase() === OWNER_LOGIN.toLowerCase();
+            const isBot = authorType === 'Bot' || BOT_LOGIN_RE.test(author);
+
+            if (isOwner) {
+              await setStatus('success', 'Owner PR — auto-approved');
+              await markStickyResolvedIfPresent();
+              core.info('Owner PR: auto-approved.');
+              return;
+            }
+            if (isBot) {
+              await setStatus('success', 'Bot/agent PR — auto-approved');
+              await markStickyResolvedIfPresent();
+              core.info(`Bot PR by @${author}: auto-approved.`);
+              return;
+            }
+
+            // ---- File scope check --------------------------------------------------
+            const files = await github.paginate(
+              github.rest.pulls.listFiles,
+              { owner, repo, pull_number: prNumber, per_page: 100 },
+            );
+            const offenders = files
+              .map((f) => f.filename)
+              .filter((p) => !(p === ALLOWED_ROOT || p.startsWith(`${ALLOWED_ROOT}/`)));
+
+            if (offenders.length === 0 && files.length > 0) {
+              await setStatus('success', `All ${files.length} file(s) inside ${ALLOWED_ROOT}/`);
+              await markStickyResolvedIfPresent();
+              core.info(`All ${files.length} file(s) scoped to ${ALLOWED_ROOT}/.`);
+              return;
+            }
+            if (files.length === 0) {
+              // Empty diff (rare). Treat as success — nothing to gate.
+              await setStatus('success', 'No file changes detected');
+              await markStickyResolvedIfPresent();
+              core.info('No file changes; nothing to gate.');
+              return;
+            }
+
+            // ---- Owner approval-comment check --------------------------------------
+            const issueComments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner, repo, issue_number: prNumber, per_page: 100 },
+            );
+            const approval = issueComments.find((c) => {
+              if (!c.body) return false;
+              if ((c.user?.login || '').toLowerCase() !== OWNER_LOGIN.toLowerCase()) return false;
+              // Skip the bot's own sticky comments (defense in depth — the owner
+              // shouldn't be posting these, but ensure no accidental loop).
+              if (c.body.includes(STICKY_MARKER)) return false;
+              return APPROVAL_RE.test(c.body);
+            });
+
+            if (approval) {
+              await setStatus(
+                'success',
+                `Approved by @${OWNER_LOGIN} in comment ${approval.id}`,
+              );
+              await markStickyResolvedIfPresent();
+              core.info(`Owner approval found in comment ${approval.html_url}`);
+              return;
+            }
+
+            // ---- Failure: post sticky comment --------------------------------------
+            const offendersPreview = offenders.slice(0, 20)
+              .map((p) => `- \`${p}\``)
+              .join('\n');
+            const offendersExtra = offenders.length > 20
+              ? `\n_…and ${offenders.length - 20} more file(s) outside \`${ALLOWED_ROOT}/\`._`
+              : '';
+
+            const body = [
+              '### PR Scope Guard — Action Required',
+              '',
+              `Hi @${author}, thanks for the contribution! 🙌`,
+              '',
+              `External pull requests in this repository may only modify files inside the \`${ALLOWED_ROOT}/\` directory. The Swift application (everything outside \`${ALLOWED_ROOT}/\`) is source-available but **not open to external contributions**.`,
+              '',
+              `**Detected ${offenders.length} file(s) outside \`${ALLOWED_ROOT}/\`:**`,
+              '',
+              offendersPreview + offendersExtra,
+              '',
+              '#### How to unblock this PR',
+              '',
+              `You have two options — pick whichever is easier:`,
+              '',
+              `1. **Limit the changes to \`${ALLOWED_ROOT}/\`** — push a new commit that removes or relocates the changes outside \`${ALLOWED_ROOT}/\`. This check will re-run on every push and turn green automatically once the PR is in scope.`,
+              `2. **Get owner approval** — only the repository owner @${OWNER_LOGIN} can override this gate. They can do so by leaving a comment whose body contains one of the following on its own line:`,
+              '   - `/allow`',
+              '   - `allow` or `allow edit`',
+              '   - `approve` or `approved`',
+              '   - `lgtm`',
+              '   - `批准`, `允许`, or `放行`',
+              '',
+              `Once the owner posts an approval comment, this check re-runs automatically and turns green — there is no need to push a new commit or re-open the PR.`,
+              '',
+              '---',
+              '',
+              `_This comment is maintained by the [PR Scope Guard workflow](${runUrl}). It will update on each push and turn into a "resolved" notice once the gate passes._`,
+            ].join('\n');
+
+            await upsertStickyComment(body);
+            await setStatus(
+              'failure',
+              `Modifies ${offenders.length} file(s) outside ${ALLOWED_ROOT}/`,
+            );
+
+            core.setFailed(
+              `PR contains ${offenders.length} file(s) outside ${ALLOWED_ROOT}/. ` +
+              `Limit the diff to ${ALLOWED_ROOT}/ or have @${OWNER_LOGIN} comment an approval keyword.`,
+            );
