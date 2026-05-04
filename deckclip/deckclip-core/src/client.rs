@@ -48,31 +48,30 @@ impl DeckClient {
     }
 
     /// Ensure we have an authenticated connection.
+    ///
+    /// Reuses the current socket whenever the existing session is still
+    /// valid; otherwise tears down the old transport and establishes a fresh
+    /// one. Reusing a transport whose session has expired is intentionally
+    /// avoided: any stale bytes left in the read buffer (or partial writes
+    /// in flight) would desynchronise the framed protocol after re-auth.
     async fn ensure_connected(&mut self) -> Result<(), DeckError> {
         let now = current_timestamp();
 
-        // Reuse the current socket whenever possible so deckclip chat sessions
-        // stay attached to a single long-lived UDS connection.
         if self.transport.is_some() && self.session_token.is_some() && now < self.session_expires_at
         {
             return Ok(());
         }
 
+        // Drop any existing transport before reconnecting so we don't try to
+        // re-handshake on a half-broken stream.
         if self.transport.is_some() {
-            let token = auth::read_token(&self.config.token_path).await?;
-            if self.handshake(&token).await.is_ok() {
-                return Ok(());
-            }
-
             self.reset_connection();
         }
 
-        // (Re)connect
         debug!("connecting to Deck App...");
         let transport = Transport::connect(&self.config.socket_path).await?;
         self.transport = Some(transport);
 
-        // Read token and perform handshake
         let token = auth::read_token(&self.config.token_path).await?;
         self.handshake(&token).await?;
 
@@ -200,7 +199,7 @@ impl DeckClient {
             json!({}),
             QUICK_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn read(&mut self) -> Result<Response, DeckError> {
@@ -209,7 +208,7 @@ impl DeckClient {
             json!({}),
             QUICK_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn clipboard_latest(&mut self) -> Result<Response, DeckError> {
@@ -352,7 +351,7 @@ impl DeckClient {
             json!({}),
             DEFAULT_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn ai_run(
@@ -416,7 +415,7 @@ impl DeckClient {
             json!({}),
             DEFAULT_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn login_clear(&mut self, provider: &str) -> Result<Response, DeckError> {
@@ -434,7 +433,7 @@ impl DeckClient {
             json!({}),
             DEFAULT_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn login_chatgpt_wait(&mut self) -> Result<Response, DeckError> {
@@ -448,7 +447,7 @@ impl DeckClient {
             json!({}),
             DEFAULT_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn login_openai_configure(
@@ -509,7 +508,7 @@ impl DeckClient {
             json!({}),
             DEFAULT_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn chat_open(
@@ -534,7 +533,7 @@ impl DeckClient {
             args,
             DEFAULT_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn chat_clipboard_read(&mut self) -> Result<Response, DeckError> {
@@ -543,7 +542,7 @@ impl DeckClient {
             json!({}),
             QUICK_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn chat_send(
@@ -613,7 +612,7 @@ impl DeckClient {
             args,
             DEFAULT_COMMAND_TIMEOUT_MS,
         )
-            .await
+        .await
     }
 
     pub async fn chat_history_load(

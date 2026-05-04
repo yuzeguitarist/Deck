@@ -1214,6 +1214,12 @@ fn handle_key_event(
                 app.delete_to_line_start();
                 return;
             }
+            if key.modifiers.contains(KeyModifiers::ALT)
+                || key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                app.delete_word_back();
+                return;
+            }
             if app.input.is_empty() && app.clear_pending_attachment() {
                 app.set_footer(chat_text("chat.footer.attachment_removed"), MetaTone::Dim);
                 return;
@@ -1222,6 +1228,24 @@ fn handle_key_event(
         }
         KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             app.delete_to_line_start();
+        }
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.move_cursor_start();
+        }
+        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.move_cursor_end();
+        }
+        KeyCode::Char('k') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.delete_to_line_end();
+        }
+        KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.delete_word_back();
+        }
+        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {
+            app.move_cursor_word_left();
+        }
+        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
+            app.move_cursor_word_right();
         }
         KeyCode::Delete => {
             if key.modifiers.contains(KeyModifiers::SUPER) {
@@ -1233,6 +1257,18 @@ fn handle_key_event(
                 return;
             }
             app.delete_forward();
+        }
+        KeyCode::Left
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            app.move_cursor_word_left();
+        }
+        KeyCode::Right
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT) =>
+        {
+            app.move_cursor_word_right();
         }
         KeyCode::Left => {
             app.move_cursor_left();

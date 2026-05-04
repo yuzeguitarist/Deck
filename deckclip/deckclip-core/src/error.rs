@@ -30,8 +30,34 @@ pub enum DeckError {
     Other(#[from] anyhow::Error),
 }
 
+impl DeckError {
+    /// Map an `std::io::Error` produced while talking to the Deck App socket
+    /// to the most accurate `DeckError` variant.
+    ///
+    /// All "the peer is gone" / "the socket is no longer usable" errors
+    /// collapse to `NotRunning` so users see a clear, actionable message
+    /// instead of low-level errno text.
+    pub(crate) fn from_socket_io(err: std::io::Error) -> Self {
+        use std::io::ErrorKind;
+        match err.kind() {
+            ErrorKind::NotFound
+            | ErrorKind::ConnectionRefused
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::ConnectionReset
+            | ErrorKind::BrokenPipe
+            | ErrorKind::UnexpectedEof
+            | ErrorKind::NotConnected => DeckError::NotRunning,
+            ErrorKind::TimedOut => DeckError::Timeout,
+            _ => DeckError::Connection(err.to_string()),
+        }
+    }
+}
+
 impl From<deckclip_protocol::codec::CodecError> for DeckError {
     fn from(e: deckclip_protocol::codec::CodecError) -> Self {
-        DeckError::Protocol(e.to_string())
+        match e {
+            deckclip_protocol::codec::CodecError::Io(io) => DeckError::from_socket_io(io),
+            other => DeckError::Protocol(other.to_string()),
+        }
     }
 }

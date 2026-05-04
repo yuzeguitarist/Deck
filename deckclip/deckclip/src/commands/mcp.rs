@@ -10,9 +10,7 @@ use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::execute;
 use crossterm::queue;
-use crossterm::style::{
-    Attribute, Color, ResetColor, SetAttribute, SetForegroundColor,
-};
+use crossterm::style::{Attribute, Color, ResetColor, SetAttribute, SetForegroundColor};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, size, Clear, ClearType, EnterAlternateScreen,
     LeaveAlternateScreen,
@@ -250,9 +248,13 @@ fn is_client_installed(client: McpSetupClient) -> bool {
     }
 
     match client {
-        McpSetupClient::ClaudeDesktop => {
-            app_bundle_exists(&["/Applications/Claude.app", "/Applications/Claude Desktop.app"], &["Claude.app", "Claude Desktop.app"])
-        }
+        McpSetupClient::ClaudeDesktop => app_bundle_exists(
+            &[
+                "/Applications/Claude.app",
+                "/Applications/Claude Desktop.app",
+            ],
+            &["Claude.app", "Claude Desktop.app"],
+        ),
         McpSetupClient::Cursor => app_bundle_exists(&["/Applications/Cursor.app"], &["Cursor.app"]),
         McpSetupClient::Codex => find_command_in_path("codex").is_some(),
         McpSetupClient::Opencode => find_command_in_path("opencode").is_some(),
