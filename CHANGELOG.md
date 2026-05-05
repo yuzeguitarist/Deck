@@ -4,6 +4,104 @@ This file is auto-generated from GitHub Releases by [release-changelog-bot](.git
 
 <!-- release-changelog-bot:auto -->
 
+<!-- release-changelog-bot:tag:v1.4.4 -->
+## v1.4.4 — v1.4.4 | perlīmātus
+
+- **Tag:** `v1.4.4`
+- **Published:** 2026-05-05T11:29:24Z
+
+### Release notes
+
+<p align="center">
+  <a href="https://deckclip.app/download" rel="noopener noreferrer" target="_blank">
+    <img width="1525" height="896" alt="Deck" src="https://github.com/yuzeguitarist/Deck/raw/main/photos/Deck.webp" style="max-width: 100%; height: auto;" />
+  </a>
+</p>
+
+---
+
+## Release Notes v1.4.4
+
+### Improvements
+
+- Added LaTeX math rendering: horizontal Markdown card previews plus Markdown/plain-text preview panels now render inline, display, common equation/align/matrix/cases environments, and formula blocks inside TeX source; Markdown “Copy Plain Text” now exports formulas as readable Unicode text while preserving inline code and code blocks verbatim; rendered formulas are cached in memory to reduce repeated work during card and preview switches, preserving the existing preview scrolling behavior.
+
+- Improved automatic update-check scheduling by keeping the existing check windows while assigning each device a stable randomized delay, spreading requests across a 30-minute window to smooth backend concurrency spikes and reduce peak-hour update service errors.
+
+- Added an in-list survey feedback entry: once history exceeds 99 items in the default All view, Deck shows a non-focusable, non-draggable feedback card at the front of the list that never appears in search or tag-filtered results; it supports opening the survey, hiding for the session, or hiding permanently, with tuned horizontal/vertical and dark/light appearances.
+
+- Improved the Settings > Statistics page responsiveness by applying statistics updates without unnecessary implicit animation and warming the top-app icon cache before rendering, reducing main-thread stalls while preserving the existing UI, charts, and interactions.
+
+- Optimized background database maintenance scans by switching file-search backfill, vector-index backfill, and missing-file checks from OFFSET pagination to id-based keyset batching, keeping large-history maintenance time stable without changing the UI, search semantics, or cleanup behavior.
+
+- Improved SQLite read/write scheduling with a dedicated read-only connection and reader queue, allowing history lists, search, statistics, and lightweight reads to avoid waiting behind writes, migrations, checkpoints, or background maintenance in WAL mode; writes and maintenance remain serialized on the writer queue, with automatic fallback if the reader is unavailable.
+
+- Improved clipboard parsing and database write hot paths: clipboard monitoring now reads only an NSPasteboard snapshot on the main thread while rich-text, thumbnail, and type parsing run in the background; main-table inserts reuse a cached SQLite UPSERT statement with direct BLOB binding to reduce repeated prepare work and large-payload copies; background semantic embedding writes no longer hop back through the MainActor.
+
+- Optimized semantic search and sqlite-vec indexing by storing, recovering, and querying vectors as native Float32 BLOBs instead of JSON strings; vector hits now fetch rows by candidate id and restore semantic-distance ordering without introducing timestamp sorting; security mode continues to disable vector indexing to preserve encryption semantics.
+
+- Improved NL Embedding semantic-search quality by keeping Chinese queries and Chinese clipboard text in one CJK word-embedding averaged vector space, avoiding missed or mis-ranked results caused by comparing short queries and longer text across different embedding spaces; exact/contains recall and ranking fallbacks were also added without built-in synonym lists or external embedding models.
+
+- Improved semantic embedding backfill scheduling by persisting the schema version immediately after an embedding-model cache reset and treating embedding population as resumable batched maintenance, avoiding repeated cache resets, repeated backups, and long CPU spikes on large histories.
+
+- Improved SQLite WAL and read-path maintenance with a low-priority idle passive checkpoint plus `journal_size_limit` to keep WAL growth bounded after the panel becomes idle; list/export read paths no longer write legacy `unique_id` or temporary-flag repairs inline, moving those fixes to batched background maintenance to reduce write amplification during scrolling, search, and exports.
+
+- Improved mixed-search performance in security mode by reusing decrypted exact matches from the encrypted-search fallback path, avoiding duplicate snapshot ranking and skipping ineffective SQL LIKE fallback queries against encrypted fields to reduce CPU and energy use.
+
+- Improved large export and smart-text analysis performance by keeping JSON encoding and U+2028/U+2029 sanitization off the main thread, folding sanitization into a single scan, and using one pass to classify plain text for line length, Chinese ratio, and code markers, reducing CPU use and hitch risk during exports, search, and list scrolling.
+
+- Improved LAN folder/app-bundle archive extraction security by allowing safe internal relative symlinks commonly used inside `.app` bundles and frameworks, while still rejecting absolute paths, `../../` escapes, duplicate archive entries, and any symlink target that normalizes outside the extraction root.
+
+- Improved LAN / iOS sync connectivity under VPN, proxy enhanced mode, and multi-interface setups by discovering and displaying only real private LAN IPv4 candidates, accepting inbound listeners across available LAN interfaces, and constraining outbound direct connections only when the target IP matches the physical interface subnet.
+
+- Improved LAN peer and manual direct-connect management by normalizing IPv4 input, merging duplicate manual and remembered peers, and cleaning stale credentials and metadata, reducing duplicate device entries, mismatched remembered ports, and stale peer records.
+
+- Improved script-plugin and smart-rule execution performance by scheduling script timeouts independently so long-running scripts do not block the script queue or async callers, and by reusing per-item snapshots, compiled rule metadata, and search-text ranges to reduce repeated parsing during bulk clipboard processing.
+
+- Improved script-plugin memory usage by running regular non-network transforms in a short-lived JavaScriptCore `jsc` subprocess, keeping the 4GB-scale `JS VM Gigacage` virtual-memory reservation out of Deck's long-lived app process while preserving the existing authorized `fetch` path for network plugins.
+
+- Improved AI chat attachment memory usage by capping saved full attachment text and avoiding duplicate storage of the same large text in both message body and attachment content, reducing memory peaks and conversation size when long documents, OCR text, or large files are sent to AI.
+
+- Improved the search field and rule picker experience by aligning the horizontal search width and rule popup to the card rhythm, adding a subtler hover state for rule rows, removing distracting rule tooltips, adding reliable Ctrl+U clearing in the search field, and preserving the existing vertical-mode popup spacing.
+
+- Improved horizontal PDF card previews by filling the card preview area with the first page content, centering the filename at the bottom, and removing the separate PDF icon for a more continuous document-preview feel.
+
+- Improved PDF preview controls by removing the separate zoom toolbar, moving the zoom buttons to the bottom info bar beside the timestamp, and preserving hover feedback to reduce visual layering at the bottom of PDF previews.
+
+- Improved the image preview window footer by restoring the solid info-bar style and adding a “Copy OCR Text” button beside the file size; the button appears only when OCR text is available and reuses the context-menu copy behavior plus the footer button hover treatment.
+
+### Fixes
+
+- Fixed a crash when showing the Deck panel where SwiftUI's async DisplayLink renderer could resolve dynamic NSColor providers outside Swift 6 default MainActor isolation and terminate with `_dispatch_assert_queue_fail` / `EXC_BREAKPOINT`; dynamic light/dark adaptive colors now use a shared nonisolated helper while preserving the existing appearance.
+
+- Fixed a crash when opening the sidebar with PDF file items on the first screen of history, where QuickLook thumbnail callbacks could violate Swift 6 default MainActor isolation and terminate with `_dispatch_assert_queue_fail` / `EXC_BREAKPOINT`; PDF thumbnails still use QuickLook, with results safely marshalled back to the main thread before updating cache and UI.
+
+- Fixed pale square artifacts appearing in the four rounded corners of the main panel when Delete Confirmation was enabled and the system delete prompt appeared; the confirmation still uses the system NSAlert while avoiding the rectangular dimming layer automatically added by SwiftUI `.alert`.
+
+- Fixed LAN receives of symlink-containing DMG/app-bundle archives where the UI could report failure while extracted files remained on disk; archives now extract into a transactional staging directory and are committed only after extraction and full safety validation succeed, with automatic cleanup on failure, rejection, or missing confirmation UI, plus startup cleanup for stale staging directories.
+
+- Fixed AI chat spacing where the assistant's first reply line could sit too close to the user's message, and unified the vertical layout for the thinking dot, first streamed token, and regular messages so the first token no longer jumps upward toward the input field.
+
+- Fixed a crash when searching under the Files tag where an FTS filtered query could trigger Swift 6 concurrency isolation checks and fail with `_dispatch_assert_queue_fail`; search results and filtering behavior are unchanged.
+
+- Fixed noisy security-mode startup logs where tolerant reads of mixed plaintext/encrypted history could report expected decrypt-probe failures as errors; real migration, encrypted-blob, and cloud-sync decryption failures still report normally.
+
+- Fixed fuzzy, regex, and mixed search reliability in security mode by ranking against decrypted lightweight search snapshots and preserving type/tag filters in the security-mode FTS fallback path, without changing the search UI or result presentation.
+
+- Fixed semantic embedding backfill repeatedly rescheduling the same pending rows when encountering textless images, binary items, or temporarily unembeddable records; Deck now writes skip markers for those rows and continues advancing so later text items can still rebuild embeddings.
+
+- Fixed semantic embedding backfill in security mode potentially indexing Base64 ciphertext as plaintext when background Keychain decryption is temporarily unavailable; decrypt failures are now kept retryable, preventing unusable ciphertext vectors and reducing background CPU churn during repeated retries.
+
+- Fixed an unnecessary main-thread `NSImage(pasteboard:)` decode and PNG re-encode when copying PNG, TIFF, JPEG, or other supported image pasteboard data that already provides primary bytes; Deck now uses the image fallback only when primary image data is missing, reducing memory spikes and UI stalls for large image copies.
+
+- Fixed legacy rows with empty `unique_id` potentially receiving a different UUID during background metadata backfill than the one already assigned to the visible item; backfill now reuses the pending UUID from the read path so later delete, sync, and lookup operations by unique id remain consistent.
+
+- Fixed the cached UPSERT statement lifecycle when SQLite returns `SQLITE_SCHEMA`: Deck no longer finalizes the statement before the deferred reset / clear runs, and instead resets/clears first, finalizes the cached statement afterward, and prepares a fresh one on the next write to avoid undefined behavior during schema-change scenarios.
+
+### Assets
+
+- [`Deck.dmg`](https://github.com/yuzeguitarist/Deck/releases/download/v1.4.4/Deck.dmg)
+
 <!-- release-changelog-bot:tag:v1.4.3 -->
 ## v1.4.3 — v1.4.3 | herculean
 
