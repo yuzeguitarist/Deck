@@ -3,7 +3,7 @@ members = ["deckclip", "deckclip-core", "deckclip-protocol"]
 resolver = "2"
 
 [workspace.package]
-version = "0.0.3"
+version = "0.0.4"
 edition = "2021"
 license = "AGPL-3.0-only"
 
