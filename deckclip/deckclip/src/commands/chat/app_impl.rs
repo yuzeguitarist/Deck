@@ -757,11 +757,10 @@ impl ChatApp {
             .saturating_sub(self.body_scrollbar_grab_offset)
             .min(max_thumb_top);
         self.auto_scroll = false;
-        self.scroll = if max_thumb_top == 0 {
-            max_scroll
-        } else {
-            desired_thumb_top * max_scroll / max_thumb_top
-        };
+        self.scroll = desired_thumb_top
+            .saturating_mul(max_scroll)
+            .checked_div(max_thumb_top)
+            .unwrap_or(max_scroll);
         self.clear_quit_hint();
     }
 

@@ -1423,11 +1423,11 @@ pub(super) fn scrollbar_thumb_metrics(
         ((visible_lines * track_height) + total_lines.saturating_sub(1)) / total_lines;
     let thumb_height = thumb_height.clamp(1, track_height);
     let max_thumb_top = track_height.saturating_sub(thumb_height);
-    let thumb_top = if max_scroll == 0 {
-        0
-    } else {
-        scroll.min(max_scroll) * max_thumb_top / max_scroll
-    };
+    let thumb_top = scroll
+        .min(max_scroll)
+        .saturating_mul(max_thumb_top)
+        .checked_div(max_scroll)
+        .unwrap_or(0);
 
     (thumb_top, thumb_height)
 }
