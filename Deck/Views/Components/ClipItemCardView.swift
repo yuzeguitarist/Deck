@@ -883,6 +883,7 @@ struct ClipItemCardView: View {
             guard !Task.isCancelled else { return }
             smartState.analysis = cached.analysis
             smartState.isMarkdown = cached.isMarkdown
+            smartState.containsLaTeX = cached.containsLaTeX
             smartState.calculationResult = cached.calculationResult
         }
     }

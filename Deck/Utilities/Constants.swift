@@ -111,91 +111,79 @@ enum Const {
     static let selectionColor: Color = Color.white.opacity(0.2)
     static let borderColor: Color = Color.white.opacity(0.1)
 
-    /// 浅色模式下更深的灰色，深色模式下保持原样
-    static func adaptiveGray(_ lightOpacity: Double = 0.5, darkOpacity: Double = 0.3) -> Color {
+    /// Builds an AppKit dynamic color from a nonisolated context.
+    ///
+    /// With the Deck target's default `MainActor` isolation, creating the dynamic
+    /// provider closure from a SwiftUI view/static member can make the closure
+    /// MainActor-isolated. SwiftUI may resolve colors from its async DisplayLink
+    /// renderer, so keep the provider itself nonisolated to avoid executor traps.
+    nonisolated static func adaptiveColor(light: NSColor, dark: NSColor) -> Color {
         Color(nsColor: NSColor(name: nil) { appearance in
             if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
-                return NSColor.white.withAlphaComponent(darkOpacity)
+                return dark
             } else {
-                return NSColor.black.withAlphaComponent(lightOpacity)
+                return light
             }
         })
     }
 
+    /// 浅色模式下更深的灰色，深色模式下保持原样
+    nonisolated static func adaptiveGray(_ lightOpacity: Double = 0.5, darkOpacity: Double = 0.3) -> Color {
+        adaptiveColor(
+            light: NSColor.black.withAlphaComponent(lightOpacity),
+            dark: NSColor.white.withAlphaComponent(darkOpacity)
+        )
+    }
+
     /// 卡片选中边框颜色 - 浅色模式使用深色边框
-    static let selectionBorderColor: Color = Color(nsColor: NSColor(name: nil) { appearance in
-        if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
-            return NSColor.white.withAlphaComponent(0.5)
-        } else {
-            return NSColor.black.withAlphaComponent(0.4)
-        }
-    })
+    static let selectionBorderColor: Color = adaptiveColor(
+        light: NSColor.black.withAlphaComponent(0.4),
+        dark: NSColor.white.withAlphaComponent(0.5)
+    )
 
     /// 竖版行副标题里快捷粘贴 `#` 序号用色（与队列模式同排版，队列仍为 `.orange`）。
-    static let verticalQuickPasteSubtitleIndexColor: Color = Color(nsColor: NSColor(name: nil) { appearance in
-        if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
-            return NSColor.white.withAlphaComponent(0.72)
-        } else {
-            return NSColor.black.withAlphaComponent(0.52)
-        }
-    })
+    static let verticalQuickPasteSubtitleIndexColor: Color = adaptiveColor(
+        light: NSColor.black.withAlphaComponent(0.52),
+        dark: NSColor.white.withAlphaComponent(0.72)
+    )
 
     /// 卡片头部背景色 - 使用更高对比度的颜色
-    static let cardHeaderBackground: Color = Color(nsColor: NSColor(name: nil) { appearance in
-        if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
-            // 深色模式：较亮的深灰色背景（避免太黑）
-            return NSColor(red: 0.22, green: 0.22, blue: 0.24, alpha: 0.95)
-        } else {
-            // 浅色模式：淡灰色背景
-            return NSColor(red: 0.92, green: 0.92, blue: 0.94, alpha: 0.98)
-        }
-    })
+    static let cardHeaderBackground: Color = adaptiveColor(
+        light: NSColor(red: 0.92, green: 0.92, blue: 0.94, alpha: 0.98),
+        dark: NSColor(red: 0.22, green: 0.22, blue: 0.24, alpha: 0.95)
+    )
 
     /// 卡片内容背景色 - Material Design 风格的 surface 颜色
-    static let cardContentBackground: Color = Color(nsColor: NSColor(name: nil) { appearance in
-        if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
-            // 深色模式：#2C2C2E 较亮的深灰（类似系统控件背景）
-            return NSColor(red: 0.17, green: 0.17, blue: 0.18, alpha: 0.98)
-        } else {
-            // 浅色模式：纯白色
-            return NSColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 0.98)
-        }
-    })
+    static let cardContentBackground: Color = adaptiveColor(
+        light: NSColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 0.98),
+        dark: NSColor(red: 0.17, green: 0.17, blue: 0.18, alpha: 0.98)
+    )
 
     /// 按钮/元素背景色 - 更高对比度
-    static let elementBackground: Color = Color(nsColor: NSColor(name: nil) { appearance in
-        if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
-            return NSColor(red: 0.28, green: 0.28, blue: 0.30, alpha: 0.9)
-        } else {
-            return NSColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 0.06)
-        }
-    })
+    static let elementBackground: Color = adaptiveColor(
+        light: NSColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 0.06),
+        dark: NSColor(red: 0.28, green: 0.28, blue: 0.30, alpha: 0.9)
+    )
 
     /// 弹出窗口毛玻璃叠加层 - 增加背景不透明度
-    static let panelOverlay: Color = Color(nsColor: NSColor(name: nil) { appearance in
-        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    static let panelOverlay: Color = {
         if #available(macOS 26.0, *) {
-            return isDark
-                ? NSColor.black.withAlphaComponent(0.10)
-                : NSColor.white.withAlphaComponent(0.06)
+            return adaptiveColor(
+                light: NSColor.white.withAlphaComponent(0.06),
+                dark: NSColor.black.withAlphaComponent(0.10)
+            )
         }
-        if isDark {
-            // 深色模式：较浅的叠加层（避免太黑）
-            return NSColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 0.55)
-        }
-        // 浅色模式：淡色半透明叠加
-        return NSColor(red: 0.96, green: 0.96, blue: 0.97, alpha: 0.5)
-    })
+        return adaptiveColor(
+            light: NSColor(red: 0.96, green: 0.96, blue: 0.97, alpha: 0.5),
+            dark: NSColor(red: 0.12, green: 0.12, blue: 0.14, alpha: 0.55)
+        )
+    }()
 
     /// 卡片阴影 - 浅色模式更明显的阴影
-    static let cardShadowColor: Color = Color(nsColor: NSColor(name: nil) { appearance in
-        if appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
-            return NSColor.black.withAlphaComponent(0.3)
-        } else {
-            // 浅色模式需要更明显的阴影
-            return NSColor.black.withAlphaComponent(0.15)
-        }
-    })
+    static let cardShadowColor: Color = adaptiveColor(
+        light: NSColor.black.withAlphaComponent(0.15),
+        dark: NSColor.black.withAlphaComponent(0.3)
+    )
 
     static let cardShadowRadius: CGFloat = {
         if NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
