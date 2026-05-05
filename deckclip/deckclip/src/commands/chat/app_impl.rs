@@ -730,7 +730,6 @@ impl ChatApp {
         }
     }
 
-    #[allow(clippy::manual_checked_ops)]
     fn scroll_to_body_pointer(&mut self, row: u16) {
         let Some(area) = self.body_scrollbar_area else {
             return;

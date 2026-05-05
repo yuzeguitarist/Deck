@@ -326,7 +326,7 @@ dependencies = [
 
 [[package]]
 name = "deckclip"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -353,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "deckclip-core"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "anyhow",
  "deckclip-protocol",
@@ -372,7 +372,7 @@ dependencies = [
 
 [[package]]
 name = "deckclip-protocol"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "serde",
  "serde_json",

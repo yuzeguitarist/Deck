@@ -1520,7 +1520,7 @@ mod approval_input {
         fn matches_any(&self, expected_ids: &[&str]) -> bool {
             self.id()
                 .as_deref()
-                .is_some_and(|id| expected_ids.iter().any(|candidate| *candidate == id))
+                .is_some_and(|id| expected_ids.contains(&id))
         }
 
         fn matches_pointer(&self, other: TISInputSourceRef) -> bool {

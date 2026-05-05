@@ -1409,7 +1409,6 @@ pub(super) fn point_in_rect(column: u16, row: u16, rect: Rect) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
-#[allow(clippy::manual_checked_ops)]
 pub(super) fn scrollbar_thumb_metrics(
     total_lines: usize,
     visible_lines: usize,
