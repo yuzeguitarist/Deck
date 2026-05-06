@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use deckclip_protocol::message::{AuthRequest, AuthResponse, EventFrame, Request, Response};
+use deckclip_protocol::message::{
+    AuthRequest, AuthResponse, ChatStreamMessage, EventFrame, Request, Response,
+};
 use deckclip_protocol::version::PROTOCOL_VERSION;
 use serde_json::{json, Value};
 use tokio::time::timeout;
@@ -653,16 +655,10 @@ impl DeckClient {
         self.ensure_connected().await?;
 
         let transport = self.transport.as_mut().ok_or(DeckError::NotRunning)?;
-        let value: Value = transport.recv().await?;
-
-        if value.get("event").is_some() {
-            let event = serde_json::from_value::<EventFrame>(value)
-                .map_err(|error| DeckError::Protocol(error.to_string()))?;
-            return Ok(ChatStreamFrame::Event(event));
-        }
-
-        let response = serde_json::from_value::<Response>(value)
-            .map_err(|error| DeckError::Protocol(error.to_string()))?;
-        Ok(ChatStreamFrame::Response(response))
+        let msg: ChatStreamMessage = transport.recv().await?;
+        Ok(match msg {
+            ChatStreamMessage::Event(event) => ChatStreamFrame::Event(event),
+            ChatStreamMessage::Response(response) => ChatStreamFrame::Response(response),
+        })
     }
 }

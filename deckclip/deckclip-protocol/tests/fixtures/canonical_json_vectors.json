@@ -1,0 +1,26 @@
+[
+  {
+    "args": {},
+    "canonical": "{}"
+  },
+  {
+    "args": { "b": 2, "a": "x", "nested": { "z": true, "c": null } },
+    "canonical": "{\"a\":\"x\",\"b\":2,\"nested\":{\"c\":null,\"z\":true}}"
+  },
+  {
+    "args": [1, "a", null, true, false, { "k": "v" }],
+    "canonical": "[1,\"a\",null,true,false,{\"k\":\"v\"}]"
+  },
+  {
+    "args": { "text": "hello \"world\"\n你好" },
+    "canonical": "{\"text\":\"hello \\\"world\\\"\\n你好\"}"
+  },
+  {
+    "args": { "n": 42, "f": 1.25 },
+    "canonical": "{\"f\":1.25,\"n\":42}"
+  },
+  {
+    "args": { "empty": "", "flag": true },
+    "canonical": "{\"empty\":\"\",\"flag\":true}"
+  }
+]

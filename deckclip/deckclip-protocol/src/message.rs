@@ -76,6 +76,14 @@ pub struct EventFrame {
     pub data: Option<serde_json::Value>,
 }
 
+/// Wire payloads streamed after [`cmd::AI_CHAT_SEND`]: terminal [`Response`] or intermediate [`EventFrame`].
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ChatStreamMessage {
+    Event(EventFrame),
+    Response(Response),
+}
+
 // ─── Command Constants ───
 
 pub mod cmd {
