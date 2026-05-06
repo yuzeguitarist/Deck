@@ -12,9 +12,8 @@ struct CanonicalCase {
 
 #[test]
 fn canonical_json_matches_shared_fixture_file() {
-    const RAW: &str = include_str!(
-        "../../deckclip-protocol/tests/fixtures/canonical_json_vectors.json"
-    );
+    const RAW: &str =
+        include_str!("../../deckclip-protocol/tests/fixtures/canonical_json_vectors.json");
     let cases: Vec<CanonicalCase> = serde_json::from_str(RAW).expect("parse fixture JSON");
     for (idx, case) in cases.into_iter().enumerate() {
         assert_eq!(
