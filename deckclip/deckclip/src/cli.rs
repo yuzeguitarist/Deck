@@ -150,6 +150,9 @@ pub enum McpAction {
     /// 检查 Deck MCP 运行与配置环境
     Doctor,
 
+    /// 清理疑似空闲的 Deck MCP serve 进程
+    Cleanup(McpCleanupArgs),
+
     /// 输出或写入 MCP 客户端配置片段
     Setup(McpSetupArgs),
 }
@@ -180,6 +183,17 @@ pub struct McpSetupArgs {
     /// 覆盖 deckclip 启动命令
     #[arg(long)]
     pub command: Option<String>,
+}
+
+#[derive(clap::Args)]
+pub struct McpCleanupArgs {
+    /// 清理运行时间超过该小时数的 deckclip mcp serve 进程
+    #[arg(long, default_value_t = 2.0)]
+    pub idle_hours: f64,
+
+    /// 只预览将被清理的进程，不发送 SIGTERM
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(clap::Args)]

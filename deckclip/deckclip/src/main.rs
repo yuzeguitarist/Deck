@@ -151,6 +151,11 @@ fn localize_command(cmd: clap::Command) -> clap::Command {
                 .mut_subcommand("serve", |ss| ss.hide(true).about(t("cmd.mcp.serve")))
                 .mut_subcommand("tools", |ss| ss.about(t("cmd.mcp.tools")))
                 .mut_subcommand("doctor", |ss| ss.about(t("cmd.mcp.doctor")))
+                .mut_subcommand("cleanup", |ss| {
+                    ss.about(t("cmd.mcp.cleanup"))
+                        .mut_arg("idle_hours", |a| a.help(t("arg.mcp.cleanup.idle_hours")))
+                        .mut_arg("dry_run", |a| a.help(t("arg.mcp.cleanup.dry_run")))
+                })
                 .mut_subcommand("setup", |ss| {
                     ss.about(t("cmd.mcp.setup"))
                         .mut_arg("client", |a| a.help(t("arg.mcp.setup.client")))

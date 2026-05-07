@@ -1,9 +1,11 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{stdout, IsTerminal, Stdout, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Result};
 use crossterm::cursor::{Hide, MoveTo, Show};
@@ -30,14 +32,17 @@ use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use textwrap::Options;
+use tokio::time::timeout;
 use unicode_width::UnicodeWidthStr;
 
-use crate::cli::{McpAction, McpCommand, McpSetupArgs, McpSetupClient};
+use crate::cli::{McpAction, McpCleanupArgs, McpCommand, McpSetupArgs, McpSetupClient};
 use crate::i18n;
 use crate::output::{render_error_message, OutputMode};
 
 const MCP_SERVER_KEY: &str = "deck";
 const OPENCODE_SCHEMA_URL: &str = "https://opencode.ai/config.json";
+const MCP_INITIALIZE_TIMEOUT_ENV: &str = "DECKCLIP_MCP_INITIALIZE_TIMEOUT_SECONDS";
+const DEFAULT_MCP_INITIALIZE_TIMEOUT_SECS: u64 = 60;
 
 const TOOL_HEALTH_STATUS: &str = "deck_health_status";
 const TOOL_READ_LATEST: &str = "deck_read_latest_clipboard";
@@ -55,6 +60,7 @@ pub async fn run(command: McpCommand, output: OutputMode) -> Result<()> {
         Some(McpAction::Serve) => serve().await,
         Some(McpAction::Tools) => run_tools(output),
         Some(McpAction::Doctor) => run_doctor(output).await,
+        Some(McpAction::Cleanup(args)) => run_cleanup(args, output),
         Some(McpAction::Setup(args)) => run_setup_entry(args, output),
         None => run_default_setup(output),
     }
@@ -62,9 +68,35 @@ pub async fn run(command: McpCommand, output: OutputMode) -> Result<()> {
 
 async fn serve() -> Result<()> {
     let server = DeckMcpServer::new();
-    let running = serve_server(server, stdio()).await?;
+    let initialize_timeout_secs = mcp_initialize_timeout_secs();
+    let running = if initialize_timeout_secs == 0 {
+        serve_server(server, stdio()).await?
+    } else {
+        match timeout(
+            Duration::from_secs(initialize_timeout_secs),
+            serve_server(server, stdio()),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => bail!(
+                "{}",
+                format_i18n(
+                    "err.mcp_initialize_timeout",
+                    &[&initialize_timeout_secs.to_string()]
+                )
+            ),
+        }
+    };
     let _ = running.waiting().await?;
     Ok(())
+}
+
+fn mcp_initialize_timeout_secs() -> u64 {
+    env::var(MCP_INITIALIZE_TIMEOUT_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MCP_INITIALIZE_TIMEOUT_SECS)
 }
 
 fn run_tools(output: OutputMode) -> Result<()> {
@@ -93,6 +125,8 @@ async fn run_doctor(output: OutputMode) -> Result<()> {
         },
     };
 
+    let processes = list_mcp_serve_processes();
+
     let report = DoctorReport {
         recommended_command,
         command_in_path: command_in_path.map(path_to_string),
@@ -112,10 +146,65 @@ async fn run_doctor(output: OutputMode) -> Result<()> {
             DoctorTarget::new(McpSetupClient::Codex),
             DoctorTarget::new(McpSetupClient::Opencode),
         ],
+        processes,
     };
 
     let json_output = serde_json::to_value(&report)?;
     output.print_data(&render_doctor_report(&report), &json_output);
+    Ok(())
+}
+
+fn run_cleanup(args: McpCleanupArgs, output: OutputMode) -> Result<()> {
+    if !args.idle_hours.is_finite() || args.idle_hours < 0.0 {
+        bail!("{}", i18n::t("err.mcp_cleanup_invalid_idle_hours"));
+    }
+
+    let threshold_seconds = (args.idle_hours * 3600.0).ceil() as u64;
+    let current_pid = std::process::id();
+    let mut entries = Vec::new();
+
+    for process in list_mcp_serve_processes() {
+        let action = if process.pid == current_pid {
+            CleanupAction::SkippedCurrent
+        } else if process.elapsed_seconds.unwrap_or(0) < threshold_seconds {
+            CleanupAction::SkippedTooYoung
+        } else if args.dry_run {
+            CleanupAction::WouldTerminate
+        } else {
+            match terminate_process(process.pid) {
+                Ok(()) => CleanupAction::Terminated,
+                Err(err) => CleanupAction::Failed(err.to_string()),
+            }
+        };
+
+        entries.push(CleanupProcessEntry { process, action });
+    }
+
+    let report = CleanupReport {
+        threshold_hours: args.idle_hours,
+        threshold_seconds,
+        dry_run: args.dry_run,
+        scanned_count: entries.len(),
+        candidate_count: entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.action,
+                    CleanupAction::WouldTerminate
+                        | CleanupAction::Terminated
+                        | CleanupAction::Failed(_)
+                )
+            })
+            .count(),
+        terminated_count: entries
+            .iter()
+            .filter(|entry| matches!(entry.action, CleanupAction::Terminated))
+            .count(),
+        processes: entries,
+    };
+
+    let json_output = serde_json::to_value(&report)?;
+    output.print_data(&render_cleanup_report(&report), &json_output);
     Ok(())
 }
 
@@ -637,6 +726,29 @@ fn render_doctor_report(report: &DoctorReport) -> String {
     ));
     lines.push(String::new());
 
+    lines.push(i18n::t("mcp.doctor.section.processes"));
+    lines.push(format!(
+        "  {} {}",
+        i18n::t("mcp.doctor.label.process_count"),
+        report.processes.len()
+    ));
+    if report.processes.is_empty() {
+        lines.push(format!("  {}", i18n::t("mcp.doctor.process.none")));
+    } else {
+        for process in &report.processes {
+            lines.push(format!(
+                "  PID {}  PPID {} ({})  {} {}  {}",
+                process.pid,
+                process.ppid,
+                process.parent_name,
+                i18n::t("mcp.doctor.label.elapsed"),
+                process.elapsed,
+                process.command
+            ));
+        }
+    }
+    lines.push(String::new());
+
     lines.push(i18n::t("mcp.doctor.section.targets"));
     for target in &report.targets {
         lines.push(format!(
@@ -646,6 +758,64 @@ fn render_doctor_report(report: &DoctorReport) -> String {
     }
     lines.push(String::new());
     lines.push(i18n::t("mcp.doctor.footer"));
+
+    lines.join("\n")
+}
+
+fn render_cleanup_report(report: &CleanupReport) -> String {
+    let mut lines = vec![i18n::t("mcp.cleanup.title"), String::new()];
+
+    lines.push(format!(
+        "{} {:.2}h ({}s)",
+        i18n::t("mcp.cleanup.label.threshold"),
+        report.threshold_hours,
+        report.threshold_seconds
+    ));
+    lines.push(format!(
+        "{} {}",
+        i18n::t("mcp.cleanup.label.mode"),
+        if report.dry_run {
+            i18n::t("mcp.cleanup.mode.dry_run")
+        } else {
+            i18n::t("mcp.cleanup.mode.terminate")
+        }
+    ));
+    lines.push(format!(
+        "{} {}",
+        i18n::t("mcp.cleanup.label.scanned"),
+        report.scanned_count
+    ));
+    lines.push(format!(
+        "{} {}",
+        i18n::t("mcp.cleanup.label.candidates"),
+        report.candidate_count
+    ));
+    lines.push(format!(
+        "{} {}",
+        i18n::t("mcp.cleanup.label.terminated"),
+        report.terminated_count
+    ));
+    lines.push(String::new());
+    lines.push(i18n::t("mcp.cleanup.note.elapsed_only"));
+
+    if report.processes.is_empty() {
+        lines.push(i18n::t("mcp.cleanup.none"));
+        return lines.join("\n");
+    }
+
+    lines.push(String::new());
+    for entry in &report.processes {
+        lines.push(format!(
+            "PID {}  PPID {} ({})  {} {}  {}  {}",
+            entry.process.pid,
+            entry.process.ppid,
+            entry.process.parent_name,
+            i18n::t("mcp.doctor.label.elapsed"),
+            entry.process.elapsed,
+            entry.action.label(),
+            entry.process.command
+        ));
+    }
 
     lines.join("\n")
 }
@@ -1237,6 +1407,149 @@ fn path_to_string(path: impl AsRef<Path>) -> String {
     path.as_ref().display().to_string()
 }
 
+fn list_mcp_serve_processes() -> Vec<McpServeProcess> {
+    let Ok(output) = Command::new("/bin/ps")
+        .args(["-axo", "pid=,ppid=,etime=,comm=,args="])
+        .output()
+    else {
+        return Vec::new();
+    };
+
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut all_processes = Vec::new();
+    let mut process_names = HashMap::new();
+
+    for line in stdout.lines() {
+        let Some(row) = parse_ps_process_row(line) else {
+            continue;
+        };
+
+        process_names.insert(row.pid, process_display_name(&row));
+        all_processes.push(row);
+    }
+
+    let mut processes: Vec<McpServeProcess> = all_processes
+        .iter()
+        .filter(|row| is_deckclip_mcp_serve_command(&row.args))
+        .map(|row| McpServeProcess {
+            pid: row.pid,
+            ppid: row.ppid,
+            parent_name: process_names
+                .get(&row.ppid)
+                .cloned()
+                .unwrap_or_else(|| i18n::t("mcp.common.unavailable")),
+            elapsed: row.elapsed.clone(),
+            elapsed_seconds: parse_ps_elapsed_seconds(&row.elapsed),
+            command: row.args.clone(),
+        })
+        .collect();
+
+    processes.sort_by(|a, b| {
+        b.elapsed_seconds
+            .unwrap_or(0)
+            .cmp(&a.elapsed_seconds.unwrap_or(0))
+            .then_with(|| a.pid.cmp(&b.pid))
+    });
+
+    processes
+}
+
+fn parse_ps_process_row(line: &str) -> Option<PsProcessRow> {
+    let mut fields = line.split_whitespace();
+    let pid = fields.next()?.parse::<u32>().ok()?;
+    let ppid = fields.next()?.parse::<u32>().ok()?;
+    let elapsed = fields.next()?.to_string();
+    let command_name = fields.next()?.to_string();
+    let args = fields.collect::<Vec<_>>().join(" ");
+
+    if args.is_empty() {
+        return None;
+    }
+
+    Some(PsProcessRow {
+        pid,
+        ppid,
+        elapsed,
+        command_name,
+        args,
+    })
+}
+
+fn is_deckclip_mcp_serve_command(args: &str) -> bool {
+    let mut parts = args.split_whitespace();
+    let Some(executable) = parts.next() else {
+        return false;
+    };
+
+    executable.ends_with("deckclip") && parts.next() == Some("mcp") && parts.next() == Some("serve")
+}
+
+fn process_display_name(row: &PsProcessRow) -> String {
+    display_name_from_args(&row.args).unwrap_or_else(|| row.command_name.clone())
+}
+
+fn display_name_from_args(args: &str) -> Option<String> {
+    let executable = args.split_whitespace().next()?;
+
+    if let Some(app_suffix_index) = executable.find(".app/") {
+        let bundle_path = &executable[..app_suffix_index + ".app".len()];
+        if let Some(name) = Path::new(bundle_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+        {
+            return Some(name.to_string());
+        }
+    }
+
+    Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(ToOwned::to_owned)
+}
+
+fn parse_ps_elapsed_seconds(elapsed: &str) -> Option<u64> {
+    let (days, time) = match elapsed.split_once('-') {
+        Some((days, time)) => (days.parse::<u64>().ok()?, time),
+        None => (0, elapsed),
+    };
+
+    let parts: Vec<u64> = time
+        .split(':')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+
+    let seconds = match parts.as_slice() {
+        [minutes, seconds] => minutes * 60 + seconds,
+        [hours, minutes, seconds] => hours * 3600 + minutes * 60 + seconds,
+        _ => return None,
+    };
+
+    Some(days * 24 * 3600 + seconds)
+}
+
+fn terminate_process(pid: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(anyhow!(std::io::Error::last_os_error()))
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        bail!("{}", i18n::t("err.mcp_cleanup_unsupported_platform"))
+    }
+}
+
 fn format_i18n(key: &str, values: &[&str]) -> String {
     let mut rendered = i18n::t(key);
     for value in values {
@@ -1649,6 +1962,67 @@ struct DoctorReport {
     token: DoctorPathStatus,
     health: DoctorHealth,
     targets: Vec<DoctorTarget>,
+    processes: Vec<McpServeProcess>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct McpServeProcess {
+    pid: u32,
+    ppid: u32,
+    parent_name: String,
+    elapsed: String,
+    elapsed_seconds: Option<u64>,
+    command: String,
+}
+
+#[derive(Debug)]
+struct PsProcessRow {
+    pid: u32,
+    ppid: u32,
+    elapsed: String,
+    command_name: String,
+    args: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CleanupReport {
+    threshold_hours: f64,
+    threshold_seconds: u64,
+    dry_run: bool,
+    scanned_count: usize,
+    candidate_count: usize,
+    terminated_count: usize,
+    processes: Vec<CleanupProcessEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct CleanupProcessEntry {
+    process: McpServeProcess,
+    action: CleanupAction,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", content = "message")]
+enum CleanupAction {
+    SkippedCurrent,
+    SkippedTooYoung,
+    WouldTerminate,
+    Terminated,
+    Failed(String),
+}
+
+impl CleanupAction {
+    fn label(&self) -> String {
+        match self {
+            CleanupAction::SkippedCurrent => i18n::t("mcp.cleanup.process.skipped_current"),
+            CleanupAction::SkippedTooYoung => i18n::t("mcp.cleanup.process.skipped_too_young"),
+            CleanupAction::WouldTerminate => i18n::t("mcp.cleanup.process.would_terminate"),
+            CleanupAction::Terminated => i18n::t("mcp.cleanup.process.terminated"),
+            CleanupAction::Failed(message) => {
+                format!("{}: {}", i18n::t("mcp.cleanup.process.failed"), message)
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -2095,6 +2469,43 @@ mod tests {
         let object =
             normalize_tool_data(Some(json!({ "text": "hello" }))).expect("expected object data");
         assert_eq!(object["text"], json!("hello"));
+    }
+
+    #[test]
+    fn parse_ps_elapsed_seconds_supports_macos_formats() {
+        assert_eq!(parse_ps_elapsed_seconds("03:14"), Some(194));
+        assert_eq!(parse_ps_elapsed_seconds("02:03:04"), Some(7384));
+        assert_eq!(parse_ps_elapsed_seconds("01-02:03:04"), Some(93784));
+        assert_eq!(parse_ps_elapsed_seconds("not-time"), None);
+    }
+
+    #[test]
+    fn parse_ps_process_row_and_match_mcp_serve() {
+        let row = parse_ps_process_row(
+            " 1529 43000 18:47:07 deckclip /Users/jerry/.local/bin/deckclip mcp serve",
+        )
+        .expect("expected ps row");
+
+        assert_eq!(row.pid, 1529);
+        assert_eq!(row.ppid, 43000);
+        assert_eq!(row.elapsed, "18:47:07");
+        assert_eq!(row.command_name, "deckclip");
+        assert!(is_deckclip_mcp_serve_command(&row.args));
+        assert!(!is_deckclip_mcp_serve_command(
+            "/Users/jerry/.local/bin/deckclip mcp doctor"
+        ));
+    }
+
+    #[test]
+    fn display_name_from_args_prefers_app_bundle_name() {
+        assert_eq!(
+            display_name_from_args("/Applications/Codex.app/Contents/Resources/codex app-server"),
+            Some("Codex.app".to_string())
+        );
+        assert_eq!(
+            display_name_from_args("/Users/jerry/.local/bin/deckclip mcp serve"),
+            Some("deckclip".to_string())
+        );
     }
 
     #[test]
