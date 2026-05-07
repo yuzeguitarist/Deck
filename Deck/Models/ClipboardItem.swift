@@ -339,6 +339,52 @@ final class ClipboardItem: Identifiable, Equatable {
         return parts.joined(separator: "\n")
     }
 
+    /// File-system path that should be used for the source/app icon in list, card and preview chrome.
+    ///
+    /// Some Deck-owned sources are not real apps/files (for example `ios-sync://iphone`) or are
+    /// LAN receive records with no sender-side bundle path. Passing those pseudo paths to
+    /// `NSWorkspace` makes macOS render a generic document icon, so route Deck-owned sources back
+    /// to Deck's own app bundle icon.
+    var sourceIconFilePath: String? {
+        if usesDeckApplicationSourceIcon {
+            return Bundle.main.bundlePath
+        }
+
+        let trimmedPath = appPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPath.isEmpty else { return nil }
+
+        if let url = URL(string: trimmedPath), url.isFileURL {
+            return url.path
+        }
+
+        // Avoid treating custom URL schemes as file paths; those would fall back to the generic
+        // document icon. Known Deck-owned schemes are handled by `usesDeckApplicationSourceIcon`.
+        if trimmedPath.contains("://") {
+            return nil
+        }
+
+        return trimmedPath
+    }
+
+    private var usesDeckApplicationSourceIcon: Bool {
+        if receivedFromLAN {
+            return true
+        }
+
+        let trimmedPath = appPath.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if trimmedPath.hasPrefix("ios-sync://") || trimmedPath.hasPrefix("deckclip://") {
+            return true
+        }
+
+        let trimmedName = appName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowercasedName = trimmedName.lowercased()
+        return lowercasedName == "deck"
+            || lowercasedName == "deckclip"
+            || lowercasedName.hasPrefix("deck ")
+            || lowercasedName == "ios sync"
+            || trimmedName == "iOS 同步"
+    }
+
     var isUnsupported: Bool {
         pasteboardType == .deckUnsupported
     }

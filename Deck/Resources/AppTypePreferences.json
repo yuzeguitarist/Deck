@@ -34,6 +34,18 @@
       "code",
       "text"
     ],
+    "dev.zed.Zed-Preview": [
+      "code",
+      "text"
+    ],
+    "dev.zed.Zed-Nightly": [
+      "code",
+      "text"
+    ],
+    "dev.zed.Zed-Dev": [
+      "code",
+      "text"
+    ],
     "com.microsoft.VSCode": [
       "code",
       "text"
@@ -43,6 +55,10 @@
       "text"
     ],
     "com.sublimetext": [
+      "code",
+      "text"
+    ],
+    "com.sublimetext.4": [
       "code",
       "text"
     ],

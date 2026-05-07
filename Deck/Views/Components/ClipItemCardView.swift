@@ -73,6 +73,22 @@ private enum ClipItemCardCache {
     }()
 }
 
+private enum ClipItemContextMenuText {
+    static let rename = String(localized: "重命名")
+    static let copyOCRText = String(localized: "复制图片OCR文本")
+    static let openInDefaultBrowser = String(localized: "在默认浏览器中打开")
+    static let showQRCode = String(localized: "显示二维码")
+    static let unmarkImportant = String(localized: "取消重要")
+    static let markImportant = String(localized: "标记为重要")
+    static let unmarkTemporary = String(localized: "取消临时")
+    static let markTemporary = String(localized: "标记为临时")
+    static let steganography = String(localized: "隐写")
+    static let stegoToImage = String(localized: "隐写到图片...")
+    static let stegoToText = String(localized: "隐写为文本")
+    static let decodeStego = String(localized: "解密隐写")
+    static let systemShare = String(localized: "系统分享")
+}
+
 private struct ImageDecodeResult: @unchecked Sendable {
     let image: CGImage
     let pixelSize: CGSize?
@@ -316,6 +332,7 @@ struct ClipItemCardView: View {
 
     // Base64 图片缩略图（仅在文本/代码检测到 base64 图片时加载）
     @State private var base64Thumbnail: CGImage?
+    @State private var base64StateItemID: String?
     @State private var didAttemptBase64Decode: Bool = false
     @State private var isBase64ThumbnailLoading: Bool = false
 
@@ -324,6 +341,33 @@ struct ClipItemCardView: View {
 
     private var smartTaskID: SmartAnalysisTaskKey {
         item.smartAnalysisTaskKey(instantCalculationEnabled: instantCalculationEnabled)
+    }
+
+    private var shouldRunCardAssetPrefetchTask: Bool {
+        guard !item.isUnsupported, !item.isMissingFile else { return false }
+
+        switch item.itemType {
+        case .image:
+            return imageStateItemID != item.uniqueId ||
+                imageThumbnail == nil ||
+                imageFileSizeText == nil
+        case .text, .code:
+            return base64StateItemID != item.uniqueId ||
+                (!didAttemptBase64Decode && !isBase64ThumbnailLoading)
+        default:
+            return false
+        }
+    }
+
+    private var shouldRunSmartAnalysisTask: Bool {
+        guard !item.searchText.isEmpty else { return false }
+
+        switch item.itemType {
+        case .text, .richText:
+            return true
+        default:
+            return false
+        }
     }
 
     /// Whether the "Ask AI" context menu item should be shown.
@@ -662,8 +706,8 @@ struct ClipItemCardView: View {
     private var defaultHeaderContent: some View {
         HStack(spacing: Const.space8) {
             // App icon
-            if !item.appPath.isEmpty {
-                Image(nsImage: cachedIcon(for: item.appPath))
+            if let sourceIconPath = item.sourceIconFilePath {
+                Image(nsImage: cachedIcon(for: sourceIconPath))
                     .resizable()
                     .frame(width: headerAppIconSize, height: headerAppIconSize)
             }
@@ -791,8 +835,16 @@ struct ClipItemCardView: View {
                 }
             }
         }
-        .task(id: item.uniqueId) {
-            resetImageFileSizeState()
+        .task(id: item.uniqueId, priority: .utility) {
+            guard shouldRunCardAssetPrefetchTask else { return }
+            switch item.itemType {
+            case .image:
+                resetImageFileSizeState()
+            case .text, .code:
+                resetBase64ThumbnailStateIfNeeded()
+            default:
+                break
+            }
             await prefetchHeavyAssetsIfNeeded()
         }
         .frame(maxWidth: .infinity, maxHeight: effectiveCardSize - Const.cardHeaderSize)
@@ -872,12 +924,16 @@ struct ClipItemCardView: View {
                 plainCardTextContent
             }
         }
-        .task(id: smartTaskID) {
+        .task(id: smartTaskID, priority: .utility) {
+            guard shouldRunSmartAnalysisTask else {
+                smartState = SmartContentState()
+                return
+            }
             smartState = SmartContentState()
-            smartState.isLoading = true
-            defer { smartState.isLoading = false }
             try? await Task.sleep(nanoseconds: 120_000_000)
             guard !Task.isCancelled else { return }
+            smartState.isLoading = true
+            defer { smartState.isLoading = false }
             // 异步加载智能分析
             let cached = await SmartContentCache.shared.analysis(for: item)
             guard !Task.isCancelled else { return }
@@ -1166,6 +1222,15 @@ struct ClipItemCardView: View {
     }
 
     @MainActor
+    private func resetBase64ThumbnailStateIfNeeded() {
+        guard base64StateItemID != item.uniqueId else { return }
+        base64StateItemID = item.uniqueId
+        base64Thumbnail = nil
+        didAttemptBase64Decode = false
+        isBase64ThumbnailLoading = false
+    }
+
+    @MainActor
     private func loadImageFileSizeIfNeeded() async {
         guard item.itemType == .image else { return }
 
@@ -1342,6 +1407,8 @@ struct ClipItemCardView: View {
 
     @MainActor
     private func loadBase64ThumbnailIfNeeded() async {
+        resetBase64ThumbnailStateIfNeeded()
+
         // Base64 detection is relatively expensive; never run it repeatedly for the same item.
         guard !didAttemptBase64Decode else { return }
 
@@ -1640,14 +1707,14 @@ struct ClipItemCardView: View {
         Button {
             startTitleEditing()
         } label: {
-            Label(String(localized: "重命名"), systemImage: "pencil")
+            Label(ClipItemContextMenuText.rename, systemImage: "pencil")
         }
 
         if let ocrText {
             Button {
                 copyOCRTextToClipboard(ocrText)
             } label: {
-                Label(String(localized: "复制图片OCR文本"), systemImage: "text.viewfinder")
+                Label(ClipItemContextMenuText.copyOCRText, systemImage: "text.viewfinder")
             }
         }
 
@@ -1655,14 +1722,14 @@ struct ClipItemCardView: View {
             Button {
                 openURLFromPanel(url)
             } label: {
-                Label(String(localized: "在默认浏览器中打开"), systemImage: "safari")
+                Label(ClipItemContextMenuText.openInDefaultBrowser, systemImage: "safari")
             }
 
             if QRCodeViewModel.shouldOfferQRCode(for: url) {
                 Button {
                     QRCodeWindowController.shared.show(url: url, relativeTo: MainWindowController.shared.window)
                 } label: {
-                    Label(String(localized: "显示二维码"), systemImage: "qrcode")
+                    Label(ClipItemContextMenuText.showQRCode, systemImage: "qrcode")
                 }
             }
         }
@@ -1675,7 +1742,7 @@ struct ClipItemCardView: View {
             }
         } label: {
             Label(
-                isImportant ? String(localized: "取消重要") : String(localized: "标记为重要"),
+                isImportant ? ClipItemContextMenuText.unmarkImportant : ClipItemContextMenuText.markImportant,
                 systemImage: isImportant ? "pin.slash" : "pin.fill"
             )
         }
@@ -1687,7 +1754,7 @@ struct ClipItemCardView: View {
             }
         } label: {
             Label(
-                isTemporary ? String(localized: "取消临时") : String(localized: "标记为临时"),
+                isTemporary ? ClipItemContextMenuText.unmarkTemporary : ClipItemContextMenuText.markTemporary,
                 systemImage: isTemporary ? "timer" : "timer"
             )
         }
@@ -1728,7 +1795,7 @@ struct ClipItemCardView: View {
         }
 
         // Add to Template Library menu
-        let templateLibraries = TemplateLibraryService.shared.libraries
+        let templateLibraries = TemplateLibraryService.libraryMenuSnapshot()
         if !templateLibraries.isEmpty {
             Menu {
                 ForEach(templateLibraries) { library in
@@ -1785,16 +1852,16 @@ struct ClipItemCardView: View {
                 Button {
                     stegoEncodeToImage()
                 } label: {
-                    Label(String(localized: "隐写到图片..."), systemImage: "photo")
+                    Label(ClipItemContextMenuText.stegoToImage, systemImage: "photo")
                 }
 
                 Button {
                     stegoEncodeToText()
                 } label: {
-                    Label(String(localized: "隐写为文本"), systemImage: "text.badge.plus")
+                    Label(ClipItemContextMenuText.stegoToText, systemImage: "text.badge.plus")
                 }
             } label: {
-                Label(String(localized: "隐写"), systemImage: "lock.doc")
+                Label(ClipItemContextMenuText.steganography, systemImage: "lock.doc")
             }
         }
 
@@ -1802,7 +1869,7 @@ struct ClipItemCardView: View {
             Button {
                 stegoDecodeFromItem()
             } label: {
-                Label(String(localized: "解密隐写"), systemImage: "lock.open")
+                Label(ClipItemContextMenuText.decodeStego, systemImage: "lock.open")
             }
         }
         
@@ -1877,7 +1944,7 @@ struct ClipItemCardView: View {
                 }
             }
         } label: {
-            Label(String(localized: "系统分享"), systemImage: "square.and.arrow.up")
+            Label(ClipItemContextMenuText.systemShare, systemImage: "square.and.arrow.up")
         }
 
         // Ask AI

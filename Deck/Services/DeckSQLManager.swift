@@ -702,7 +702,11 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     /// 向量数值解析使用的 Locale（确保小数点格式一致）
     private nonisolated let vecNumberLocale = Locale(identifier: "en_US_POSIX")
     
-    /// 向量索引是否启用（安全模式下强制禁用）
+    /// sqlite-vec 模块是否已注册到当前 writer 连接。
+    ///
+    /// 注意：安全模式下仍会注册模块以便 SQLite 能解析/清理恢复备份里遗留的
+    /// vec0 virtual table 与触发器；真正的 vec 搜索/写入仍由调用点的
+    /// `!DeckUserDefaults.securityModeEnabled` guard 禁用。
     private nonisolated(unsafe) var vecIndexEnabled = false
     
     /// 已创建的向量表维度集合（如 [384, 1024]）
@@ -1640,6 +1644,130 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         return (dbPath, backupPath)
     }
 
+    private nonisolated func blobsDirectoryPath(for basePath: String) -> String {
+        (basePath as NSString).appendingPathComponent("Blobs")
+    }
+
+    private nonisolated func recoveryBlobsBackupPath(for backupPath: String) -> String {
+        backupPath + ".blobs"
+    }
+
+    private nonisolated func directoryExists(at url: URL) -> Bool {
+        var isDirectory = ObjCBool(false)
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            && isDirectory.boolValue
+    }
+
+    private nonisolated func referencedBlobState(in db: Connection) -> (hasReferences: Bool, firstMissingPath: String?) {
+        do {
+            let stmt = try db.prepare("""
+                SELECT blob_path
+                FROM ClipboardHistory
+                WHERE blob_path IS NOT NULL
+                  AND blob_path != ''
+                """)
+            var hasReferences = false
+            while let row = try stmt.failableNext() {
+                guard let path = row[0] as? String, !path.isEmpty else { continue }
+                hasReferences = true
+                if !FileManager.default.fileExists(atPath: path) {
+                    return (true, path)
+                }
+            }
+            return (hasReferences, nil)
+        } catch {
+            log.debug("Failed to inspect referenced blob files before backup: \(error.localizedDescription)")
+        }
+        return (false, nil)
+    }
+
+    @discardableResult
+    private nonisolated func clearMissingBlobReferences(reason: String) -> Int {
+        let cleared = withDB {
+            guard let db = self.db, let table = self.table else { return 0 }
+            let rows = Array(try db.prepare(
+                table
+                    .select(Col.id, Col.blobPath)
+                    .filter(Col.blobPath != nil)
+                    .order(Col.id.asc)
+            ))
+            var cleared = 0
+            for row in rows {
+                let id = try row.get(Col.id)
+                guard let path = try row.get(Col.blobPath), !path.isEmpty else { continue }
+                guard !FileManager.default.fileExists(atPath: path) else { continue }
+                let query = table.filter(Col.id == id)
+                try db.run(query.update(Col.blobPath <- nil))
+                cleared += 1
+            }
+            return cleared
+        } ?? 0
+
+        if cleared > 0 {
+            log.warn("Cleared \(cleared) missing blob references after \(reason)")
+        }
+        return cleared
+    }
+
+    private nonisolated func commitStagedDatabaseAndBlobSnapshot(
+        databaseURL: URL,
+        stagedDatabaseURL: URL,
+        blobsURL: URL,
+        stagedBlobsURL: URL?,
+        removeExistingBlobsIfNoStage: Bool
+    ) throws {
+        let fileManager = FileManager.default
+        let parentURL = databaseURL.deletingLastPathComponent()
+        let databaseRollbackURL = parentURL.appendingPathComponent(".\(databaseURL.lastPathComponent).rollback-\(UUID().uuidString)")
+        let blobsRollbackURL = parentURL.appendingPathComponent(".\(blobsURL.lastPathComponent).rollback-\(UUID().uuidString)")
+        let shouldTouchBlobs = stagedBlobsURL != nil || removeExistingBlobsIfNoStage
+        var hasDatabaseRollback = false
+        var hasBlobsRollback = false
+
+        if fileManager.fileExists(atPath: databaseRollbackURL.path) {
+            try fileManager.removeItem(at: databaseRollbackURL)
+        }
+        if fileManager.fileExists(atPath: blobsRollbackURL.path) {
+            try fileManager.removeItem(at: blobsRollbackURL)
+        }
+
+        if fileManager.fileExists(atPath: databaseURL.path) {
+            try fileManager.moveItem(at: databaseURL, to: databaseRollbackURL)
+            hasDatabaseRollback = true
+        }
+        if shouldTouchBlobs, fileManager.fileExists(atPath: blobsURL.path) {
+            try fileManager.moveItem(at: blobsURL, to: blobsRollbackURL)
+            hasBlobsRollback = true
+        }
+
+        do {
+            try fileManager.moveItem(at: stagedDatabaseURL, to: databaseURL)
+            if let stagedBlobsURL {
+                try fileManager.moveItem(at: stagedBlobsURL, to: blobsURL)
+            }
+            if hasDatabaseRollback, fileManager.fileExists(atPath: databaseRollbackURL.path) {
+                try? fileManager.removeItem(at: databaseRollbackURL)
+            }
+            if hasBlobsRollback, fileManager.fileExists(atPath: blobsRollbackURL.path) {
+                try? fileManager.removeItem(at: blobsRollbackURL)
+            }
+        } catch {
+            if fileManager.fileExists(atPath: databaseURL.path) {
+                try? fileManager.removeItem(at: databaseURL)
+            }
+            if shouldTouchBlobs, fileManager.fileExists(atPath: blobsURL.path) {
+                try? fileManager.removeItem(at: blobsURL)
+            }
+            if hasDatabaseRollback, fileManager.fileExists(atPath: databaseRollbackURL.path) {
+                try? fileManager.moveItem(at: databaseRollbackURL, to: databaseURL)
+            }
+            if hasBlobsRollback, fileManager.fileExists(atPath: blobsRollbackURL.path) {
+                try? fileManager.moveItem(at: blobsRollbackURL, to: blobsURL)
+            }
+            throw error
+        }
+    }
+
     private nonisolated func configureSQLiteConnection(_ connection: Connection, role: String, readOnly: Bool) {
         connection.busyTimeout = 5.0
 
@@ -1750,7 +1878,6 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     private func initializeSQLiteVecOnConnection() {
         syncOnDBQueue {
             guard let db = db else { return }
-            guard !DeckUserDefaults.securityModeEnabled else { return }
 
             var error: UnsafeMutablePointer<Int8>?
             // sqlite-vec is compiled with SQLITE_CORE, so pApi can be nil.
@@ -1773,7 +1900,6 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     private func loadSQLiteVecExtensionIfAvailable() {
         // Static init succeeded; skip dynamic extension loading.
         if vecIndexEnabled { return }
-        guard !DeckUserDefaults.securityModeEnabled else { return }
 
         let candidates = vecExtensionCandidateURLs()
         guard let url = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
@@ -2505,23 +2631,37 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             return false
         }
 
-        return syncOnDBQueue {
+        let restored = syncOnDBQueue {
             closeReadOnlyDatabase()
             finalizeCachedStatements()
             db = nil
             table = nil
             return restoreDatabaseFromBackup(dbPath: paths.dbPath, backupPath: paths.backupPath)
         }
+        reinitialize()
+        if restored {
+            clearMissingBlobReferences(reason: "recovery backup restore")
+            rebuildFTSIndex()
+        }
+        return restored
     }
 
     private func removeRecoveryBackupFiles(at backupPath: String) {
         let fileManager = FileManager.default
         let tempPath = backupPath + ".tmp"
+        let blobsBackupPath = recoveryBlobsBackupPath(for: backupPath)
+        let blobsTempPath = blobsBackupPath + ".tmp"
         if fileManager.fileExists(atPath: backupPath) {
             try? fileManager.removeItem(atPath: backupPath)
         }
         if fileManager.fileExists(atPath: tempPath) {
             try? fileManager.removeItem(atPath: tempPath)
+        }
+        if fileManager.fileExists(atPath: blobsBackupPath) {
+            try? fileManager.removeItem(atPath: blobsBackupPath)
+        }
+        if fileManager.fileExists(atPath: blobsTempPath) {
+            try? fileManager.removeItem(atPath: blobsTempPath)
         }
     }
     
@@ -2551,23 +2691,45 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         let dbURL = URL(fileURLWithPath: dbPath)
         let backupURL = URL(fileURLWithPath: backupPath)
         let tempURL = URL(fileURLWithPath: backupPath + ".tmp")
+        let blobsURL = URL(fileURLWithPath: blobsDirectoryPath(for: dbURL.deletingLastPathComponent().path), isDirectory: true)
+        let blobsBackupURL = URL(fileURLWithPath: recoveryBlobsBackupPath(for: backupPath), isDirectory: true)
+        let blobsTempURL = URL(fileURLWithPath: recoveryBlobsBackupPath(for: backupPath) + ".tmp", isDirectory: true)
 
-        let copyBlock: @Sendable () -> Void = {
+        let copyBlock: @Sendable (_ requiresBlobSnapshot: Bool) -> Void = { requiresBlobSnapshot in
             do {
                 if FileManager.default.fileExists(atPath: tempURL.path) {
                     try FileManager.default.removeItem(at: tempURL)
                 }
-                try FileManager.default.copyItem(at: dbURL, to: tempURL)
-                if FileManager.default.fileExists(atPath: backupURL.path) {
-                    _ = try FileManager.default.replaceItemAt(backupURL, withItemAt: tempURL)
-                } else {
-                    try FileManager.default.moveItem(at: tempURL, to: backupURL)
+                if FileManager.default.fileExists(atPath: blobsTempURL.path) {
+                    try FileManager.default.removeItem(at: blobsTempURL)
                 }
+
+                let hasBlobs = self.directoryExists(at: blobsURL)
+                if requiresBlobSnapshot, !hasBlobs {
+                    throw NSError(domain: "DeckSQL", code: -31, userInfo: [
+                        NSLocalizedDescriptionKey: "Database references external blobs but Blobs directory is missing"
+                    ])
+                }
+                if hasBlobs {
+                    try FileManager.default.copyItem(at: blobsURL, to: blobsTempURL)
+                }
+
+                try FileManager.default.copyItem(at: dbURL, to: tempURL)
+                try self.commitStagedDatabaseAndBlobSnapshot(
+                    databaseURL: backupURL,
+                    stagedDatabaseURL: tempURL,
+                    blobsURL: blobsBackupURL,
+                    stagedBlobsURL: hasBlobs ? blobsTempURL : nil,
+                    removeExistingBlobsIfNoStage: true
+                )
                 log.info("Database backup updated")
             } catch {
                 log.warn("Failed to backup database: \(error.localizedDescription)")
                 if FileManager.default.fileExists(atPath: tempURL.path) {
                     try? FileManager.default.removeItem(at: tempURL)
+                }
+                if FileManager.default.fileExists(atPath: blobsTempURL.path) {
+                    try? FileManager.default.removeItem(at: blobsTempURL)
                 }
             }
         }
@@ -2579,7 +2741,12 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
             } catch {
                 log.debug("Failed to checkpoint WAL before backup: \(error.localizedDescription)")
             }
-            copyBlock()
+            let blobState = self.referencedBlobState(in: db)
+            if let missingPath = blobState.firstMissingPath {
+                log.warn("Database backup skipped because referenced blob file is missing: \(missingPath)")
+                return
+            }
+            copyBlock(blobState.hasReferences)
         }
 
         if synchronous {
@@ -2600,24 +2767,44 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         let dbURL = URL(fileURLWithPath: dbPath)
         let backupURL = URL(fileURLWithPath: backupPath)
         let tempURL = URL(fileURLWithPath: dbPath + ".restore")
+        let blobsURL = URL(fileURLWithPath: blobsDirectoryPath(for: dbURL.deletingLastPathComponent().path), isDirectory: true)
+        let blobsBackupURL = URL(fileURLWithPath: recoveryBlobsBackupPath(for: backupPath), isDirectory: true)
+        let blobsTempURL = URL(fileURLWithPath: blobsURL.path + ".restore", isDirectory: true)
 
         do {
             if fileManager.fileExists(atPath: tempURL.path) {
                 try fileManager.removeItem(at: tempURL)
             }
-            try fileManager.copyItem(at: backupURL, to: tempURL)
-            if fileManager.fileExists(atPath: dbURL.path) {
-                _ = try fileManager.replaceItemAt(dbURL, withItemAt: tempURL)
-            } else {
-                try fileManager.moveItem(at: tempURL, to: dbURL)
+            if fileManager.fileExists(atPath: blobsTempURL.path) {
+                try fileManager.removeItem(at: blobsTempURL)
             }
+            try fileManager.copyItem(at: backupURL, to: tempURL)
+            let hasBlobBackup = directoryExists(at: blobsBackupURL)
+            if hasBlobBackup {
+                try fileManager.copyItem(at: blobsBackupURL, to: blobsTempURL)
+            }
+            try commitStagedDatabaseAndBlobSnapshot(
+                databaseURL: dbURL,
+                stagedDatabaseURL: tempURL,
+                blobsURL: blobsURL,
+                stagedBlobsURL: hasBlobBackup ? blobsTempURL : nil,
+                removeExistingBlobsIfNoStage: false
+            )
             cleanupSQLiteSidecarFiles(for: dbPath)
+            if hasBlobBackup {
+                log.info("Blob recovery backup restored")
+            } else {
+                log.warn("Recovery backup has no blob snapshot; restored database may reference missing external blobs")
+            }
             log.info("Database restored from backup")
             return true
         } catch {
             log.error("Failed to restore database from backup: \(error.localizedDescription)")
             if fileManager.fileExists(atPath: tempURL.path) {
                 try? fileManager.removeItem(at: tempURL)
+            }
+            if fileManager.fileExists(atPath: blobsTempURL.path) {
+                try? fileManager.removeItem(at: blobsTempURL)
             }
             return false
         }
@@ -2974,16 +3161,33 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
         }
     }
 
+    private nonisolated func dropFTS5TableAndTriggers(in db: Connection) throws {
+        try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_ai")
+        try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_ad")
+        try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_au")
+        try db.run("DROP TABLE IF EXISTS ClipboardHistory_fts")
+        ftsUsesTrigram = false
+    }
+
+    private nonisolated func dropFTS5TableAndTriggers(reason: String) {
+        syncOnDBQueue {
+            guard let db = db else { return }
+            do {
+                try dropFTS5TableAndTriggers(in: db)
+                log.info("FTS5 table and triggers dropped: \(reason)")
+            } catch {
+                log.warn("Failed to drop FTS5 table/triggers for \(reason): \(error.localizedDescription)")
+            }
+        }
+    }
+
     private nonisolated func createFTS5Table(forceRecreate: Bool = false, preferTrigram: Bool = true) {
         syncOnDBQueue {
             guard let db = db else { return }
             let shouldRecreateIndex = forceRecreate || DeckUserDefaults.securityModeEnabled
             if shouldRecreateIndex {
                 do {
-                    try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_ai")
-                    try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_ad")
-                    try db.run("DROP TRIGGER IF EXISTS ClipboardHistory_au")
-                    try db.run("DROP TABLE IF EXISTS ClipboardHistory_fts")
+                    try dropFTS5TableAndTriggers(in: db)
                 } catch {
                     log.warn("Failed to drop existing FTS5 table/triggers: \(error.localizedDescription)")
                 }
@@ -3170,10 +3374,14 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
 
     /// Rebuild FTS index from existing data (call after migration or if FTS gets out of sync)
     nonisolated func rebuildFTSIndex(preferTrigram: Bool? = nil) {
+        rebuildFTSIndex(preferTrigram: preferTrigram, respectSecurityMode: true)
+    }
+
+    private nonisolated func rebuildFTSIndex(preferTrigram: Bool? = nil, respectSecurityMode: Bool) {
         let shouldPreferTrigram = preferTrigram ?? syncOnDBQueue { ftsUsesTrigram }
         createFTS5Table(forceRecreate: true, preferTrigram: shouldPreferTrigram)
 
-        guard !DeckUserDefaults.securityModeEnabled else {
+        guard !respectSecurityMode || !DeckUserDefaults.securityModeEnabled else {
             invalidateSearchCache()
             log.info("FTS5 index cleared and rebuild skipped in security mode")
             return
@@ -3371,11 +3579,11 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     }
 
     private func resetSemanticEmbeddingCachesForModelUpgrade() {
+        dropVecTables()
         withDB {
             guard let db = self.db else { return }
             try db.run("DELETE FROM ClipboardHistory_embedding")
         }
-        dropVecTables()
         SemanticSearchService.shared.clearCache()
         log.info("Semantic embedding cache reset for \(SemanticSearchService.embeddingModelVersion)")
     }
@@ -5034,19 +5242,28 @@ extension DeckSQLManager {
     }
 
     func deleteAll() {
-        _ = withDB {
+        let preferTrigram = syncOnDBQueue { ftsUsesTrigram }
+        dropFTS5TableAndTriggers(reason: "delete all")
+        dropVecTables()
+
+        let deletedMainRows = withDB {
             guard let db = self.db, let table = self.table else { return false }
             try db.run(table.delete())
             return true
-        }
+        } ?? false
         _ = withDB {
             guard let db = self.db else { return false }
             try db.run("DELETE FROM ClipboardHistory_embedding")
             return true
         }
-        dropVecTables()
+        if deletedMainRows {
+            createFTS5Table(forceRecreate: true, preferTrigram: preferTrigram)
+            log.info("Deleted all items from database")
+        } else {
+            rebuildFTSIndex(preferTrigram: preferTrigram)
+            log.warn("Delete all items did not complete; FTS index was rebuilt from remaining rows")
+        }
         invalidateSearchCache()  // 清空所有搜索缓存
-        log.info("Deleted all items from database")
         scheduleDatabaseVacuum(reason: "delete all")
     }
 
@@ -6654,6 +6871,10 @@ extension DeckSQLManager {
 
         await log.info("Starting encryption migration: encrypt=\(encrypt)")
 
+        let ftsPreferTrigram = syncOnDBQueue { ftsUsesTrigram }
+        let shouldRestoreFTSOnFailure = !DeckUserDefaults.securityModeEnabled
+        dropFTS5TableAndTriggers(reason: "encryption migration")
+
         // 使用分批处理避免一次性加载全表到内存
         let batchSize = 100
         var lastId: Int64 = 0
@@ -6708,6 +6929,9 @@ extension DeckSQLManager {
         }
 
         if hasError {
+            if shouldRestoreFTSOnFailure {
+                rebuildFTSIndex(preferTrigram: ftsPreferTrigram, respectSecurityMode: false)
+            }
             await log.error("Encryption migration failed after processing \(totalProcessed) items")
             return false
         }
@@ -6717,6 +6941,9 @@ extension DeckSQLManager {
         // 迁移 blob 文件的加密状态
         let blobMigrated = await BlobStorage.shared.migrateEncryption(encrypt: encrypt)
         guard blobMigrated else {
+            if shouldRestoreFTSOnFailure {
+                rebuildFTSIndex(preferTrigram: ftsPreferTrigram, respectSecurityMode: false)
+            }
             await log.error("Encryption migration failed: blob migration failed")
             return false
         }
@@ -6724,12 +6951,19 @@ extension DeckSQLManager {
         // 更新数据库中的 blob_path（加密后缀变化）
         let blobPathUpdated = await updateBlobPathsAfterMigration(encrypt: encrypt)
         guard blobPathUpdated else {
+            if shouldRestoreFTSOnFailure {
+                rebuildFTSIndex(preferTrigram: ftsPreferTrigram, respectSecurityMode: false)
+            }
             await log.error("Encryption migration failed: blob_path update failed")
             return false
         }
 
         // 迁移语义向量缓存表的加密状态
         await migrateEmbeddingEncryption(encrypt: encrypt, using: migrationKey)
+
+        if !encrypt {
+            rebuildFTSIndex(preferTrigram: ftsPreferTrigram, respectSecurityMode: false)
+        }
 
         // 加密状态变化后，缓存的解密文本全部失效
         invalidateSearchCache()
@@ -6746,6 +6980,7 @@ extension DeckSQLManager {
         using migrationKey: SymmetricKey,
         db: Connection
     ) -> Bool {
+        var currentID: Int64?
         do {
             try db.transaction {
                 let updateStatement = try db.prepare("""
@@ -6763,6 +6998,7 @@ extension DeckSQLManager {
 
                 for row in rows {
                     let id = try row.get(Col.id)
+                    currentID = id
                     let rawData = try row.get(Col.data)
                     let rawPreviewData = try row.get(Col.previewData)
                     let rawSearchText = try row.get(Col.searchText)
@@ -6888,6 +7124,12 @@ extension DeckSQLManager {
             }
             return true
         } catch {
+            if let currentID {
+                log.error("Encryption migration batch failed at id=\(currentID): \(error.localizedDescription)")
+            } else {
+                log.error("Encryption migration batch failed before row id was read: \(error.localizedDescription)")
+            }
+            log.debug("Encryption migration batch error detail: \(String(reflecting: error))")
             return false
         }
     }
@@ -6918,9 +7160,28 @@ extension DeckSQLManager {
                 }
 
                 if newPath != oldPath {
-                    guard FileManager.default.fileExists(atPath: newPath) else {
-                        hasError = true
-                        await log.error("Blob path migration missing file for id=\(id): \(newPath)")
+                    let oldFileExists = FileManager.default.fileExists(atPath: oldPath)
+                    let newFileExists = FileManager.default.fileExists(atPath: newPath)
+                    if !newFileExists {
+                        if oldFileExists {
+                            hasError = true
+                            await log.error("Blob path migration expected migrated file for id=\(id): \(newPath)")
+                            continue
+                        }
+                        // Legacy recovery backups used to copy only Deck.sqlite3. If the user
+                        // cleared data after such a backup, restored rows can reference external
+                        // blobs that no longer exist. Do not keep suffix-flipping stale paths
+                        // around forever; clear the reference so backup/restore and future
+                        // security-mode toggles stop treating the row as externally recoverable.
+                        await log.warn("Blob path migration found missing blob for id=\(id); clearing stale blob reference")
+                        let cleared: Bool = await withDBAsync {
+                            guard let db = self.db, let table = self.table else { return false }
+                            let updateQuery = table.filter(Col.id == id)
+                            return try db.run(updateQuery.update(Col.blobPath <- nil)) > 0
+                        } ?? false
+                        if !cleared {
+                            hasError = true
+                        }
                         continue
                     }
                     let updated: Bool = await withDBAsync {
