@@ -446,6 +446,15 @@ nonisolated final class ScriptPluginService: @unchecked Sendable {
         loadPlugins()
     }
 
+    /// Lightweight snapshot for high-frequency menus. This avoids making every
+    /// clipboard row/card observe `plugins` just to decide whether the submenu
+    /// has entries.
+    func pluginsSnapshot() -> [ScriptPlugin] {
+        pluginsLock.lock()
+        defer { pluginsLock.unlock() }
+        return plugins
+    }
+
     deinit {
         stopScriptWatchers()
     }

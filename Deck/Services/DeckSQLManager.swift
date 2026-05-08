@@ -4591,6 +4591,8 @@ extension DeckSQLManager {
     /// lightweight-field decryption without materializing payload blobs.
     func searchSnapshot(from row: Row) -> SearchSnapshot? {
         do {
+            let id = try row.get(Col.id)
+            let timestamp = try row.get(Col.ts)
             let uniqueId = try row.get(Col.uniqueId)
             let rawSearchText = try row.get(Col.searchText)
             let rawAppName = try row.get(Col.appName)
@@ -4605,6 +4607,8 @@ extension DeckSQLManager {
 
             return SearchSnapshot(
                 uniqueId: uniqueId,
+                rowId: id,
+                timestamp: timestamp,
                 title: customTitle ?? "",
                 text: searchText,
                 appName: appName
@@ -5422,6 +5426,20 @@ extension DeckSQLManager {
             return try db.run(update)
         }) {
             await log.debug("Updated tag for \(count) items")
+        }
+    }
+
+    func clearTagFromItems(tagId: Int) async {
+        guard tagId != -1 else { return }
+        if let count: Int = await withDBAsync({
+            guard let db = self.db, let table = self.table else { return 0 }
+            let query = table.filter(Col.tagId == tagId)
+            return try db.run(query.update(Col.tagId <- -1))
+        }) {
+            await log.debug("Cleared tag \(tagId) from \(count) items")
+            if count > 0 {
+                invalidateSearchCache()
+            }
         }
     }
 

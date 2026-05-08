@@ -2389,6 +2389,171 @@ extension ClipboardItem {
         return provider
     }
 
+    func dragItemProvider() -> NSItemProvider {
+        switch itemType {
+        case .image:
+            return makeImageDragItemProvider()
+        case .file:
+            return makeFileDragItemProvider()
+        case .color:
+            return Self.makeTextDragItemProvider(content: searchText, suggestedName: "color", extension: "txt")
+        default:
+            let (baseName, ext) = SmartTextService.shared.generateSmartFilename(for: searchText)
+            return Self.makeTextDragItemProvider(content: searchText, suggestedName: baseName, extension: ext)
+        }
+    }
+
+    private func makeImageDragItemProvider() -> NSItemProvider {
+        let provider = NSItemProvider()
+        let sourceFileURL = existingImageFileURLForDrag()
+        let imageData = sourceFileURL == nil ? (resolvedData() ?? (data.isEmpty ? nil : data)) : nil
+        let imageType = Self.dragImageType(
+            from: imageData,
+            fileURL: sourceFileURL,
+            fallbackPasteboardType: imagePasteboardType
+        )
+        let ext = imageType.preferredFilenameExtension ?? "png"
+        let filename = "image_\(timestamp).\(ext)"
+
+        if let imageData {
+            provider.registerDataRepresentation(
+                forTypeIdentifier: imageType.identifier,
+                visibility: .all,
+                loadHandler: Self.makeDataRepresentationHandler(data: imageData)
+            )
+        }
+
+        do {
+            let dragFileURL: URL
+            if let sourceFileURL {
+                dragFileURL = try TemporaryFileManager.shared.copyFile(
+                    at: sourceFileURL,
+                    filename: sourceFileURL.lastPathComponent.isEmpty ? filename : sourceFileURL.lastPathComponent
+                )
+            } else if let imageData {
+                dragFileURL = try TemporaryFileManager.shared.writeData(imageData, filename: filename)
+            } else {
+                return provider
+            }
+
+            provider.registerFileRepresentation(
+                forTypeIdentifier: imageType.identifier,
+                fileOptions: [],
+                visibility: .all,
+                loadHandler: Self.makeDragFileRepresentationHandler(fileURL: dragFileURL)
+            )
+            provider.suggestedName = dragFileURL.lastPathComponent
+        } catch {
+            log.error("Failed to prepare image drag file: \(error)")
+        }
+
+        return provider
+    }
+
+    private func existingImageFileURLForDrag() -> URL? {
+        guard pasteboardType == .fileURL,
+              let path = primaryFilePath,
+              isFileURLImage else {
+            return nil
+        }
+        let fileURL = URL(fileURLWithPath: path)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
+        return fileURL
+    }
+
+    private func makeFileDragItemProvider() -> NSItemProvider {
+        guard let paths = filePaths,
+              let firstPath = paths.first else {
+            return NSItemProvider()
+        }
+
+        let fileURL = URL(fileURLWithPath: Self.normalizeFilePath(firstPath))
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            return NSItemProvider()
+        }
+
+        let provider = NSItemProvider(contentsOf: fileURL) ?? NSItemProvider()
+        provider.suggestedName = fileURL.lastPathComponent
+        return provider
+    }
+
+    private static func makeTextDragItemProvider(
+        content: String,
+        suggestedName: String,
+        extension ext: String
+    ) -> NSItemProvider {
+        let cleanName = suggestedName
+            .components(separatedBy: CharacterSet(charactersIn: "/\\:*?\"<>|\n\r\t"))
+            .joined(separator: "_")
+            .trimmingCharacters(in: .whitespaces)
+        let safeName = cleanName.isEmpty ? "text" : String(cleanName.prefix(50))
+        let filename = "\(safeName).\(ext)"
+        do {
+            let tempURL = try TemporaryFileManager.shared.writeText(content, filename: filename)
+            let provider = NSItemProvider(contentsOf: tempURL) ?? NSItemProvider()
+            provider.suggestedName = filename
+            return provider
+        } catch {
+            log.error("Failed to prepare text drag file: \(error)")
+            return NSItemProvider()
+        }
+    }
+
+    private static func dragImageType(
+        from data: Data?,
+        fileURL: URL?,
+        fallbackPasteboardType: PasteboardType
+    ) -> UTType {
+        if let ext = fileURL?.pathExtension,
+           !ext.isEmpty,
+           let type = UTType(filenameExtension: ext),
+           type.conforms(to: .image) {
+            return type
+        }
+        if let data, let type = detectDragImageType(from: data) {
+            return type
+        }
+        if let type = UTType(fallbackPasteboardType.rawValue),
+           type.conforms(to: .image) {
+            return type
+        }
+        return .png
+    }
+
+    private static func detectDragImageType(from data: Data) -> UTType? {
+        guard data.count >= 8 else { return nil }
+
+        return data.withUnsafeBytes { rawBuffer -> UTType? in
+            let bytes = rawBuffer.bindMemory(to: UInt8.self)
+            guard bytes.count >= 8 else { return nil }
+
+            // PNG: 89 50 4E 47 0D 0A 1A 0A
+            if bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47 {
+                return .png
+            }
+            // JPEG: FF D8 FF
+            if bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
+                return .jpeg
+            }
+            // GIF: 47 49 46 38
+            if bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x38 {
+                return .gif
+            }
+            // WebP: "RIFF" .... "WEBP"
+            if bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46,
+               bytes.count >= 12,
+               bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50 {
+                return .webP
+            }
+            // TIFF: 49 49 2A 00 or 4D 4D 00 2A
+            if (bytes[0] == 0x49 && bytes[1] == 0x49) || (bytes[0] == 0x4D && bytes[1] == 0x4D) {
+                return .tiff
+            }
+
+            return nil
+        }
+    }
+
     private nonisolated static func makeDataRepresentationHandler(
         data: Data?
     ) -> @Sendable (@escaping @Sendable (Data?, Error?) -> Void) -> Progress? {
@@ -2403,6 +2568,31 @@ extension ClipboardItem {
                 }
 
                 completionBox.value(data, nil)
+                progressBox.value.completedUnitCount = 1
+            }
+            return progress
+        }
+    }
+
+    private nonisolated static func makeDragFileRepresentationHandler(
+        fileURL: URL
+    ) -> @Sendable (@escaping @Sendable (URL?, Bool, Error?) -> Void) -> Progress? {
+        { completion in
+            let progress = Progress(totalUnitCount: 1)
+            let progressBox = UncheckedSendable(progress)
+            let completionBox = UncheckedSendable(completion)
+            DispatchQueue.global(qos: .userInitiated).async {
+                guard !progressBox.value.isCancelled else {
+                    completionBox.value(nil, false, nil)
+                    return
+                }
+
+                if FileManager.default.fileExists(atPath: fileURL.path) {
+                    completionBox.value(fileURL, false, nil)
+                } else {
+                    let error = NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoSuchFileError)
+                    completionBox.value(nil, false, error)
+                }
                 progressBox.value.completedUnitCount = 1
             }
             return progress

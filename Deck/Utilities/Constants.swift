@@ -210,8 +210,8 @@ enum Const {
     nonisolated static let scriptMaxOutputLength: Int = 100_000        // 100KB max output
 
     // Animation
-    static let showDuration: Double = 0.16
-    static let hideDuration: Double = 0.18
+    static let showDuration: Double = 0.12
+    static let hideDuration: Double = 0.16
     
     // Card shape
     static let contentShape = UnevenRoundedRectangle(

@@ -9,8 +9,8 @@
 
 import SwiftUI
 import AppKit
-import UniformTypeIdentifiers
 import ImageIO
+import UniformTypeIdentifiers
 
 struct QuickPasteBadgeView: View {
     let number: Int
@@ -311,8 +311,6 @@ struct ClipItemCardView: View {
 
     @State private var vm = DeckViewModel.shared
     @State private var pasteQueue = PasteQueueService.shared
-    @State private var multipeerService = MultipeerService.shared
-    @State private var directConnectService = DirectConnectService.shared
     @State private var isHovered = false
     @State private var contextMenuID = UUID()
     @State private var isEditingTitle = false
@@ -504,118 +502,7 @@ struct ClipItemCardView: View {
     /// 创建拖拽时的 NSItemProvider
     private func createDragItemProvider() -> NSItemProvider {
         MainWindowController.shared.beginClipItemDragWindowLevelRelaxation()
-
-        switch item.itemType {
-        case .image:
-            // 图片：直接拖拽为图片文件
-            return createImageProvider()
-        case .file:
-            // 文件：拖拽原文件路径
-            return createFileProvider()
-        case .color:
-            // 颜色：拖拽为颜色代码文本文件
-            return createTextFileProvider(content: item.searchText, suggestedName: "color", extension: "txt")
-        default:
-            // 文本/代码/URL：根据内容智能生成文件
-            return createSmartTextFileProvider()
-        }
-    }
-
-    /// 创建图片拖拽 Provider
-    private func createImageProvider() -> NSItemProvider {
-        let imageData = item.resolvedData() ?? item.data
-        let imageType: UTType = detectImageType(from: imageData) ?? .png
-        let ext = imageType.preferredFilenameExtension ?? "png"
-        let filename = "image_\(item.timestamp).\(ext)"
-        do {
-            let tempURL = try TemporaryFileManager.shared.writeData(imageData, filename: filename)
-            let provider = NSItemProvider(contentsOf: tempURL) ?? NSItemProvider()
-            provider.suggestedName = filename
-            return provider
-        } catch {
-            log.error("Failed to write temp image: \(error)")
-            return NSItemProvider()
-        }
-    }
-
-    /// 检测图片类型
-    private func detectImageType(from data: Data) -> UTType? {
-        guard data.count >= 8 else { return nil }
-
-        return data.withUnsafeBytes { rawBuffer -> UTType? in
-            let bytes = rawBuffer.bindMemory(to: UInt8.self)
-            guard bytes.count >= 8 else { return nil }
-
-            // PNG: 89 50 4E 47 0D 0A 1A 0A
-            if bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47 {
-                return .png
-            }
-            // JPEG: FF D8 FF
-            if bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF {
-                return .jpeg
-            }
-            // GIF: 47 49 46 38
-            if bytes[0] == 0x47 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x38 {
-                return .gif
-            }
-            // WebP: "RIFF" .... "WEBP"
-            if bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46,
-               bytes.count >= 12,
-               bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50 {
-                return .webP
-            }
-            // TIFF: 49 49 2A 00 or 4D 4D 00 2A
-            if (bytes[0] == 0x49 && bytes[1] == 0x49) || (bytes[0] == 0x4D && bytes[1] == 0x4D) {
-                return .tiff
-            }
-
-            return .png // 默认 PNG
-        }
-    }
-
-    /// 创建文件拖拽 Provider
-    private func createFileProvider() -> NSItemProvider {
-        guard let paths = item.filePaths, let firstPath = paths.first else {
-            return NSItemProvider()
-        }
-
-        let fileURL = URL(fileURLWithPath: firstPath)
-
-        // 检查文件是否存在
-        guard FileManager.default.fileExists(atPath: firstPath) else {
-            return NSItemProvider()
-        }
-
-        let provider = NSItemProvider(contentsOf: fileURL) ?? NSItemProvider()
-        provider.suggestedName = fileURL.lastPathComponent
-        return provider
-    }
-
-    /// 创建智能文本文件 Provider（根据内容自动检测类型）
-    private func createSmartTextFileProvider() -> NSItemProvider {
-        let text = item.searchText
-        let (baseName, ext) = SmartTextService.shared.generateSmartFilename(for: text)
-        return createTextFileProvider(content: text, suggestedName: baseName, extension: ext)
-    }
-
-    /// 创建文本文件 Provider
-    private func createTextFileProvider(content: String, suggestedName: String, extension ext: String) -> NSItemProvider {
-        // 清理文件名中的非法字符
-        let cleanName = suggestedName
-            .components(separatedBy: CharacterSet(charactersIn: "/\\:*?\"<>|\n\r\t"))
-            .joined(separator: "_")
-            .trimmingCharacters(in: .whitespaces)
-        let safeName = cleanName.isEmpty ? "text" : String(cleanName.prefix(50))
-        let filename = "\(safeName).\(ext)"
-        do {
-            let tempURL = try TemporaryFileManager.shared.writeText(content, filename: filename)
-            let provider = NSItemProvider(contentsOf: tempURL) ?? NSItemProvider()
-            provider.suggestedName = filename
-            return provider
-        } catch {
-            log.error("Failed to write temp file: \(error)")
-            return NSItemProvider()
-        }
+        return item.dragItemProvider()
     }
 
     // MARK: - Title Editing
@@ -1830,7 +1717,7 @@ struct ClipItemCardView: View {
                 }
 
                 // Script Plugins section
-                let plugins = ScriptPluginService.shared.plugins
+                let plugins = ScriptPluginService.shared.pluginsSnapshot()
                 if !plugins.isEmpty {
                     Divider()
 
@@ -1875,18 +1762,20 @@ struct ClipItemCardView: View {
         
         // LAN Sharing menu
         if DeckUserDefaults.lanSharingEnabled {
-            let hasMultipeerPeers = !multipeerService.connectedPeers.isEmpty
-            let hasDirectPeers = !directConnectService.manualPeers.filter(\.isConnected).isEmpty
+            let multipeerPeers = MultipeerService.shared.connectedPeersMenuSnapshot()
+            let directPeers = DirectConnectService.shared.connectedManualPeersMenuSnapshot()
+            let hasMultipeerPeers = !multipeerPeers.isEmpty
+            let hasDirectPeers = !directPeers.isEmpty
 
             Divider()
 
             Menu {
                 // Multipeer connected peers
                 if hasMultipeerPeers {
-                    ForEach(multipeerService.connectedPeers) { peer in
+                    ForEach(multipeerPeers) { peer in
                         Button {
                             Task {
-                                await multipeerService.sendItem(item, to: peer)
+                                await MultipeerService.shared.sendItem(item, to: peer)
                             }
                         } label: {
                             Label(
@@ -1902,10 +1791,10 @@ struct ClipItemCardView: View {
                     if hasMultipeerPeers {
                         Divider()
                     }
-                    ForEach(directConnectService.manualPeers.filter(\.isConnected)) { peer in
+                    ForEach(directPeers) { peer in
                         Button {
                             Task {
-                                _ = await directConnectService.sendItem(item, to: peer)
+                                _ = await DirectConnectService.shared.sendItem(item, to: peer)
                             }
                         } label: {
                             Label(peer.displayName, systemImage: "network")
