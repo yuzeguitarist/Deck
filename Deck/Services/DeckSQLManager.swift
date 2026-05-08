@@ -5633,6 +5633,30 @@ extension DeckSQLManager {
         } ?? []
     }
 
+    /// 从当前窗口开头继续向「更新记录」方向取相邻一页。
+    ///
+    /// 主列表显示顺序是 `timestamp DESC, id DESC`；这里反向用 `ASC` 取 cursor 之前
+    /// 最近的一段，调用方再反转后 prepend 到当前窗口前面。
+    func fetchListNewerPage(
+        filter: SQLite.Expression<Bool>? = nil,
+        limit: Int,
+        cursor: RowCursor
+    ) async -> [Row] {
+        guard !Task.isCancelled else { return [] }
+        let safeLimit = max(1, limit)
+
+        return await withReadDBAsync { db, table in
+            var query = self.listModeBaseQuery(table: table)
+            if let f = filter { query = query.filter(f) }
+            let cursorFilter = (Col.ts > cursor.timestamp) || (Col.ts == cursor.timestamp && Col.id > cursor.id)
+            query = query
+                .filter(cursorFilter)
+                .order(Col.ts.asc, Col.id.asc)
+                .limit(safeLimit)
+            return Array(try db.prepare(query))
+        } ?? []
+    }
+
     private func buildFTSQuery(from keyword: String, useTrigram: Bool) -> String {
         let terms = keyword
             .components(separatedBy: .whitespacesAndNewlines)

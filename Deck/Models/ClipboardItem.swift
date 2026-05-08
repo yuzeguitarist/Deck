@@ -1756,6 +1756,18 @@ final class ClipboardItem: Identifiable, Equatable {
         return cachedPDFThumbnail
     }
 
+    func clearTransientVisualCaches() {
+        analysisLock.lock()
+        cachedThumbnail = nil
+        cachedPDFThumbnail = nil
+        cachedPDFThumbnailSize = nil
+        if cachedBase64Image != nil {
+            cachedBase64Image = nil
+            base64ImageChecked = false
+        }
+        analysisLock.unlock()
+    }
+
     private static func normalizedPDFThumbnailRequestSize(_ size: CGSize) -> CGSize {
         CGSize(
             width: max(1, ceil(size.width)),
@@ -1853,6 +1865,7 @@ final class ClipboardItem: Identifiable, Equatable {
     }
     
     private func generateThumbnailFromFile(path: String) -> NSImage? {
+        return autoreleasepool {
         guard FileManager.default.fileExists(atPath: path) else {
             let ext = URL(fileURLWithPath: path).pathExtension
             let contentType = UTType(filenameExtension: ext) ?? .data
@@ -1886,6 +1899,7 @@ final class ClipboardItem: Identifiable, Equatable {
             forFile: path,
             size: NSSize(width: Self.maxThumbnailSize, height: Self.maxThumbnailSize)
         )
+        }
     }
 
     private func extractBase64ImagePayload(from text: String, maxChars: Int) -> String? {
@@ -1948,6 +1962,7 @@ final class ClipboardItem: Identifiable, Equatable {
     }
     
     private func generateSafeThumbnailFromData(_ payload: Data) -> NSImage? {
+        return autoreleasepool {
         let options: [CFString: Any] = [
             kCGImageSourceShouldCache: false,
             kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
@@ -1962,6 +1977,7 @@ final class ClipboardItem: Identifiable, Equatable {
         }
 
         return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        }
     }
 
     /// 从磁盘图像（含 HEIC/RAW）生成列表用 PNG 缩略图，避免仅依赖 `CGImageSource`+URL 在部分格式上失败。
@@ -1984,6 +2000,7 @@ final class ClipboardItem: Identifiable, Equatable {
     /// 为大图预生成缩略图数据（用于存入数据库的 previewData）
     /// 在数据写入时调用，避免读取时解码大图
     nonisolated static func generatePreviewThumbnailData(from imageData: Data, maxSize: CGFloat = 200) -> Data? {
+        return autoreleasepool {
         let options: [CFString: Any] = [
             kCGImageSourceShouldCache: false,
             kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
@@ -2000,6 +2017,7 @@ final class ClipboardItem: Identifiable, Equatable {
         // Convert CGImage to PNG data
         let bitmapRep = NSBitmapImageRep(cgImage: cgImage)
         return bitmapRep.representation(using: .png, properties: [:])
+        }
     }
 
     /// 异步生成预览缩略图数据
@@ -2150,25 +2168,30 @@ final class ClipboardItem: Identifiable, Equatable {
     }
 
     nonisolated private static func downsampledCGImage(from data: Data, maxPixelSize: Int) -> CGImage? {
+        return autoreleasepool {
         let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions) else { return nil }
         let thumbnailOptions = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceShouldCache: false,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixelSize)
         ] as CFDictionary
         return CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions)
+        }
     }
 
     /// 与 `generateThumbnailFromFile(path:)` 策略对齐：仅用 ImageIO（无 AppKit 主线程假设）。
     /// 顺序：URL + IfAbsent → URL + Always（与 `downsampledCGImage(from:)` 一致）→ 映射读入 Data 再解码（部分格式在 URL / Data 源下表现不同）。
     nonisolated private static func cgImageThumbnailFromFileURL(_ url: URL, maxPixelSize: Int) -> CGImage? {
+        return autoreleasepool {
         let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         let maxPx = max(1, maxPixelSize)
         let optionsIfAbsent: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
             kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceShouldCache: false,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPx
         ]
@@ -2179,6 +2202,7 @@ final class ClipboardItem: Identifiable, Equatable {
         let optionsAlways: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceShouldCache: false,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPx
         ]
@@ -2188,6 +2212,7 @@ final class ClipboardItem: Identifiable, Equatable {
         }
         guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else { return nil }
         return downsampledCGImage(from: data, maxPixelSize: maxPixelSize)
+        }
     }
 
     nonisolated private static func downsampledCGImage(fromFileURL url: URL, maxPixelSize: Int) -> CGImage? {

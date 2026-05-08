@@ -73,6 +73,13 @@ private enum ClipItemCardCache {
     }()
 }
 
+extension ClipItemCardView {
+    static func clearPanelVisualCaches() {
+        ClipItemCardCache.thumbnailCache.removeAllObjects()
+        ClipItemCardCache.iconCache.removeAllObjects()
+    }
+}
+
 private enum ClipItemContextMenuText {
     static let rename = String(localized: "重命名")
     static let copyOCRText = String(localized: "复制图片OCR文本")
@@ -1284,7 +1291,9 @@ struct ClipItemCardView: View {
         guard acquired else { return nil }
         defer { Task { await ClipItemThumbnailDecodeGate.shared.release() } }
 
-        let task = Task.detached(priority: .utility, operation: operation)
+        let task = Task.detached(priority: .utility) {
+            autoreleasepool(invoking: operation)
+        }
         return await withTaskCancellationHandler {
             await task.value
         } onCancel: {
@@ -1507,6 +1516,7 @@ struct ClipItemCardView: View {
     }
 
     nonisolated private static func downsampledImage(from data: Data, maxPixelSize: Int) -> ImageDecodeResult? {
+        return autoreleasepool {
         let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions) else { return nil }
         let pixelSize = imagePixelSize(from: source)
@@ -1514,15 +1524,18 @@ struct ClipItemCardView: View {
         let thumbnailOptions = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceShouldCache: false,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixelSize)
         ] as CFDictionary
 
         guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else { return nil }
         return ImageDecodeResult(image: image, pixelSize: pixelSize)
+        }
     }
 
     nonisolated private static func downsampledImage(from url: URL, maxPixelSize: Int) -> ImageDecodeResult? {
+        return autoreleasepool {
         if url.isFileURL, !FileManager.default.fileExists(atPath: url.path) {
             return nil
         }
@@ -1533,12 +1546,14 @@ struct ClipItemCardView: View {
         let thumbnailOptions = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceShouldCache: false,
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: max(1, maxPixelSize)
         ] as CFDictionary
 
         guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else { return nil }
         return ImageDecodeResult(image: image, pixelSize: pixelSize)
+        }
     }
 
     nonisolated fileprivate static func downsampledCGImage(from data: Data, maxPixelSize: Int) -> CGImage? {

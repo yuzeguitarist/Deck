@@ -49,9 +49,16 @@ private final class HistoryListInteractionState {
     var accumulatedScrollDelta: CGFloat = 0
     var lastScrollTime: Date = .distantPast
     var scrollTask: Task<Void, Never>?
+    var previousPageLoadTask: Task<Void, Never>?
+    var previousPageLoadCheckTask: Task<Void, Never>?
     var pendingSelectionScrollDelay: TimeInterval?
     var lastVimKeyCode: UInt16 = 0
     var lastVimKeyTime: Date = .distantPast
+}
+
+private enum HistoryScrollAxis {
+    case horizontal
+    case vertical
 }
 
 struct HistoryListView: View {
@@ -142,6 +149,9 @@ struct HistoryListView: View {
         if pasteQueue.isQueueMode {
             return dataStore.items
         }
+        if dataStore.lastChangeType == .listTail || dataStore.lastChangeType == .loadPrevious {
+            return dataStore.items
+        }
         if DeckUserDefaults.contextAwareEnabled {
             // 兜底：若同步刷新尚未完成，回退到原始列表；
             // 若上下文快照已失效，不展示上一轮上下文的旧排序，避免首帧跳序。
@@ -161,7 +171,8 @@ struct HistoryListView: View {
     }
 
     private var shouldShowFeedbackSurveyCard: Bool {
-        feedbackSurveyCard.shouldShowCard(
+        guard !dataStore.hasNewerDataBeforeCurrentWindow else { return false }
+        return feedbackSurveyCard.shouldShowCard(
             itemCount: max(dataStore.totalCount, dataStore.items.count),
             query: vm.query,
             selectedTagId: vm.selectedTagId,
@@ -226,6 +237,10 @@ struct HistoryListView: View {
             cleanupScrollWheelHandler()
             interaction.scrollTask?.cancel()
             interaction.scrollTask = nil
+            interaction.previousPageLoadTask?.cancel()
+            interaction.previousPageLoadTask = nil
+            interaction.previousPageLoadCheckTask?.cancel()
+            interaction.previousPageLoadCheckTask = nil
             clearQuickPasteModifierState()
             if let observer = workspaceObserver {
                 NSWorkspace.shared.notificationCenter.removeObserver(observer)
@@ -666,9 +681,11 @@ struct HistoryListView: View {
         let trimmedQuery = vm.query.trimmingCharacters(in: .whitespacesAndNewlines)
         let isListTail = dataStore.lastChangeType == .listTail
         let isListHead = dataStore.lastChangeType == .listHead
+        let isTailWindow = isListTail || dataStore.lastChangeType == .loadPrevious
         let shouldReorder = DeckUserDefaults.contextAwareEnabled &&
             trimmedQuery.isEmpty &&
-            !pasteQueue.isQueueMode
+            !pasteQueue.isQueueMode &&
+            !isTailWindow
         if shouldReorder {
             refreshDisplayItems()
         } else if !orderedItems.isEmpty || contextSnapshot != nil {
@@ -748,6 +765,10 @@ struct HistoryListView: View {
         }
         interaction.accumulatedScrollDelta = 0
         interaction.historyScrollView = nil
+        interaction.previousPageLoadCheckTask?.cancel()
+        interaction.previousPageLoadCheckTask = nil
+        interaction.previousPageLoadTask?.cancel()
+        interaction.previousPageLoadTask = nil
     }
     
     private func handleScrollWheel(_ event: NSEvent) -> NSEvent? {
@@ -767,44 +788,207 @@ struct HistoryListView: View {
 
         // 竖版模式：让 ScrollView 自然处理垂直滚动，不做拦截
         if vm.layoutMode == .vertical {
+            scheduleNewerPageLoadAfterNativeScroll(
+                scrollView: scrollView,
+                axis: .vertical,
+                event: event
+            )
             return event
         }
 
-        // 3) 横版模式：Convert vertical wheel deltas to horizontal movement for a horizontal card list.
+        // 3) 横版模式：把滚轮纵向 delta 路由到横向轴，但仍交给 NSScrollView
+        // 自己处理边界/弹性。不要手动 setBoundsOrigin + clamp，否则 AppKit 的
+        // horizontalScrollElasticity 永远没有机会生效，边缘就会“卡死”。
+        guard let horizontalDelta = horizontalScrollDelta(for: event) else { return event }
+
+        if horizontalDelta < 0 {
+            scheduleNewerPageLoadAfterNativeScroll(
+                scrollView: scrollView,
+                axis: .horizontal,
+                event: event
+            )
+        }
+
+        return horizontallyRoutedScrollEvent(from: event, horizontalDelta: horizontalDelta) ?? event
+    }
+
+    private func horizontalScrollDelta(for event: NSEvent) -> CGFloat? {
         let deltaX = event.scrollingDeltaX
         let deltaY = event.scrollingDeltaY
 
         // Ignore tiny jitter.
-        guard abs(deltaX) > 0.01 || abs(deltaY) > 0.01 else { return event }
+        guard abs(deltaX) > 0.01 || abs(deltaY) > 0.01 else { return nil }
 
         let multiplier: CGFloat = event.hasPreciseScrollingDeltas ? preciseScrollMultiplier : wheelLineToPointMultiplier
-
         let useVerticalAsHorizontal = abs(deltaY) >= (abs(deltaX) * 0.8)
         let horizontalDelta = useVerticalAsHorizontal ? (deltaX + deltaY * multiplier) : (-deltaX)
 
-        guard abs(horizontalDelta) > 0.01 else { return event }
-
-        scrollHistoryList(by: horizontalDelta)
-        return nil
+        guard abs(horizontalDelta) > 0.01 else { return nil }
+        return horizontalDelta
     }
 
-    private func scrollHistoryList(by delta: CGFloat) {
-        guard let scrollView = interaction.historyScrollView else { return }
+    private func horizontallyRoutedScrollEvent(from event: NSEvent, horizontalDelta: CGFloat) -> NSEvent? {
+        guard let cgEvent = event.cgEvent?.copy() else { return nil }
+
+        // `horizontalDelta` keeps the legacy manual-scroll meaning:
+        // positive == move content origin right (older items), negative == move left (newer items).
+        // Native NSScrollView interprets horizontal wheel deltas in the opposite sign, so invert
+        // only at the event-bridging boundary. This preserves the existing trackpad swipe direction
+        // while still letting AppKit provide edge elasticity.
+        let eventDelta = -horizontalDelta
+        let routedDelta = integerScrollDelta(eventDelta)
+        guard routedDelta != 0 else { return nil }
+
+        cgEvent.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        cgEvent.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: 0)
+        cgEvent.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: routedDelta)
+        cgEvent.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: 0)
+        cgEvent.setIntegerValueField(.scrollWheelEventPointDeltaAxis2, value: routedDelta)
+        cgEvent.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: 0)
+        cgEvent.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2, value: Double(eventDelta))
+
+        return NSEvent(cgEvent: cgEvent)
+    }
+
+    private func integerScrollDelta(_ value: CGFloat) -> Int64 {
+        let rounded = value.rounded(.toNearestOrAwayFromZero)
+        if rounded == 0, abs(value) > 0.01 {
+            return value > 0 ? 1 : -1
+        }
+        return Int64(rounded)
+    }
+
+    private func scheduleNewerPageLoadAfterNativeScroll(
+        scrollView: NSScrollView,
+        axis: HistoryScrollAxis,
+        event: NSEvent
+    ) {
+        guard dataStore.hasNewerDataBeforeCurrentWindow else { return }
+
+        interaction.previousPageLoadCheckTask?.cancel()
+        interaction.previousPageLoadCheckTask = Task { @MainActor in
+            // Let AppKit consume the wheel event and finish the first rubber-band settle frame
+            // before we consider inserting earlier items and adjusting content bounds.
+            await Task.yield()
+
+            let isTerminalPhase = event.phase.contains(.ended) ||
+                event.phase.contains(.cancelled) ||
+                event.momentumPhase.contains(.ended) ||
+                event.momentumPhase.contains(.cancelled)
+            let settleDelay: UInt64 = isTerminalPhase ? 32_000_000 : 180_000_000
+            try? await Task.sleep(nanoseconds: settleDelay)
+
+            guard !Task.isCancelled,
+                  let activeScrollView = interaction.historyScrollView,
+                  activeScrollView === scrollView else {
+                return
+            }
+
+            // During rubber-band overscroll AppKit may briefly expose a negative origin.
+            // Do not insert rows or force-set bounds while the clip view is still outside
+            // its legal range; that is the source of the top-edge flicker/snap.
+            guard isScrollPositionSettled(in: activeScrollView, axis: axis) else { return }
+
+            switch axis {
+            case .horizontal:
+                loadNewerPageIfNeededPreservingHorizontalScroll(scrollView: activeScrollView)
+            case .vertical:
+                loadNewerPageIfNeededPreservingVerticalScroll(scrollView: activeScrollView)
+            }
+        }
+    }
+
+    private func isScrollPositionSettled(in scrollView: NSScrollView, axis: HistoryScrollAxis) -> Bool {
+        guard let documentView = scrollView.documentView else { return false }
+
+        let clipBounds = scrollView.contentView.bounds
+        switch axis {
+        case .horizontal:
+            let maxX = max(0, documentView.bounds.width - clipBounds.width)
+            return clipBounds.origin.x >= -0.5 && clipBounds.origin.x <= maxX + 0.5
+        case .vertical:
+            let maxY = max(0, documentView.bounds.height - clipBounds.height)
+            return clipBounds.origin.y >= -0.5 && clipBounds.origin.y <= maxY + 0.5
+        }
+    }
+
+    private func loadNewerPageIfNeededPreservingHorizontalScroll(scrollView: NSScrollView) {
+        guard dataStore.hasNewerDataBeforeCurrentWindow else { return }
+        guard interaction.previousPageLoadTask == nil else { return }
         guard let documentView = scrollView.documentView else { return }
+        guard isScrollPositionSettled(in: scrollView, axis: .horizontal) else { return }
 
-        let clipView = scrollView.contentView
-        var origin = clipView.bounds.origin
+        let prefetchThreshold = max(vm.horizontalCardSize + Const.cardSpace * 2, 320)
+        let currentOriginX = scrollView.contentView.bounds.origin.x
+        guard currentOriginX <= prefetchThreshold else { return }
 
-        // Positive delta scrolls towards older items (to the right).
-        origin.x += delta
+        let oldDocumentWidth = documentView.bounds.width
+        interaction.previousPageLoadTask = Task { @MainActor in
+            defer { interaction.previousPageLoadTask = nil }
+            let didLoad = await dataStore.loadNewerPageBeforeCurrentWindow()
+            guard didLoad, !Task.isCancelled else { return }
 
-        // Clamp to the scrollable range.
-        let maxX = max(0, documentView.bounds.width - clipView.bounds.width)
-        origin.x = min(max(origin.x, 0), maxX)
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 16_000_000)
 
-        // Apply.
-        clipView.setBoundsOrigin(origin)
-        scrollView.reflectScrolledClipView(clipView)
+            guard let activeScrollView = interaction.historyScrollView,
+                  activeScrollView === scrollView,
+                  let activeDocumentView = activeScrollView.documentView else {
+                return
+            }
+
+            let widthDelta = max(0, activeDocumentView.bounds.width - oldDocumentWidth)
+            guard widthDelta > 0 else { return }
+
+            let clipView = activeScrollView.contentView
+            guard isScrollPositionSettled(in: activeScrollView, axis: .horizontal) else { return }
+            var adjustedOrigin = clipView.bounds.origin
+            adjustedOrigin.x += widthDelta
+
+            let maxX = max(0, activeDocumentView.bounds.width - clipView.bounds.width)
+            adjustedOrigin.x = min(max(adjustedOrigin.x, 0), maxX)
+            clipView.setBoundsOrigin(adjustedOrigin)
+            activeScrollView.reflectScrolledClipView(clipView)
+        }
+    }
+
+    private func loadNewerPageIfNeededPreservingVerticalScroll(scrollView: NSScrollView) {
+        guard dataStore.hasNewerDataBeforeCurrentWindow else { return }
+        guard interaction.previousPageLoadTask == nil else { return }
+        guard let documentView = scrollView.documentView else { return }
+        guard isScrollPositionSettled(in: scrollView, axis: .vertical) else { return }
+
+        let prefetchThreshold: CGFloat = 320
+        guard scrollView.contentView.bounds.origin.y <= prefetchThreshold else { return }
+
+        let oldDocumentHeight = documentView.bounds.height
+        interaction.previousPageLoadTask = Task { @MainActor in
+            defer { interaction.previousPageLoadTask = nil }
+            let didLoad = await dataStore.loadNewerPageBeforeCurrentWindow()
+            guard didLoad, !Task.isCancelled else { return }
+
+            await Task.yield()
+            try? await Task.sleep(nanoseconds: 16_000_000)
+
+            guard let activeScrollView = interaction.historyScrollView,
+                  activeScrollView === scrollView,
+                  let activeDocumentView = activeScrollView.documentView else {
+                return
+            }
+
+            let heightDelta = max(0, activeDocumentView.bounds.height - oldDocumentHeight)
+            guard heightDelta > 0 else { return }
+
+            let clipView = activeScrollView.contentView
+            guard isScrollPositionSettled(in: activeScrollView, axis: .vertical) else { return }
+            var adjustedOrigin = clipView.bounds.origin
+            adjustedOrigin.y += heightDelta
+
+            let maxY = max(0, activeDocumentView.bounds.height - clipView.bounds.height)
+            adjustedOrigin.y = min(max(adjustedOrigin.y, 0), maxY)
+            clipView.setBoundsOrigin(adjustedOrigin)
+            activeScrollView.reflectScrolledClipView(clipView)
+        }
     }
 
     private func relevantModifiers(for event: NSEvent) -> NSEvent.ModifierFlags {
