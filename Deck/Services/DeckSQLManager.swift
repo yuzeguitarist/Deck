@@ -116,25 +116,25 @@ import Accelerate
 import CryptoKit
 
 enum Col {
-    // SQL 列描述本身是不可变常量；显式放开隔离，避免默认 MainActor 卡住后台 DB 路径。
-    nonisolated(unsafe) static let id = Expression<Int64>("id")
-    nonisolated(unsafe) static let uniqueId = Expression<String>("unique_id")
-    nonisolated(unsafe) static let type = Expression<String>("type")
-    nonisolated(unsafe) static let itemType = Expression<String>("item_type")
-    nonisolated(unsafe) static let data = Expression<Data>("data")
-    nonisolated(unsafe) static let previewData = Expression<Data?>("preview_data")
-    nonisolated(unsafe) static let ts = Expression<Int64>("timestamp")
-    nonisolated(unsafe) static let appPath = Expression<String>("app_path")
-    nonisolated(unsafe) static let appName = Expression<String>("app_name")
-    nonisolated(unsafe) static let customTitle = Expression<String?>("custom_title")
-    nonisolated(unsafe) static let sourceAnchor = Expression<String?>("source_anchor")
-    nonisolated(unsafe) static let searchText = Expression<String>("search_text")
-    nonisolated(unsafe) static let length = Expression<Int>("content_length")
-    nonisolated(unsafe) static let tagId = Expression<Int>("tag_id")
-    nonisolated(unsafe) static let blobPath = Expression<String?>("blob_path")
-    nonisolated(unsafe) static let isTemporary = Expression<Bool>("is_temporary")
-    nonisolated(unsafe) static let isEncrypted = Expression<Bool>("is_encrypted")
-    nonisolated(unsafe) static let receivedFromLan = Expression<Bool>("received_from_lan")
+    // SQL 列描述本身是不可变常量；SQLite.swift 0.16.0 起 Expression 已是 Sendable。
+    nonisolated static let id = Expression<Int64>("id")
+    nonisolated static let uniqueId = Expression<String>("unique_id")
+    nonisolated static let type = Expression<String>("type")
+    nonisolated static let itemType = Expression<String>("item_type")
+    nonisolated static let data = Expression<Data>("data")
+    nonisolated static let previewData = Expression<Data?>("preview_data")
+    nonisolated static let ts = Expression<Int64>("timestamp")
+    nonisolated static let appPath = Expression<String>("app_path")
+    nonisolated static let appName = Expression<String>("app_name")
+    nonisolated static let customTitle = Expression<String?>("custom_title")
+    nonisolated static let sourceAnchor = Expression<String?>("source_anchor")
+    nonisolated static let searchText = Expression<String>("search_text")
+    nonisolated static let length = Expression<Int>("content_length")
+    nonisolated static let tagId = Expression<Int>("tag_id")
+    nonisolated static let blobPath = Expression<String?>("blob_path")
+    nonisolated static let isTemporary = Expression<Bool>("is_temporary")
+    nonisolated static let isEncrypted = Expression<Bool>("is_encrypted")
+    nonisolated static let receivedFromLan = Expression<Bool>("received_from_lan")
 }
 
 // MARK: - Maintenance helpers (storage cleanup / rollback snapshot)
@@ -516,9 +516,9 @@ private extension Array {
 }
 
 enum EmbeddingCol {
-    nonisolated(unsafe) static let id = Expression<Int64>("id")
-    nonisolated(unsafe) static let textHash = Expression<String>("text_hash")
-    nonisolated(unsafe) static let embedding = Expression<Data>("embedding")
+    nonisolated static let id = Expression<Int64>("id")
+    nonisolated static let textHash = Expression<String>("text_hash")
+    nonisolated static let embedding = Expression<Data>("embedding")
 }
 
 // MARK: - Search Cache Entry

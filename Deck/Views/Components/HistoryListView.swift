@@ -897,11 +897,9 @@ struct HistoryListView: View {
 
         // 竖版模式：让 ScrollView 自然处理垂直滚动，不做拦截
         if vm.layoutMode == .vertical {
-            scheduleNewerPageLoadAfterNativeScroll(
-                scrollView: scrollView,
-                axis: .vertical,
-                event: event
-            )
+            interaction.previousPageLoadCheckTask?.cancel()
+            interaction.previousPageLoadCheckTask = nil
+            loadNewerPageIfNeededPreservingVerticalScroll(scrollView: scrollView)
             return event
         }
 
@@ -1096,7 +1094,6 @@ struct HistoryListView: View {
         guard dataStore.hasNewerDataBeforeCurrentWindow else { return }
         guard interaction.previousPageLoadTask == nil else { return }
         guard let documentView = scrollView.documentView else { return }
-        guard isScrollPositionSettled(in: scrollView, axis: .vertical) else { return }
 
         let prefetchThreshold: CGFloat = 320
         guard scrollView.contentView.bounds.origin.y <= prefetchThreshold else { return }
@@ -1120,7 +1117,6 @@ struct HistoryListView: View {
             guard heightDelta > 0 else { return }
 
             let clipView = activeScrollView.contentView
-            guard isScrollPositionSettled(in: activeScrollView, axis: .vertical) else { return }
             var adjustedOrigin = clipView.bounds.origin
             adjustedOrigin.y += heightDelta
 
