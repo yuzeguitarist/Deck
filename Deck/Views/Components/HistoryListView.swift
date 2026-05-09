@@ -54,11 +54,67 @@ private final class HistoryListInteractionState {
     var pendingSelectionScrollDelay: TimeInterval?
     var lastVimKeyCode: UInt16 = 0
     var lastVimKeyTime: Date = .distantPast
+    var suppressNextSelectionScroll = false
+    var suppressNextItemsChangeSelection = false
 }
 
 private enum HistoryScrollAxis {
     case horizontal
     case vertical
+}
+
+private enum HorizontalCardRemovalAnimation {
+    static let blurDuration: TimeInterval = 0.09
+    static let fadeDelay: TimeInterval = 0.075
+    static let fadeDuration: TimeInterval = 0.20
+    static let widthDelay: TimeInterval = 0.15
+    static let widthDuration: TimeInterval = 0.32
+    static let commitDelay: TimeInterval = widthDelay + widthDuration + 0.02
+
+    static let blur = Animation.easeIn(duration: blurDuration)
+    static let fade = Animation.easeIn(duration: fadeDuration)
+    static let width = Animation.timingCurve(0.2, 0, 0, 1, duration: widthDuration)
+}
+
+private struct HorizontalCardRemovalSlot<Content: View>: View {
+    let cardWidth: CGFloat
+    let slotWidth: CGFloat
+    let isBlurred: Bool
+    let isFading: Bool
+    let isWidthCollapsing: Bool
+    @ViewBuilder var content: () -> Content
+
+    init(
+        cardWidth: CGFloat,
+        trailingSpacing: CGFloat,
+        isBlurred: Bool,
+        isFading: Bool,
+        isWidthCollapsing: Bool,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.cardWidth = cardWidth
+        self.slotWidth = cardWidth + trailingSpacing
+        self.isBlurred = isBlurred
+        self.isFading = isFading
+        self.isWidthCollapsing = isWidthCollapsing
+        self.content = content
+    }
+
+    var body: some View {
+        content()
+            .blur(radius: isBlurred ? 8 : 0)
+            .opacity(isFading ? 0 : 1)
+            .scaleEffect(isFading ? 0.92 : 1)
+            .frame(width: cardWidth, alignment: .leading)
+            .frame(width: isWidthCollapsing ? 0 : slotWidth, alignment: .leading)
+            .clipped()
+            .allowsHitTesting(!isBlurred && !isFading && !isWidthCollapsing)
+    }
+}
+
+private enum FeedbackSurveyHideAction {
+    case currentSession
+    case permanently
 }
 
 struct HistoryListView: View {
@@ -79,6 +135,12 @@ struct HistoryListView: View {
     @State private var interaction = HistoryListInteractionState()
     @State private var scrollRequestToken: Int = 0
     @State private var keyboardHandlerKey = "historyNavigation-\(UUID().uuidString)"
+    @State private var horizontallyBlurringItemIDs: Set<Int64> = []
+    @State private var horizontallyFadingItemIDs: Set<Int64> = []
+    @State private var horizontallyCollapsingItemIDs: Set<Int64> = []
+    @State private var isFeedbackSurveyCardBlurring = false
+    @State private var isFeedbackSurveyCardFading = false
+    @State private var isFeedbackSurveyCardCollapsing = false
     
     private let doubleTapInterval: TimeInterval = 0.25
     private let previewUpdateInterval: TimeInterval = 0.12
@@ -521,19 +583,33 @@ struct HistoryListView: View {
         let quickPasteNumbers = quickPasteOverlayMap(for: items)
 
         return ScrollView(.horizontal, showsIndicators: false) {
-            LazyHStack(alignment: .top, spacing: Const.cardSpace) {
+            LazyHStack(alignment: .top, spacing: 0) {
                 if shouldShowFeedbackSurveyCard {
-                    FeedbackSurveyCardView(
-                        cardSize: vm.horizontalCardSize,
-                        isHorizontalLayout: true,
-                        onOpenSurvey: openFeedbackSurvey,
-                        onHideForCurrentSession: hideFeedbackSurveyForCurrentSession,
-                        onHidePermanently: hideFeedbackSurveyPermanently
-                    )
+                    HorizontalCardRemovalSlot(
+                        cardWidth: vm.horizontalCardSize,
+                        trailingSpacing: items.isEmpty ? 0 : Const.cardSpace,
+                        isBlurred: isFeedbackSurveyCardBlurring,
+                        isFading: isFeedbackSurveyCardFading,
+                        isWidthCollapsing: isFeedbackSurveyCardCollapsing
+                    ) {
+                        FeedbackSurveyCardView(
+                            cardSize: vm.horizontalCardSize,
+                            isHorizontalLayout: true,
+                            onOpenSurvey: openFeedbackSurvey,
+                            onHideForCurrentSession: { requestHideFeedbackSurvey(.currentSession) },
+                            onHidePermanently: { requestHideFeedbackSurvey(.permanently) }
+                        )
+                    }
                 }
 
                 ForEach(IndexedCollection(items), id: \.element.id) { index, item in
-                    horizontalCard(for: item, at: index, quickPasteNumbers: quickPasteNumbers)
+                    let isLast = items.index(after: index) == items.endIndex
+                    horizontalCard(
+                        for: item,
+                        at: index,
+                        quickPasteNumbers: quickPasteNumbers,
+                        trailingSpacing: isLast ? 0 : Const.cardSpace
+                    )
                 }
             }
             .padding(.horizontal, Const.cardSpace)
@@ -626,22 +702,36 @@ struct HistoryListView: View {
     private func horizontalCard(
         for item: ClipboardItem,
         at index: Int,
-        quickPasteNumbers: [ClipboardItem.ID: Int]
+        quickPasteNumbers: [ClipboardItem.ID: Int],
+        trailingSpacing: CGFloat
     ) -> some View {
         let isItemSelected = selectedId == item.id
         let quickPasteNumber = quickPasteNumbers[item.id]
+        let itemID = item.id
+        let isBlurred = itemID.map { horizontallyBlurringItemIDs.contains($0) } ?? false
+        let isFading = itemID.map { horizontallyFadingItemIDs.contains($0) } ?? false
+        let isWidthCollapsing = itemID.map { horizontallyCollapsingItemIDs.contains($0) } ?? false
 
-        ClipItemCardView(
-            item: item,
-            isSelected: isItemSelected,
-            showPreview: makePreviewBinding(for: item.id),
-            cardSize: vm.horizontalCardSize,
-            isHorizontalLayout: true,
-            quickPasteNumber: quickPasteNumber,
-            onDelete: { deleteItem(item) }
-        )
-        .onTapGesture {
-            handleTap(on: item)
+        HorizontalCardRemovalSlot(
+            cardWidth: vm.horizontalCardSize,
+            trailingSpacing: trailingSpacing,
+            isBlurred: isBlurred,
+            isFading: isFading,
+            isWidthCollapsing: isWidthCollapsing
+        ) {
+            ClipItemCardView(
+                item: item,
+                isSelected: isItemSelected,
+                showPreview: makePreviewBinding(for: item.id),
+                cardSize: vm.horizontalCardSize,
+                isHorizontalLayout: true,
+                quickPasteNumber: quickPasteNumber,
+                onDelete: { deleteItem(item) }
+            )
+            .onTapGesture {
+                guard !isBlurred, !isFading, !isWidthCollapsing else { return }
+                handleTap(on: item)
+            }
         }
         .onAppear {
             if shouldLoadMore(at: index) {
@@ -678,6 +768,13 @@ struct HistoryListView: View {
 
     /// 提取的 items 变更处理，横版/竖版共享
     private func handleItemsChanged() {
+        let suppressAutomaticSelection = interaction.suppressNextItemsChangeSelection
+        if suppressAutomaticSelection {
+            interaction.suppressNextItemsChangeSelection = false
+        }
+
+        pruneHorizontalRemovalState()
+
         let trimmedQuery = vm.query.trimmingCharacters(in: .whitespacesAndNewlines)
         let isListTail = dataStore.lastChangeType == .listTail
         let isListHead = dataStore.lastChangeType == .listHead
@@ -687,11 +784,13 @@ struct HistoryListView: View {
             !pasteQueue.isQueueMode &&
             !isTailWindow
         if shouldReorder {
-            refreshDisplayItems()
+            refreshDisplayItems(allowSelectionRepair: !suppressAutomaticSelection)
         } else if !orderedItems.isEmpty || contextSnapshot != nil {
             orderedItems = []
             contextSnapshot = nil
         }
+        guard !suppressAutomaticSelection else { return }
+
         if dataStore.lastChangeType == .search || dataStore.lastChangeType == .reset {
             let firstId = displayItems.first?.id
             if selectedId == firstId {
@@ -730,6 +829,16 @@ struct HistoryListView: View {
                 }
             }
         }
+    }
+
+    private func pruneHorizontalRemovalState() {
+        guard !horizontallyBlurringItemIDs.isEmpty ||
+            !horizontallyFadingItemIDs.isEmpty ||
+            !horizontallyCollapsingItemIDs.isEmpty else { return }
+        let currentIDs = Set(dataStore.items.compactMap(\.id))
+        horizontallyBlurringItemIDs.formIntersection(currentIDs)
+        horizontallyFadingItemIDs.formIntersection(currentIDs)
+        horizontallyCollapsingItemIDs.formIntersection(currentIDs)
     }
 
     // MARK: - Keyboard Navigation
@@ -801,6 +910,13 @@ struct HistoryListView: View {
         // horizontalScrollElasticity 永远没有机会生效，边缘就会“卡死”。
         guard let horizontalDelta = horizontalScrollDelta(for: event) else { return event }
 
+        if shouldUseDeterministicNewerPaging(for: horizontalDelta) {
+            interaction.previousPageLoadCheckTask?.cancel()
+            interaction.previousPageLoadCheckTask = nil
+            scrollHistoryTailWindow(by: horizontalDelta, in: scrollView)
+            return nil
+        }
+
         if horizontalDelta < 0 {
             scheduleNewerPageLoadAfterNativeScroll(
                 scrollView: scrollView,
@@ -825,6 +941,30 @@ struct HistoryListView: View {
 
         guard abs(horizontalDelta) > 0.01 else { return nil }
         return horizontalDelta
+    }
+
+    private func shouldUseDeterministicNewerPaging(for horizontalDelta: CGFloat) -> Bool {
+        horizontalDelta < 0 && dataStore.hasNewerDataBeforeCurrentWindow
+    }
+
+    private func scrollHistoryTailWindow(by delta: CGFloat, in scrollView: NSScrollView) {
+        guard let documentView = scrollView.documentView else { return }
+
+        let clipView = scrollView.contentView
+        var origin = clipView.bounds.origin
+
+        // Ctrl+E replaces the visible list with a tail window. Its left edge is a
+        // temporary boundary, not the real newest edge, so do not hand this path
+        // to AppKit rubber-band scrolling; page newer records deterministically.
+        origin.x += delta
+
+        let maxX = max(0, documentView.bounds.width - clipView.bounds.width)
+        origin.x = min(max(origin.x, 0), maxX)
+
+        clipView.setBoundsOrigin(origin)
+        scrollView.reflectScrolledClipView(clipView)
+
+        loadNewerPageIfNeededPreservingHorizontalScroll(scrollView: scrollView)
     }
 
     private func horizontallyRoutedScrollEvent(from event: NSEvent, horizontalDelta: CGFloat) -> NSEvent? {
@@ -1618,7 +1758,14 @@ struct HistoryListView: View {
     }
 
     private func handleSelectionChange(to id: ClipboardItem.ID?, proxy: ScrollViewProxy) {
-        scrollToItem(id: id, proxy: proxy)
+        if interaction.suppressNextSelectionScroll {
+            interaction.suppressNextSelectionScroll = false
+            interaction.lastSelectionWasRepeating = false
+            interaction.pendingSelectionScrollDelay = nil
+            interaction.scrollTask?.cancel()
+        } else {
+            scrollToItem(id: id, proxy: proxy)
+        }
         syncPreviewWithSelection(id)
     }
 
@@ -1646,7 +1793,11 @@ struct HistoryListView: View {
         return true
     }
     
-    private func refreshDisplayItems(usePreAppContext: Bool = false, snapshotOverride: ContextAwareService.RankingSnapshot? = nil) {
+    private func refreshDisplayItems(
+        usePreAppContext: Bool = false,
+        snapshotOverride: ContextAwareService.RankingSnapshot? = nil,
+        allowSelectionRepair: Bool = true
+    ) {
         let trimmedQuery = vm.query.trimmingCharacters(in: .whitespacesAndNewlines)
         let shouldLogSearch = log.isEnabled(.debug) && dataStore.lastChangeType == .search && !trimmedQuery.isEmpty
         if shouldLogSearch {
@@ -1732,7 +1883,8 @@ struct HistoryListView: View {
             // expensive full-buffer Copy-on-Write when pagination appends new items.
             orderedItems = []
 
-            if let current = selectedId,
+            if allowSelectionRepair,
+               let current = selectedId,
                !dataStore.items.contains(where: { $0.id == current }) {
                 selectedId = dataStore.items.first?.id
             }
@@ -1761,7 +1913,8 @@ struct HistoryListView: View {
             }
         }
         
-        if let current = selectedId,
+        if allowSelectionRepair,
+           let current = selectedId,
            !reordered.contains(where: { $0.id == current }) {
             selectedId = reordered.first?.id
         }
@@ -1814,11 +1967,47 @@ struct HistoryListView: View {
     }
 
     private func hideFeedbackSurveyForCurrentSession() {
-        feedbackSurveyCard.hideForCurrentSession()
+        requestHideFeedbackSurvey(.currentSession)
     }
 
     private func hideFeedbackSurveyPermanently() {
-        feedbackSurveyCard.hidePermanently()
+        requestHideFeedbackSurvey(.permanently)
+    }
+
+    private func requestHideFeedbackSurvey(_ action: FeedbackSurveyHideAction) {
+        guard vm.layoutMode == .horizontal else {
+            commitFeedbackSurveyHide(action)
+            return
+        }
+        guard !isFeedbackSurveyCardBlurring else { return }
+
+        runHorizontalSlotRemovalAnimation(
+            setBlurred: { isFeedbackSurveyCardBlurring = $0 },
+            setFading: { isFeedbackSurveyCardFading = $0 },
+            setCollapsing: { isFeedbackSurveyCardCollapsing = $0 },
+            shouldContinue: { isFeedbackSurveyCardBlurring },
+            commit: { commitFeedbackSurveyHide(action) },
+            rollback: {
+                isFeedbackSurveyCardBlurring = false
+                isFeedbackSurveyCardFading = false
+                isFeedbackSurveyCardCollapsing = false
+            }
+        )
+    }
+
+    private func commitFeedbackSurveyHide(_ action: FeedbackSurveyHideAction) {
+        switch action {
+        case .currentSession:
+            feedbackSurveyCard.hideForCurrentSession()
+        case .permanently:
+            feedbackSurveyCard.hidePermanently()
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            isFeedbackSurveyCardBlurring = false
+            isFeedbackSurveyCardFading = false
+            isFeedbackSurveyCardCollapsing = false
+        }
     }
     
     private func handleTap(on item: ClipboardItem) {
@@ -1866,6 +2055,14 @@ struct HistoryListView: View {
         if DeckUserDefaults.deleteConfirmation {
             showSystemDeleteConfirmation(for: item)
         } else {
+            requestDelete(item)
+        }
+    }
+
+    private func requestDelete(_ item: ClipboardItem) {
+        if vm.layoutMode == .horizontal {
+            performHorizontalAnimatedDelete(item)
+        } else {
             performDelete(item)
         }
     }
@@ -1895,7 +2092,7 @@ struct HistoryListView: View {
 
         let response = alert.runModal()
         if response == .alertFirstButtonReturn {
-            performDelete(item)
+            requestDelete(item)
         }
 
         itemToDelete = nil
@@ -1910,11 +2107,143 @@ struct HistoryListView: View {
             vm.focusArea = .history
         }
     }
+
+    private func performHorizontalAnimatedDelete(_ item: ClipboardItem) {
+        guard let itemID = item.id else {
+            performDelete(item)
+            return
+        }
+
+        guard !horizontallyBlurringItemIDs.contains(itemID) else { return }
+        let targetSelectionID = horizontalSelectionTarget(afterRemoving: itemID)
+
+        runHorizontalSlotRemovalAnimation(
+            setBlurred: { isBlurred in
+                if isBlurred {
+                    _ = horizontallyBlurringItemIDs.insert(itemID)
+                } else {
+                    horizontallyBlurringItemIDs.remove(itemID)
+                }
+            },
+            setFading: { isFading in
+                if isFading {
+                    _ = horizontallyFadingItemIDs.insert(itemID)
+                } else {
+                    horizontallyFadingItemIDs.remove(itemID)
+                }
+            },
+            setCollapsing: { isCollapsing in
+                if isCollapsing {
+                    _ = horizontallyCollapsingItemIDs.insert(itemID)
+                } else {
+                    horizontallyCollapsingItemIDs.remove(itemID)
+                }
+            },
+            shouldContinue: { horizontallyBlurringItemIDs.contains(itemID) },
+            commit: {
+                guard dataStore.items.contains(where: { $0.id == itemID }) else { return }
+                commitHorizontalAnimatedDelete(item, deletedItemID: itemID, targetSelectionID: targetSelectionID)
+            },
+            rollback: {
+                horizontallyBlurringItemIDs.remove(itemID)
+                horizontallyFadingItemIDs.remove(itemID)
+                horizontallyCollapsingItemIDs.remove(itemID)
+            }
+        )
+
+    }
+
+    private func runHorizontalSlotRemovalAnimation(
+        setBlurred: @escaping (Bool) -> Void,
+        setFading: @escaping (Bool) -> Void,
+        setCollapsing: @escaping (Bool) -> Void,
+        shouldContinue: @escaping () -> Bool,
+        commit: @escaping () -> Void,
+        rollback: @escaping () -> Void
+    ) {
+        withAnimation(HorizontalCardRemovalAnimation.blur) {
+            setBlurred(true)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + HorizontalCardRemovalAnimation.fadeDelay) {
+            guard shouldContinue() else { return }
+            withAnimation(HorizontalCardRemovalAnimation.fade) {
+                setFading(true)
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + HorizontalCardRemovalAnimation.widthDelay) {
+            guard shouldContinue() else { return }
+            withAnimation(HorizontalCardRemovalAnimation.width) {
+                setCollapsing(true)
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + HorizontalCardRemovalAnimation.commitDelay) {
+            guard shouldContinue() else { return }
+            commit()
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + HorizontalCardRemovalAnimation.commitDelay + 2.0) {
+            guard shouldContinue() else { return }
+            rollback()
+        }
+    }
+
+    private func horizontalSelectionTarget(afterRemoving itemID: Int64) -> ClipboardItem.ID? {
+        let visibleIDs = displayItems.compactMap(\.id)
+        let remainingIDs = visibleIDs.filter { $0 != itemID }
+        guard !remainingIDs.isEmpty else { return nil }
+
+        if let currentSelectedID = selectedId.flatMap({ $0 }),
+           currentSelectedID != itemID,
+           remainingIDs.contains(currentSelectedID) {
+            return currentSelectedID
+        }
+
+        let deletedIndex = visibleIDs.firstIndex(of: itemID) ?? 0
+        return remainingIDs[min(deletedIndex, remainingIDs.count - 1)]
+    }
+
+    private func commitHorizontalAnimatedDelete(
+        _ item: ClipboardItem,
+        deletedItemID: Int64,
+        targetSelectionID: ClipboardItem.ID?
+    ) {
+        log.info("commitHorizontalAnimatedDelete: item.id=\(deletedItemID)")
+
+        interaction.suppressNextItemsChangeSelection = true
+        vm.deleteItem(item)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            let currentSelectionWasDeleted = selectedId == deletedItemID
+            let currentSelectionStillExists = selectedId.map { currentID in
+                dataStore.items.contains(where: { $0.id == currentID })
+            } ?? false
+
+            if currentSelectionWasDeleted || !currentSelectionStillExists {
+                if selectedId != targetSelectionID {
+                    interaction.suppressNextSelectionScroll = true
+                    selectedId = targetSelectionID
+                }
+            }
+
+            refreshDisplayItems(allowSelectionRepair: false)
+
+            if isPreviewOpen {
+                updatePreviewNow(for: selectedId)
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            interaction.suppressNextItemsChangeSelection = false
+        }
+    }
     
-    private func performDelete(_ item: ClipboardItem) {
+    private func performDelete(_ item: ClipboardItem, animation: Animation? = .easeOut(duration: 0.2)) {
         log.info("performDelete: item.id=\(String(describing: item.id))")
 
-        withAnimation(.easeOut(duration: 0.2)) {
+        let deleteAction = {
             let index = dataStore.items.firstIndex(where: { $0.id == item.id })
             log.info("performDelete: found at index=\(String(describing: index)), calling vm.deleteItem")
             vm.deleteItem(item)
@@ -1938,6 +2267,14 @@ struct HistoryListView: View {
             } else {
                 refreshDisplayItems()
             }
+        }
+
+        if let animation = animation {
+            withAnimation(animation) {
+                deleteAction()
+            }
+        } else {
+            deleteAction()
         }
     }
 

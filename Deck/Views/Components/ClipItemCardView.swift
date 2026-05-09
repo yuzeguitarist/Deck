@@ -427,6 +427,22 @@ struct ClipItemCardView: View {
         Int(8 * cardScale * 1.5)
     }
 
+    private var horizontalCardShadowColor: Color {
+        guard isHorizontalLayout else { return .clear }
+        if #available(macOS 26.0, *) {
+            return Color.black.opacity(0.08)
+        }
+        return Color.black.opacity(0.10)
+    }
+
+    private var horizontalCardShadowYOffset: CGFloat {
+        guard isHorizontalLayout else { return 0 }
+        if #available(macOS 26.0, *) {
+            return 0
+        }
+        return -1
+    }
+
     init(
         item: ClipboardItem,
         isSelected: Bool,
@@ -485,6 +501,12 @@ struct ClipItemCardView: View {
         }
         .frame(width: effectiveCardSize, height: effectiveCardSize)
         .clipShape(RoundedRectangle(cornerRadius: Const.radius, style: .continuous))
+        .shadow(
+            color: horizontalCardShadowColor,
+            radius: isHorizontalLayout ? 2 : 0,
+            x: 0,
+            y: horizontalCardShadowYOffset
+        )
         .overlay {
             if isSelected {
                 RoundedRectangle(cornerRadius: Const.radius, style: .continuous)
@@ -621,11 +643,10 @@ struct ClipItemCardView: View {
 
             // Queue position or Type icon
             if let queuePos = pasteQueue.queuePosition(of: item) {
-                Text("\(queuePos + 1)")
+                Text("#\(queuePos + 1)")
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 20, height: 20)
-                    .background(Circle().fill(Color.orange))
+                    .monospacedDigit()
+                    .foregroundStyle(.orange)
             } else {
                 VStack(spacing: 1) {
                     HStack(spacing: 4) {
@@ -820,21 +841,26 @@ struct ClipItemCardView: View {
         }
         .task(id: smartTaskID, priority: .utility) {
             guard shouldRunSmartAnalysisTask else {
-                smartState = SmartContentState()
+                if smartState.hasSmartContent || smartState.isLoading {
+                    smartState = SmartContentState()
+                }
                 return
             }
-            smartState = SmartContentState()
-            try? await Task.sleep(nanoseconds: 120_000_000)
+
+            // Defer non-essential card enrichment until the scroll gesture has had a chance
+            // to settle. Avoiding the intermediate loading state keeps Markdown/text cards
+            // visually stable while they are entering the LazyHStack viewport.
+            try? await Task.sleep(nanoseconds: 180_000_000)
             guard !Task.isCancelled else { return }
-            smartState.isLoading = true
-            defer { smartState.isLoading = false }
-            // 异步加载智能分析
             let cached = await SmartContentCache.shared.analysis(for: item)
             guard !Task.isCancelled else { return }
-            smartState.analysis = cached.analysis
-            smartState.isMarkdown = cached.isMarkdown
-            smartState.containsLaTeX = cached.containsLaTeX
-            smartState.calculationResult = cached.calculationResult
+
+            var nextState = SmartContentState()
+            nextState.analysis = cached.analysis
+            nextState.isMarkdown = cached.isMarkdown
+            nextState.containsLaTeX = cached.containsLaTeX
+            nextState.calculationResult = cached.calculationResult
+            smartState = nextState
         }
     }
 
