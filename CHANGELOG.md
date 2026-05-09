@@ -4,6 +4,237 @@ This file is auto-generated from GitHub Releases by [release-changelog-bot](.git
 
 <!-- release-changelog-bot:auto -->
 
+<!-- release-changelog-bot:tag:v1.4.5 -->
+## v1.4.5 — v1.4.5 | Intermicāns
+
+- **Tag:** `v1.4.5`
+- **Published:** 2026-05-09T11:59:42Z
+
+### Release notes
+
+<p align="center">
+  <a href="https://deckclip.app/download" rel="noopener noreferrer" target="_blank">
+    <img width="1525" height="896" alt="Deck" src="https://github.com/yuzeguitarist/Deck/raw/main/photos/Deck.webp" style="max-width: 100%; height: auto;" />
+  </a>
+</p>
+
+---
+
+## Release Notes v1.4.5
+
+<details>
+<summary><strong>SQLite 基准图表</strong> · SQLite benchmark charts</summary>
+
+<p align="center">
+  <img alt="SQLite search latency" src="https://github.com/user-attachments/assets/797a4b8e-7453-4bc7-84ea-fbefc7f7d3b4" width="1100" /><br />
+  <sub>搜索延迟 · Search latency</sub>
+</p>
+
+<p align="center">
+  <img alt="SQLite search speedup" src="https://github.com/user-attachments/assets/e62d7c26-123c-4ba9-929f-7f1bde4ad8e9" width="1100" /><br />
+  <sub>加速比 · Speedup</sub>
+</p>
+
+<p align="center">
+  <img alt="SQLite query health" src="https://github.com/user-attachments/assets/d77fd4f0-fb50-4bb4-8665-67334d819bdf" width="1100" /><br />
+  <sub>查询健康度 · Query health</sub>
+</p>
+
+<p align="center">
+  <img alt="SQLite run profile" src="https://github.com/user-attachments/assets/7d54e3a7-28c9-4df9-9ab5-d13932ae9e81" width="1100" /><br />
+  <sub>整轮运行概况 · Run profile</sub>
+</p>
+
+</details>
+
+### TL;DR
+
+-   Clipboard capture now rides the private pboard/XPC invalidation path: `invalidate-cache` / `invalidate-entries` wake Deck immediately, while polling becomes a sparse health check and safety fallback.  
+
+-   A new Deck SQLite Benchmark suite exposed the FTS5 `bm25 + timestamp` full-sort trap; search now uses bounded `rowid DESC` candidates plus table-side filtering/sorting. On the 25k-row medium benchmark, the worst multi-condition search dropped from **43.1s to 154.6ms** (**278.6x**) with **5/5 timeouts eliminated**, and the full run fell from **51.7s to 8.7s**.  
+
+-   Stronger replay protection and verification ordering, plus larger socket reads for big frames.  
+
+-   `deckclip mcp serve` now exits if no MCP initialize request arrives, while `mcp doctor` reports running bridge processes and `mcp cleanup` can clear likely idle instances.  
+
+-   Faster copy/cut detection with near-immediate sound and menu-bar feedback; successful `Cmd+C` copies inside the Deck panel now play the same feedback sound immediately.  
+
+-   Reliable `reasoning_content` persistence and playback across turns and tool calls.  
+
+- **IDE Source Anchor 支持 Sublime Text / Zed**  
+  IDE Source Anchor now covers Sublime Text and Zed by reading Sublime session state and Zed `zed-metadata`, so copied code can jump back to the original file and line.  
+
+-   Code preview now uses lightweight single-pass token scanning with caching, highlighting strings, comments, keywords, functions, types, properties, numbers, and other common semantics, while reducing the overhead of multiple rounds of regex scanning.  
+
+-   Trace-driven hot-path work reduces main-thread menu construction, Markdown detection, and long-text checking overhead.  
+
+-   Panel presentation now uses a more natural edge-aligned slide path, with tighter horizontal ambient-bar/card spacing to reduce bottom clipping and empty-space feel.  
+
+-   Long-text previews now avoid eager full-document TextKit/CoreText layout and coalesce geometry-driven relayouts, preventing runaway memory growth and menu-bar unresponsiveness on very large text.  
+
+-   Image preview and list thumbnail loading now run at utility priority, avoiding priority-inversion Hang Risk reports when high-priority UI tasks wait on default-priority ImageIO workers.  
+
+-   After image-heavy panel sessions, hiding the panel now releases the hidden SwiftUI tree plus image thumbnails, large preview images, PDF thumbnails, and link-preview artwork caches. Everything is rebuilt at the same quality on the next open, without feature cuts.  
+
+-   Image paste and drag compatibility is improved for Claude Code terminal workflows and Jianying screenshot imports: Deck now selects the safer paste shortcut per target host and exports image drags through Deck-managed temporary file representations.  
+
+-   `PreviewCPU.trace` / `aitrace` guided a multi-file preview fix: Deck now lazily builds file entries from the horizontal viewport instead of rendering hundreds of file chips and icons at once.  
+
+-   Recovery backups are more reliable across delete-all flows, security-mode toggles, FTS/vector indexes, and external Blob references.  
+
+### Improvements
+
+-   Added a standalone SQLite benchmark that mirrors Deck’s real table, composite indexes, FTS5 trigram setup, triggers, WAL/PRAGMAs, lightweight list projection, and startup / panel / search / write / maintenance scenarios. Results are emitted as JSON + CSV with `EXPLAIN QUERY PLAN`, index/full-scan/temp-B-tree flags, timeouts, throughput, and DB/WAL/Blob storage snapshots. The medium scale uses 25,000 mixed text/code/URL/image/file/rich-text rows and can drive read paths through 36 read-only connections, so database changes are now measured instead of guessed.  
+
+-   FTS5 search no longer fully scores and temp-sorts large match sets with `ORDER BY bm25(ClipboardHistory_fts), timestamp DESC, id DESC`. Plain searches now pull bounded `rowid DESC LIMIT` results directly from the virtual table; filtered searches materialize a finite FTS candidate set and then let `ClipboardHistory` indexes handle type/tag filtering and recency ordering. On the medium benchmark, keyword search improved **1105.0ms → 60.0ms (18.4x)**, date-filtered search **1125.4ms → 85.8ms (13.1x)**, type-filtered search **452.6ms → 111.8ms (4.0x)**, app-filtered search **825.2ms → 169.5ms (4.9x)**, and the worst multi-condition combo **43086.4ms → 154.6ms (278.6x)**. This cuts temp B-trees, long CPU spins, and read-contention energy at the same time.  
+
+- **私有 pboard/XPC Invalidation Bridge**  
+  Added a runtime pboard/XPC invalidation bridge: Deck connects to `com.apple.pasteboard.1`, performs `create` / `get-counts` / `refresh-cache`, and wakes the existing capture pipeline as soon as private invalidation pushes arrive.  
+
+-   Once the private event path is validated in the active GUI session, polling is downgraded to a 30s sparse watchdog, preserving responsiveness while cutting idle wakeups.  
+
+-   Read buffer raised from 8KiB to 64KiB (aligned with core) to reduce syscall overhead for large payloads.  
+
+-   Chat stream frames deserialize once at the protocol layer instead of round-tripping through generic JSON values.  
+
+-   `deckclip mcp serve` now exits if no MCP `initialize` request arrives within 60 seconds, preventing stale stdio bridge processes after host startup/handshake failures. Initialized sessions are not interrupted by a generic idle timeout, and the guard can be disabled with `DECKCLIP_MCP_INITIALIZE_TIMEOUT_SECONDS=0`.  
+
+- **Deck MCP doctor / cleanup**  
+  `deckclip mcp doctor` now reports running `deckclip mcp serve` processes with count, PID, PPID, parent process, elapsed time, and command. `deckclip mcp cleanup --dry-run --idle-hours <hours>` previews cleanup candidates before removing likely idle bridge processes.  
+
+-   Prefers pboard/XPC invalidation events; before validation, after disconnects, or during system lifecycle transitions, Deck automatically falls back to adaptive polling plus short copy-shortcut probes.  
+
+-   After the pboard/XPC path is first validated, Deck keeps a 120-second warmup window with 5-second health checks before relaxing to the 30-second sparse watchdog, preventing premature low-frequency checks if delivery silently stops after the first event.  
+
+-   Resubscribe work is coalesced for paired `invalidate-cache` / `invalidate-entries` pushes: same-generation refreshes are skipped, in-flight requests record a pending generation, and only genuinely newer generations trigger a follow-up refresh.  
+
+-   Markdown table-separator and horizontal-rule checks now use lightweight character scans instead of hot regex/string-replacement paths.  
+
+-   Long-text preview disables automatic data/spell/grammar/text replacement checks while keeping Cmd+F, avoiding DataDetectors string-folding work on the UI path.  
+
+-   Large image decoding in `PreviewOverlayView` and list thumbnail work in `ClipItemRowView` now use utility QoS; the existing downsample/cache/fallback behavior is unchanged, with only task priority adjusted to reduce QoS inversion noise in Instruments Hang Risk.  
+
+-   ImageIO paths for card thumbnails, list/preview thumbnails, and write-time preview generation now use local autorelease pools and disable source-level caching while preserving immediate downsampling plus the existing size/format fallbacks, reducing transient object and dirty-page retention after large image decodes.  
+
+-   Once the panel remains hidden, Deck unloads the hidden `NSHostingView<DeckContentView>` and clears rebuildable `CGImage` / `NSImage` visual caches, including card thumbnails, large preview images, PDF first-page thumbnails, base64 image thumbnails, and Link Preview favicon/hero images. The next panel open reloads them through the same behavior path.  
+
+-   For copied batches with dozens or hundreds of files, the space preview keeps exact counts and next/previous navigation; the switcher now uses a viewport-driven `LazyHStack` so only horizontally visible file chips are instantiated, while arrow navigation only scrolls the selected file into view instead of defining the render window.  
+
+-   Frequently used context-menu labels are cached to avoid repeated bundle localization lookups during `ClipItemCardView` menu construction.  
+
+-   `aitrace` evidence from `DeckGPU.trace`, `DeckLaunch&Pannel.trace`, `DeckOpenPannelDisk.trace`, and `SwiftAnimation.trace` guided a focused panel hot-path pass: phone detection now caches results and uses precompiled regexes, template-library menus read lightweight library metadata only, script-plugin scanning is warmed off the interaction path, and `deck://paste` query lookup is indexed once, preserving behavior while reducing CPU and I/O churn during panel opening, animation, and context-menu construction.  
+
+-   Panel content now slides inside a transparent animation host, preserving the visible screen inset in both horizontal and vertical layouts while allowing the rounded panel to enter and leave as a complete surface. Durations and cubic timing curves were tightened for a snappier feel. The horizontal ambient bar is also shorter and closer to the cards, with a small card-size compensation to keep the bottom area visually compact.  
+
+-   Horizontal cards now use a subtler outer shadow that preserves the header background hierarchy; queue-mode horizontal cards now show a yellow `#number` marker in the top-right instead of a bright circular badge, while vertical cards remain unchanged.  
+
+-   The `Search Clipboard` field now uses a lighter translucent recessed fill, with a gray stroke in Light Mode, a white stroke in Dark Mode, and restrained inner light/shade transitions so the search area sits subtly below the Liquid Glass surface without a heavy focus ring.  
+
+-   Horizontal card deletion now uses a two-stage exit: the card content blurs, fades, and scales down first, then its slot collapses so neighboring cards slide into place naturally. Vertical layout keeps the existing behavior.  
+
+-   `aitrace` evidence from `DeckUIMonitorTrace.trace`, `DeckURLNet.trace`, and `TimeProfile.trace` drove a low-regression energy pass: `MultipeerService` now lazily creates `MCSession` only for real connect/invite/send paths and releases only the idle session (not the advertiser/browser), cutting persistent `MultipeerConnectivity` send/recv worker cost; copy feedback releases `AVAudioPlayer` after playback so AudioSession workers do not stay resident; LAN-send and script-plugin menus use lightweight snapshots to reduce SwiftUI fanout; `SmartTextService` JWT detection now uses a single-pass byte scanner instead of heavier regex work; and the change was backed by a new minimal LAN lifecycle regression test plus the existing Multipeer stress experiment to confirm idle session release does not reintroduce discovery-object churn.  
+
+-   `DeckCPU.trace` / `aitrace 0.2.0` showed that the low real CPU utilization mostly came from thread waits plus short main-thread SwiftUI diff/layout bursts, while the safe code-level wins were `SearchService.exactSearchIds` spending time in Swift `Substring` indexing and `SmartTextService.detectMarkdownSignals` entering split/regex work for plain text. Exact-search ID ordering now uses `NSString.range(of:options:)` for case/diacritic-insensitive existence checks, avoiding Swift `Range<String.Index>` construction when highlight ranges are not needed; Markdown detection now exits early when no Markdown syntax marker exists, keeping plain text out of line-splitting and regex paths. Functionality, ordering, match semantics, and Markdown capabilities remain unchanged.  
+
+- **IDE Source Anchor：Sublime Text 与 Zed**  
+  Sublime Text copies now resolve selected sheet/selection from `Auto Save Session.sublime_session` / `Session.sublime_session`; Zed copies parse private `zed-metadata` (`file_path` plus 0-based `line_range`) and persist it as Deck `source_anchor`.  
+
+-   Source Anchor opening prefers the matching IDE CLI (`subl` / `zed`) with URL/system-open fallbacks, letting preview clicks return to the original source line.  
+
+-   Replaced the old keyword/string/number/comment regex passes with a lightweight capture-style scanner: comments and strings are isolated first, then language-aware passes color declarations, calls, types, properties, JSON/YAML keys, HTML/XML tags/attributes, Shell variables, and common structural tokens.  
+
+-   The iOS shortcut still exposes only “Upload Clipboard” and “Download Clipboard”, but uploads no longer repeatedly coerce and count clipboard item types on the iPhone. All uploads use the binary endpoint, with the Mac classifying text, images, and files, reducing Shortcuts overhead and frame-stream interruptions during file transfers.  
+
+-   The Mac now responds to iOS uploads as soon as the database insert succeeds; panel refresh, last-sync time, paste, and iCloud sync finish in the background. Non-multipart file uploads prefer moving the temporary upload file instead of copying it again, reducing large-file latency.  
+
+-   Download lookup now stops as soon as a pullable row is found instead of mapping a full 500-row batch first, reducing decryption and object-construction work for large histories or security mode.  
+
+### Fixes
+
+-   The private clipboard bridge now handles lock screen, display sleep, system sleep, wake, and pboard daemon lifecycle transitions with suspend / resume / bootstrap; `connection invalid` is treated as a graceful retry path after cleaning stale uuid/connection state.  
+
+-   After wake, if `refresh-cache` rejects a stale `change` token with `com.apple.pboard.error = -22`, Deck now keeps the successful `get-counts` subscription and retries `refresh-cache` once without the stale token instead of degrading the bridge.  
+
+-   Fixed a resubscribe race where `get-counts` could advance to a newer generation while a following `refresh-cache` returned stale metadata; Deck now treats generation as the ordering signal and ignores backward pboard state updates.  
+
+-   The watchdog no longer kills the private event bridge after a single missed change; it first performs fallback polling and requests `get-counts` / `refresh-cache` resubscription, only restarting after repeated misses.  
+
+-   `invalidate-cache`, `invalidate-entries`, and `flush-entries` now flow through one private event callback; Swift validates delivery, switches to event-driven mode, and triggers capture after debounce-confirmed changeCount movement.  
+
+-   Private event debounce now uses a bounded 12ms / 35ms / 75ms event-triggered settle window instead of a single 12ms sample, giving `NSPasteboard.changeCount` time to catch up after wake, promised metadata, or daemon churn without returning to steady high-frequency polling.  
+
+-   Receiving a pboard event alone no longer validates the private bridge; debounce must prove that the event maps to an effective `changeCount` movement. If three real changes during probing are captured only by fallback polling, Deck disables the private bridge and stays on normal adaptive polling so older macOS versions or incompatible protocol behavior cannot fall into a 30-second fallback path.  
+
+-   Nonces map to timestamps with time-window eviction; overflow trims oldest entries instead of clearing the cache, closing a replay window.  
+
+-   Nonces are recorded only after HMAC verification so bogus requests cannot fill the replay cache.  
+
+-   Sound and status feedback fire as soon as a clipboard change is confirmed, not after parsing, rules, or persistence.  
+
+-   `Cmd+C` inside the Deck panel now triggers local copy feedback immediately after a successful copy, so Deck-owned pasteboard writes no longer produce an update-only response with no sound.  
+
+-   Shortcuts/AppIntent and Orbit CLI bridge paste paths now explicitly discard the `ClipboardService.paste(...)` return value, clearing Swift `MainActor.run` unused-result warnings.  
+
+-   Accumulates `reasoning_content` from streaming and non-streaming replies, persists it on assistant messages, and sends it back to the API verbatim to avoid thinking-mode HTTP 400s.  
+
+-   Assistant messages that include `tool_calls` also carry `reasoning_content` on outbound API calls for multi-turn tool use.  
+
+-   YAML with stronger structured-data evidence is no longer misclassified as Markdown because of `---` or list-like weak Markdown signals.  
+
+-   Fixed runaway memory growth in long-text previews where clip-view geometry changes repeatedly drove full `prewarmScrollableLayout`, `ensureLayout`, and `usedRect` work, expanding TextKit/CoreText caches and physical footprint. Very large text now uses guarded non-contiguous lazy layout.  
+
+-   Exact search now uses literal matching with newest-copied results first, preventing FTS relevance or title boosting from surfacing older equal matches; equal-score fuzzy hits also keep a stable score-first, recency-tiebreak order.  
+
+-   Deleting a custom tag now moves its items back to the ungrouped state instead of deleting clipboard records, external blobs, or synced data. This also fixes no-keyword rule-filter pagination truncation, stale AI Chat streams clearing newer state, and direct paste firing before the panel fully dismisses.  
+
+-   Fixed security-mode migration failures after creating a recovery backup, deleting all items, restoring the backup, and enabling security mode.  
+
+-   Storage is reinitialized even after failed recovery-restore attempts so disconnected SQL handles do not linger until restart.  
+
+-   Database and `Blobs` recovery snapshots are committed as a pair; backups are skipped when referenced external Blob files are already missing.  
+
+-   FTS is rebuilt after recovery restore, and stale FTS/vec triggers are cleaned around delete-all and security-migration paths with failure recovery.  
+
+-   Stale `blob_path` references from legacy DB-only backups are cleared after restore or during security migration to stop repeated missing-Blob warnings.  
+
+-   Deck-owned sources such as iOS Sync, Deck WLAN, and LAN Sharing now use the Deck app icon instead of falling back to a blank or generic document icon across rows, cards, and preview metadata.  
+
+-   Fixed Claude Code image paste in Ghostty when the window title does not contain `Claude Code` and only shows a title like `jerry · 838ff463-eae1-45`: Deck now matches the Claude Code session-id prefix against `~/.claude/session-env` before switching to the `Ctrl+V` image-paste path, preventing the previous `Command+V` fallback from entering a stray `v`.  
+
+-   Image drag providers for cards and vertical rows now share the `ClipboardItem` implementation; screenshots/images are materialized as Deck-managed temporary copies and exposed through `NSItemProvider` file representations to reduce permission errors in stricter sandboxed importers such as Jianying.  
+
+### Notes
+
+-   The Biome diagnostic transport has been removed: although `BiomeLibrary` / `BiomeStreams` / `BMBiomeScheduler` / `BPSSink` could be created, third-party Deck processes did not receive `Pasteboard.Change` inputs; the verified pboard/XPC invalidation path is now the only private transport.  
+
+-   The private pboard/XPC path is used only as a trigger; actual clipboard data still comes from `NSPasteboard`. If startup validation, runtime connection, lifecycle recovery, or resubscription fails, Deck restores standard adaptive polling.  
+
+-   Shared canonical JSON/HMAC vectors keep Rust integration tests and Swift unit tests aligned; the app exposes a test-only canonical JSON helper to lock signing behavior.  
+
+-   Rust sources are formatted to pass `cargo fmt` / `rustfmt --check` without spurious drift.  
+
+-   This pass used `CPU.trace`, `UI.trace`, and `Memory.trace`; because `Memory.trace` did not expose actionable app memory stacks, only trace-backed low-risk CPU/UI changes were shipped.  
+
+-   Legacy DB-only recovery backups cannot restore external large payloads after those files are gone; the app now cleans invalid references while keeping usable metadata and previews.  
+
+### Compatibility & Behavior Notes
+
+-   If the private invalidation path is unavailable because of macOS version, session state, or pboard daemon lifecycle, Deck keeps or restores adaptive polling; correctness does not depend on private APIs, while supported systems get lower power and faster triggers.  
+
+-   Older chats that never stored `reasoning_content` before upgrade may still error in rare cases; starting a new conversation fully benefits from the fix.  
+
+### Upgrade Notes
+
+-   If you hit reasoning-related API errors, start a new chat first; verify critical legacy threads before relying on them.  
+
+-   After restoring an old DB-only backup, create a fresh recovery backup once the list looks correct so the new `.bak` and `.bak.blobs` are saved together.  
+
+---
+
+### Assets
+
+- [`Deck.dmg`](https://github.com/yuzeguitarist/Deck/releases/download/v1.4.5/Deck.dmg)
+
 <!-- release-changelog-bot:tag:v1.4.4 -->
 ## v1.4.4 — v1.4.4 | perlīmātus
 
