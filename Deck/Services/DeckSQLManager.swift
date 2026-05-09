@@ -5675,6 +5675,34 @@ extension DeckSQLManager {
         return terms.joined(separator: " OR ")
     }
 
+    private func containsCJKCharacters(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            // CJK Unified Ideographs and extensions
+            (0x4E00...0x9FFF).contains(scalar.value) ||   // CJK Unified
+            (0x3400...0x4DBF).contains(scalar.value) ||   // CJK Extension A
+            (0x20000...0x2A6DF).contains(scalar.value) || // CJK Extension B
+            (0x3000...0x303F).contains(scalar.value) ||   // CJK Symbols
+            (0x3040...0x309F).contains(scalar.value) ||   // Hiragana
+            (0x30A0...0x30FF).contains(scalar.value) ||   // Katakana
+            (0xAC00...0xD7AF).contains(scalar.value)      // Korean Hangul
+        }
+    }
+
+    private func canExpandFTSCandidateWindow(for keyword: String) -> Bool {
+        let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        guard !DeckUserDefaults.securityModeEnabled else { return false }
+        guard syncOnDBQueue({ db != nil }) else { return false }
+
+        let usesTrigram = syncOnDBQueue { ftsUsesTrigram }
+        if usesTrigram {
+            return !buildFTSQuery(from: trimmed, useTrigram: true).isEmpty
+        }
+
+        guard !containsCJKCharacters(trimmed) else { return false }
+        return !buildFTSQuery(from: trimmed, useTrigram: false).isEmpty
+    }
+
     private func runFTSQuery(_ ftsQuery: String, limit: Int) async -> [Int64] {
         await runFTSQuery(ftsQuery, typeFilter: nil, tagId: nil, limit: limit)
     }
@@ -5685,12 +5713,34 @@ extension DeckSQLManager {
         tagId: Int?,
         limit: Int
     ) async -> [Int64] {
+        let safeLimit = max(1, limit)
         return await withReadDBAsync { db, _ in
+            let hasFilters = (typeFilter?.isEmpty == false) || (tagId != nil && tagId != -1)
+            if !hasFilters {
+                let sql = """
+                    SELECT h.id
+                    FROM ClipboardHistory_fts
+                    JOIN ClipboardHistory h ON h.id = ClipboardHistory_fts.rowid
+                    WHERE ClipboardHistory_fts MATCH ?
+                      AND h.is_encrypted = 0
+                    ORDER BY h.timestamp DESC, h.id DESC
+                    LIMIT ?
+                """
+                let stmt = try db.prepare(sql).bind(ftsQuery, safeLimit)
+                var ids: [Int64] = []
+                ids.reserveCapacity(safeLimit)
+                while let row = try stmt.failableNext() {
+                    if let id = self.bindingToInt64(row[0]) {
+                        ids.append(id)
+                    }
+                }
+                return ids
+            }
+
             var filters = [
-                "ClipboardHistory_fts MATCH ?",
                 "h.is_encrypted = 0"
             ]
-            var bindings: [Binding?] = [ftsQuery]
+            var bindings: [Binding?] = [ftsQuery, safeLimit]
 
             if let types = typeFilter, !types.isEmpty {
                 let placeholders = Array(repeating: "?", count: types.count).joined(separator: ",")
@@ -5705,18 +5755,25 @@ extension DeckSQLManager {
                 bindings.append(tagId)
             }
 
-            bindings.append(limit)
+            bindings.append(safeLimit)
             let sql = """
-                SELECT ClipboardHistory_fts.rowid, bm25(ClipboardHistory_fts) AS score
-                FROM ClipboardHistory_fts
-                JOIN ClipboardHistory h ON h.id = ClipboardHistory_fts.rowid
+                WITH fts_ids(rowid) AS (
+                    SELECT rowid
+                    FROM ClipboardHistory_fts
+                    WHERE ClipboardHistory_fts MATCH ?
+                    ORDER BY rowid DESC
+                    LIMIT ?
+                )
+                SELECT h.id
+                FROM fts_ids
+                JOIN ClipboardHistory h ON h.id = fts_ids.rowid
                 WHERE \(filters.joined(separator: " AND "))
-                ORDER BY score, h.timestamp DESC, h.id DESC
+                ORDER BY h.timestamp DESC, h.id DESC
                 LIMIT ?
             """
             let stmt = try db.prepare(sql).bind(bindings)
             var ids: [Int64] = []
-            ids.reserveCapacity(limit)
+            ids.reserveCapacity(safeLimit)
             while let row = try stmt.failableNext() {
                 if let id = self.bindingToInt64(row[0]) {
                     ids.append(id)
@@ -5826,19 +5883,8 @@ extension DeckSQLManager {
         }
 
         // 检测是否包含 CJK 字符（中日韩）
-        let containsCJK = trimmed.unicodeScalars.contains { scalar in
-            // CJK Unified Ideographs and extensions
-            (0x4E00...0x9FFF).contains(scalar.value) ||   // CJK Unified
-            (0x3400...0x4DBF).contains(scalar.value) ||   // CJK Extension A
-            (0x20000...0x2A6DF).contains(scalar.value) || // CJK Extension B
-            (0x3000...0x303F).contains(scalar.value) ||   // CJK Symbols
-            (0x3040...0x309F).contains(scalar.value) ||   // Hiragana
-            (0x30A0...0x30FF).contains(scalar.value) ||   // Katakana
-            (0xAC00...0xD7AF).contains(scalar.value)      // Korean Hangul
-        }
-
         // FTS5 默认分词器对 CJK 支持不好，保留内存搜索兜底
-        if containsCJK {
+        if containsCJKCharacters(trimmed) {
             return await searchWithSQLLikeIds(keyword: trimmed, typeFilter: typeFilter, tagId: tagId, limit: limit)
         }
 
@@ -5963,25 +6009,31 @@ extension DeckSQLManager {
         guard !Task.isCancelled else { return [] }
 
         let hasFilters = (typeFilter?.isEmpty == false) || (tagId != nil && tagId != -1)
-        let initialLimit = max(limit * 2, limit)
+        let shouldExpandCandidateWindow = hasFilters && canExpandFTSCandidateWindow(for: keyword)
+        let initialLimit = shouldExpandCandidateWindow ? max(limit * 2, limit) : max(1, limit)
         let maxLimit = min(max(limit * 20, 2000), 5000)
 
         var searchLimit = initialLimit
         var matchingIds: [Int64] = []
         var rows: [Row] = []
         while true {
-            // Get matching IDs from FTS
+            // Only expand the candidate window for real FTS searches. Fallback paths
+            // (security-mode in-memory search and SQL LIKE) already apply type/tag
+            // filters while scanning, so increasing the limit just repeats expensive
+            // work without discovering a later FTS candidate page.
             matchingIds = await searchFTS(
                 keyword: keyword,
-                typeFilter: typeFilter,
-                tagId: tagId,
+                typeFilter: shouldExpandCandidateWindow ? nil : typeFilter,
+                tagId: shouldExpandCandidateWindow ? nil : tagId,
                 limit: searchLimit
             )
-            guard !matchingIds.isEmpty else { return [] }
+            if matchingIds.isEmpty {
+                return []
+            }
 
             rows = await fetchRowsForIds(matchingIds, typeFilter: typeFilter, tagId: tagId)
 
-            if !hasFilters ||
+            if !shouldExpandCandidateWindow ||
                 rows.count >= limit ||
                 matchingIds.count < searchLimit ||
                 searchLimit >= maxLimit {
