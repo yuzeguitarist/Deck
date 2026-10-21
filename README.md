@@ -84,17 +84,12 @@
 
 ## Install
 
-> **Temporary notice:** Please do not download or update Deck right now. If your current installed version still works, keep using it and do not use in-app auto update until further notice.
-
 ### Homebrew
 
 ```bash
 brew tap yuzeguitarist/deck
-export HOMEBREW_CASK_OPTS="--no-quarantine"
 brew install --cask deckclip
 ```
-
-`HOMEBREW_CASK_OPTS="--no-quarantine"` disables macOS quarantine for the Homebrew cask install because Deck is not yet notarized.
 
 ### Manual
 
@@ -102,13 +97,14 @@ brew install --cask deckclip
 2. Drag `Deck.app` into **Applications**.
 3. Grant **Accessibility** (and **Input Monitoring** if prompted) in `System Settings → Privacy & Security`.
 
-### First Launch
+Deck is signed with a Developer ID and notarized by Apple, so it opens normally after download.
 
-Under normal circumstances, macOS may show **"Deck" can't be opened because Apple cannot check it for malicious software."** This is because the app is not notarized via Apple's paid Developer Program — the app is source-available and safe to use.
+### Updating from 1.4.5 or Earlier
 
-Under normal circumstances, you can resolve this by going to **System Settings → Privacy & Security**, scrolling down to find the blocked message for Deck, and clicking **Open Anyway**.
+Starting with 1.4.6, Deck uses a new signature, so macOS treats it as a new app:
 
-**Temporary exception:** because of the current packaging issue noted above, new downloads or updates may still fail right now. If your existing installed copy is still working, please keep using it as-is and **do not use in-app auto update for now**.
+- In `System Settings → Privacy & Security → Accessibility`, select the old Deck entry, click **−** to remove it, then add Deck again and turn it on.
+- If a keychain prompt appears on first launch, enter your login password and choose **Always Allow**.
 
 > Source code is public for reference only. Please use the official compiled app from Releases.
 
@@ -120,14 +116,14 @@ Under normal circumstances, you can resolve this by going to **System Settings �
 ## Quick Start
 
 1. Launch Deck.
-2. Press `Cmd + P` to open the panel.
+2. Press `Cmd + Shift + V` to open the panel (installs updated from 1.4.5 or earlier keep `Cmd + P`).
 3. Arrow keys to navigate, `Enter` to paste.
 
 ### Default Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
-| `Cmd + P` | Open Deck |
+| `Cmd + Shift + V` | Open Deck |
 | `Enter` | Paste selected |
 | `Shift + Enter` | Paste as plain text |
 | `Cmd + Number` | Quick paste (1–9) |

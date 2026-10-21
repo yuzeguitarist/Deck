@@ -88,17 +88,12 @@
 <a id="安装"></a>
 ## 安装
 
-> **临时说明：** 目前请不要下载或更新 Deck。如果你当前安装的版本还能正常使用，请继续使用现有版本，并暂时不要使用软件内自动更新。
-
 ### Homebrew
 
 ```bash
 brew tap yuzeguitarist/deck
-export HOMEBREW_CASK_OPTS="--no-quarantine"
 brew install --cask deckclip
 ```
-
-`HOMEBREW_CASK_OPTS="--no-quarantine"` 会为这次 Homebrew Cask 安装关闭 macOS quarantine，因为 Deck 目前还没有完成公证。
 
 ### 手动安装
 
@@ -106,13 +101,14 @@ brew install --cask deckclip
 2. 将 `Deck.app` 拖入 **Applications**。
 3. 在 `系统设置 → 隐私与安全性` 中授予**辅助功能**（及可能的**输入监控**）权限。
 
-### 首次启动
+Deck 已使用 Developer ID 签名并通过 Apple 公证，下载后可以直接打开。
 
-正常情况下，首次打开时，macOS 会提示 **「无法打开"Deck"，因为 Apple 无法检查其是否包含恶意软件。」** 这是因为 App 未通过 Apple 付费开发者计划的公证，本项目源码公开，可以放心使用。
+### 从 1.4.5 或更早版本升级
 
-正常情况下，解决方法是：前往 **系统设置 → 隐私与安全性**，向下滚动找到关于 Deck 的提示，点击 **仍要打开** 即可。
+从 1.4.6 开始，Deck 使用了新的签名，macOS 会把它当成一个新的 App：
 
-**当前临时例外：** 由于上面提到的安装包问题，现在新下载或更新后的版本仍然可能无法打开。如果你当前安装的旧版本还能正常使用，请先继续使用旧版本，并**暂时不要使用软件内自动更新**。
+- 在 `系统设置 → 隐私与安全性 → 辅助功能` 中，选中旧的 Deck，点 **−** 删除，再重新添加并打开开关。
+- 首次启动如果弹出钥匙串访问请求，输入登录密码并选择**始终允许**。
 
 > 源码公开仅供查看参考，请使用 Releases 里的官方编译版 App。
 
@@ -125,14 +121,14 @@ brew install --cask deckclip
 ## 快速开始
 
 1. 启动 Deck。
-2. `Cmd + P` 打开面板。
+2. `Cmd + Shift + V` 打开面板（从 1.4.5 或更早版本升级的用户仍为 `Cmd + P`）。
 3. 方向键选择，回车粘贴。
 
 ### 默认快捷键
 
 | 快捷键 | 功能 |
 |--------|------|
-| `Cmd + P` | 打开 Deck |
+| `Cmd + Shift + V` | 打开 Deck |
 | `Enter` | 粘贴选中项 |
 | `Shift + Enter` | 粘贴为纯文本 |
 | `Cmd + 数字` | 快速粘贴 (1–9) |
