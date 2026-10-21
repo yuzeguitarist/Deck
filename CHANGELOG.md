@@ -4,6 +4,85 @@ This file is auto-generated from GitHub Releases by [release-changelog-bot](.git
 
 <!-- release-changelog-bot:auto -->
 
+<!-- release-changelog-bot:tag:v1.4.6 -->
+## v1.4.6 — v1.4.6 | Restitūtus
+
+- **Tag:** `v1.4.6`
+- **Published:** 2026-10-21T04:52:45Z
+
+### Release notes
+
+<p align="center">
+  <a href="https://deckclip.app/download" rel="noopener noreferrer" target="_blank">
+    <img width="1525" height="896" alt="Deck" src="https://github.com/yuzeguitarist/Deck/raw/main/photos/Deck.webp" style="max-width: 100%; height: auto;" />
+  </a>
+</p>
+
+---
+
+## Release Notes v1.4.6
+
+### Read before updating
+
+-   **New signature: permissions need to be granted again**  
+  Deck is now signed with a Developer ID certificate and notarized by Apple, so macOS no longer blocks it after download. Because the signature changed, macOS treats it as a new app:
+  - In System Settings › Privacy & Security › Accessibility, select the old Deck entry, click “−” to remove it, then add Deck again and turn it on.
+  - If a keychain prompt appears on first launch, enter your login password and choose “Always Allow”. Denying it makes encrypted history temporarily unreadable (nothing is lost; allow it again to recover).
+  - Orbit needs to be authorized again in the same way.
+
+### New
+
+-   **⌘⇧V is no longer reserved** (#186 #184 #169 #130)  
+  The Queue Mode “Sequential Paste” shortcut can now be changed or cleared in the Queue Mode settings, which frees ⌘⇧V for showing and hiding Deck. New installs use ⌘⇧V to open Deck and ⌃⌘V for sequential paste; existing installs keep their current shortcuts.
+
+-   **Translations, fully refreshed**  
+  Every string is now translated into German, English, French, Japanese, Korean, and Traditional Chinese, and polished to match Apple terminology and tone: shorter, more natural, and less likely to crowd the layout. Traditional Chinese now uses Taiwan vocabulary.
+
+-   **Ready for macOS 27**  
+  Built with Xcode 27 and the macOS 27 SDK.
+
+### Fixed
+
+-   **Copies from iPhone are now recorded** (#173)  
+  macOS marks every Universal Clipboard item from iPhone or iPad as excluded from history, so Deck skipped them. Deck now records these items, while content marked as private (such as passwords) is still skipped.
+
+-   **Universal Clipboard stability**  
+  Deck now detects unresolved remote Universal Clipboard generations and avoids synchronous pasteboard reads while macOS is still fetching the payload.
+
+-   **Safer paste shortcuts**  
+  Panel paste, link-preview paste, and typing-paste paths now avoid unresolved remote clipboard payloads instead of blocking the UI.
+
+-   **History order scrambled** (#196)  
+  After jumping to the end of the list with ⌃E, or jumping while searching, older items could appear as the newest page and mix with new copies.
+
+-   **Survey card kept coming back** (#196)  
+  The survey card no longer reappears after you close it or open the survey.
+
+-   **Back / Forward and both ⌘ keys no longer trigger Deck** (#193)  
+  ⌘[ / ⌘] navigation in Finder or Safari (including mouse-button macros) and pressing both ⌘ keys together are no longer treated as a double-tap of ⌘.
+
+-   **Paste import only kept titles** (#192)  
+  Importing from Paste now reads content stored outside its database, so item text is no longer lost.
+
+-   **Wrong source for screenshots** (#189)  
+  Images captured with Snipaste, PixPin, CleanShot, Shottr, iShot, Xnip, and similar tools are now attributed to the app you were using before the screenshot.
+
+-   **Oversized screenshots** (#176)  
+  Uncompressed TIFF and BMP images are now saved losslessly as PNG, so a single screenshot no longer takes tens of megabytes.
+
+-   **Template library showed only 5 items** (#138)  
+  Trigger words now show every item in a template library, and you can scroll with the arrow keys.
+
+-   **`deckclip paste N` required the panel** (#185)  
+  `deckclip paste N` now works with recent history even if the panel has never been opened.
+
+-   **Orbit clipboard ring didn’t paste** (#166)  
+  Releasing the trigger key in the clipboard ring now pastes the selected item into the app you came from. If Orbit is already installed, move it from Applications to the Trash, then install it again from the Orbit page in Deck settings.
+
+### Assets
+
+- [`Deck.dmg`](https://github.com/yuzeguitarist/Deck/releases/download/v1.4.6/Deck.dmg)
+
 <!-- release-changelog-bot:tag:v1.4.5 -->
 ## v1.4.5 — v1.4.5 | Intermicāns
 
