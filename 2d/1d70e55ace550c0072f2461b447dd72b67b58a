@@ -1,0 +1,29 @@
+Deck/Models/ClipboardItem.swift
+  s_e9c44a47ee0e6f::t_dbf3adb3c8ea6b 1146-1151,1312-1317,1526-1533
+Deck/Views/Components/HistoryListView.swift
+  s_a60160a2676ef7::t_9f4b068df541af 519-524,527,1969-1970
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "2d1d70e55ace550c0072f2461b447dd72b67b58a",
+  "prompts": {},
+  "sessions": {
+    "s_a60160a2676ef7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a15c5c-6135-7692-bc7a-6c012341f794",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Yuze Pan <145409865+yuzeguitarist@users.noreply.github.com>"
+    },
+    "s_e9c44a47ee0e6f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "646b087c-01d5-47b9-b9e6-6ee321994b16",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Yuze Pan <145409865+yuzeguitarist@users.noreply.github.com>"
+    }
+  }
+}
