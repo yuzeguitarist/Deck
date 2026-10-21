@@ -516,9 +516,15 @@ struct HistoryListView: View {
                     .font(.caption)
                     .foregroundStyle(.tertiary)
 
-                Text(NSLocalizedString("⌘⇧V 依次粘贴", comment: "Sequential paste hotkey hint"))
+                let queuePasteShortcut = DeckUserDefaults.queuePasteShortcut
+                if !queuePasteShortcut.isEmpty {
+                    Text(String(
+                        format: NSLocalizedString("%@ 依次粘贴", comment: "Sequential paste hotkey hint"),
+                        queuePasteShortcut.displayString
+                    ))
                     .font(.caption)
                     .foregroundStyle(.tertiary)
+                }
 
                 Button {
                     pasteQueue.clearQueue()
@@ -1960,6 +1966,8 @@ struct HistoryListView: View {
 
     private func openFeedbackSurvey() {
         feedbackSurveyCard.openSurvey()
+        // 打开过问卷就不再展示卡片（#196）
+        requestHideFeedbackSurvey(.permanently)
     }
 
     private func hideFeedbackSurveyForCurrentSession() {

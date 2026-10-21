@@ -1143,6 +1143,12 @@ final class ClipboardItem: Identifiable, Equatable {
                 resolvedType = .png
                 content = imageData
             }
+            // PixPin 等工具只放未压缩的 TIFF，截一张图就有几十 MB（#176）。
+            if let raw = content, resolvedType == .tiff || resolvedType == .bmp,
+               let png = Self.pngDataIfSmaller(fromRaster: raw) {
+                resolvedType = .png
+                content = png
+            }
         }
         
         guard let content = content else { return nil }
@@ -1302,6 +1308,12 @@ final class ClipboardItem: Identifiable, Equatable {
             if content == nil, type.isImage(), let imageData = snapshot.fallbackImageData {
                 resolvedType = .png
                 content = imageData
+            }
+            // PixPin 等工具只放未压缩的 TIFF，截一张图就有几十 MB（#176）。
+            if let raw = content, resolvedType == .tiff || resolvedType == .bmp,
+               let png = Self.pngDataIfSmaller(fromRaster: raw) {
+                resolvedType = .png
+                content = png
             }
         }
 
@@ -1509,6 +1521,14 @@ final class ClipboardItem: Identifiable, Equatable {
 
         guard let image = foundImage else { return nil }
         return pngData(from: image)
+    }
+
+    /// 把未压缩位图（TIFF/BMP）无损转成 PNG；只有变小时才替换。
+    nonisolated private static func pngDataIfSmaller(fromRaster data: Data) -> Data? {
+        guard let rep = NSBitmapImageRep(data: data),
+              let png = rep.representation(using: .png, properties: [:]),
+              !png.isEmpty, png.count < data.count else { return nil }
+        return png
     }
 
     nonisolated private static func pngData(from image: NSImage) -> Data? {
