@@ -1,0 +1,34 @@
+deckclip/deckclip/Cargo.toml
+  s_348d273e9e38a4::t_3e4ad4799fd620 30
+deckclip/deckclip/tests/mcp_stdio.rs
+  s_348d273e9e38a4::t_f55c93da964da4 1-27,36-38,44-49,58-60,66-71,77-79,84-87
+  s_348d273e9e38a4::t_0b37f2abe3394f 28-35,39-43,50-57,61-65,72-76,80-83
+deckclip/deckclip/src/main.rs
+  s_348d273e9e38a4::t_0b37f2abe3394f 23
+deckclip/Cargo.lock
+  s_ee359c604b6e1f::t_7444d1d902aa0e 410,438,850,1108,1110,1130,1132
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b58a2e255447bce06cdd5c12362348693417cf0c",
+  "prompts": {},
+  "sessions": {
+    "s_348d273e9e38a4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a15ef3-49b9-73f1-9e75-3801ebbec5bc",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "Yuze Pan <145409865+yuzeguitarist@users.noreply.github.com>"
+    },
+    "s_ee359c604b6e1f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "64e89370-ca98-4f74-b959-e9bd376bcaaf",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Yuze Pan <145409865+yuzeguitarist@users.noreply.github.com>"
+    }
+  }
+}
