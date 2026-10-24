@@ -14,6 +14,43 @@
       "code",
       "text"
     ],
+    "com.apple.dt.Instruments": [
+      "code",
+      "text",
+      "file"
+    ],
+    "com.apple.AccessibilityInspector": [
+      "code",
+      "text"
+    ],
+    "com.apple.FileMerge": [
+      "code",
+      "text",
+      "file"
+    ],
+    "com.apple.CreateML": [
+      "code",
+      "text",
+      "image"
+    ],
+    "com.apple.PlaygroundsMac": [
+      "code",
+      "text",
+      "file"
+    ],
+    "com.apple.iphonesimulator": [
+      "code",
+      "text",
+      "image"
+    ],
+    "com.google.android.studio": [
+      "code",
+      "text"
+    ],
+    "com.krill.CodeRunner": [
+      "code",
+      "text"
+    ],
     "com.todesktop.230313mzl4w4u92": [
       "code",
       "text"
@@ -138,6 +175,30 @@
       "code",
       "text"
     ],
+    "com.electron.ollama": [
+      "code",
+      "text",
+      "image"
+    ],
+    "com.openai.chat": [
+      "text",
+      "code",
+      "image",
+      "url",
+      "file"
+    ],
+    "com.openai.codex": [
+      "code",
+      "text",
+      "file"
+    ],
+    "com.anthropic.claudefordesktop": [
+      "text",
+      "code",
+      "image",
+      "url",
+      "file"
+    ],
     "com.figma.Desktop": [
       "color",
       "image"
@@ -230,6 +291,14 @@
       "file",
       "image"
     ],
+    "com.blackmagic-design.DaVinciResolve": [
+      "file",
+      "image"
+    ],
+    "com.blackmagic-design.DaVinciResolveStudio": [
+      "file",
+      "image"
+    ],
     "com.apple.FinalCut": [
       "file",
       "image"
@@ -270,6 +339,10 @@
       "url",
       "text"
     ],
+    "com.google.Chrome.dev": [
+      "url",
+      "text"
+    ],
     "com.google.Chrome.beta": [
       "url",
       "text"
@@ -286,7 +359,19 @@
       "url",
       "text"
     ],
+    "org.mozilla.nightly": [
+      "url",
+      "text"
+    ],
     "com.microsoft.edgemac": [
+      "url",
+      "text"
+    ],
+    "com.microsoft.edgemac.Beta": [
+      "url",
+      "text"
+    ],
+    "com.microsoft.edgemac.Dev": [
       "url",
       "text"
     ],
@@ -298,7 +383,19 @@
       "url",
       "text"
     ],
+    "com.brave.Browser.beta": [
+      "url",
+      "text"
+    ],
+    "com.brave.Browser.nightly": [
+      "url",
+      "text"
+    ],
     "com.vivaldi.Vivaldi": [
+      "url",
+      "text"
+    ],
+    "com.vivaldi.Vivaldi.snapshot": [
       "url",
       "text"
     ],
@@ -306,7 +403,27 @@
       "url",
       "text"
     ],
+    "com.operasoftware.OperaGX": [
+      "url",
+      "text"
+    ],
+    "com.operasoftware.OperaAir": [
+      "url",
+      "text"
+    ],
     "com.operasoftware.OperaNext": [
+      "url",
+      "text"
+    ],
+    "com.operasoftware.OperaDeveloper": [
+      "url",
+      "text"
+    ],
+    "com.operasoftware.OperaNeon": [
+      "url",
+      "text"
+    ],
+    "com.operasoftware.OperaNeonDeveloper": [
       "url",
       "text"
     ],
@@ -319,6 +436,74 @@
       "text"
     ],
     "com.nickvision.Parabolic": [
+      "url",
+      "text"
+    ],
+    "company.thebrowser.dia": [
+      "url",
+      "text"
+    ],
+    "com.kagi.kagimacOS.RC": [
+      "url",
+      "text"
+    ],
+    "app.zen-browser.zen": [
+      "url",
+      "text"
+    ],
+    "net.imput.helium": [
+      "url",
+      "text"
+    ],
+    "com.bookry.wavebox": [
+      "url",
+      "text"
+    ],
+    "com.quark.desktop": [
+      "url",
+      "text"
+    ],
+    "com.naver.Whale": [
+      "url",
+      "text"
+    ],
+    "ru.yandex.desktop.yandex-browser": [
+      "url",
+      "text"
+    ],
+    "systems.acon.odin.browser": [
+      "url",
+      "text"
+    ],
+    "com.duckduckgo.macos.browser": [
+      "url",
+      "text"
+    ],
+    "com.tencent.qqbrowserappmac": [
+      "url",
+      "text"
+    ],
+    "io.island.Island": [
+      "url",
+      "text"
+    ],
+    "io.island.Island.beta": [
+      "url",
+      "text"
+    ],
+    "io.island.Island.canary": [
+      "url",
+      "text"
+    ],
+    "io.island.Island.dev": [
+      "url",
+      "text"
+    ],
+    "com.browseros.BrowserOS": [
+      "url",
+      "text"
+    ],
+    "com.kagi.kagimacOS": [
       "url",
       "text"
     ],
@@ -341,6 +526,203 @@
     "com.app77.FileViewer": [
       "file",
       "image"
+    ],
+    "com.aone.keka": [
+      "file"
+    ],
+    "com.macpaw.site.theunarchiver": [
+      "file"
+    ],
+    "cx.c3.theunarchiver": [
+      "file"
+    ],
+    "com.apple.Image_Capture": [
+      "image",
+      "file"
+    ],
+    "com.apple.iMovieApp": [
+      "image",
+      "file"
+    ],
+    "com.apple.RealityComposer": [
+      "image",
+      "file"
+    ],
+    "com.apple.PhotoBooth": [
+      "image",
+      "file"
+    ],
+    "com.apple.QuickTimePlayerX": [
+      "file",
+      "url"
+    ],
+    "com.apple.DVDPlayer": [
+      "file",
+      "url"
+    ],
+    "com.apple.archiveutility": [
+      "file"
+    ],
+    "com.apple.installer": [
+      "file",
+      "text"
+    ],
+    "com.apple.DiskUtility": [
+      "file"
+    ],
+    "com.apple.MigrateAssistant": [
+      "file",
+      "text"
+    ],
+    "com.apple.RemoteDesktop": [
+      "file",
+      "text"
+    ],
+    "com.apple.ScreenSharing": [
+      "url",
+      "text"
+    ],
+    "com.apple.BluetoothFileExchange": [
+      "file",
+      "text"
+    ],
+    "com.apple.audio.AudioMIDISetup": [
+      "file",
+      "text"
+    ],
+    "com.apple.configurator.ui": [
+      "file",
+      "text"
+    ],
+    "com.apple.TestFlight": [
+      "file",
+      "text"
+    ],
+    "com.apple.TransporterApp": [
+      "file",
+      "text"
+    ],
+    "com.apple.Chess": [
+      "image",
+      "file"
+    ],
+    "com.apple.clock": [
+      "text",
+      "url"
+    ],
+    "com.apple.Dictionary": [
+      "text"
+    ],
+    "com.apple.ActivityMonitor": [
+      "text"
+    ],
+    "com.apple.Console": [
+      "text",
+      "file"
+    ],
+    "com.apple.FontBook": [
+      "text",
+      "image"
+    ],
+    "com.apple.Preview": [
+      "image",
+      "file",
+      "text"
+    ],
+    "com.apple.SystemProfiler": [
+      "text",
+      "file"
+    ],
+    "com.apple.grapher": [
+      "image",
+      "text"
+    ],
+    "com.apple.VoiceOverUtility": [
+      "text"
+    ],
+    "com.apple.Maps": [
+      "url",
+      "text"
+    ],
+    "com.apple.Photos": [
+      "image",
+      "file"
+    ],
+    "com.apple.FaceTime": [
+      "text",
+      "url"
+    ],
+    "com.apple.iCal": [
+      "text",
+      "url"
+    ],
+    "com.apple.AddressBook": [
+      "text"
+    ],
+    "com.apple.TV": [
+      "url",
+      "file"
+    ],
+    "com.apple.games": [
+      "image",
+      "file"
+    ],
+    "com.apple.AppStore": [
+      "url",
+      "file"
+    ],
+    "com.apple.ScreenContinuity": [
+      "url",
+      "image"
+    ],
+    "com.apple.systempreferences": [
+      "text"
+    ],
+    "com.apple.reminders": [
+      "text"
+    ],
+    "com.apple.Passwords": [
+      "text"
+    ],
+    "com.apple.shortcuts": [
+      "code",
+      "text",
+      "file"
+    ],
+    "com.apple.podcasts": [
+      "url",
+      "text"
+    ],
+    "com.apple.news": [
+      "url",
+      "text"
+    ],
+    "com.apple.weather": [
+      "text",
+      "url"
+    ],
+    "com.apple.findmy": [
+      "url",
+      "text"
+    ],
+    "com.apple.keychainaccess": [
+      "text"
+    ],
+    "com.apple.airport.airportutility": [
+      "url",
+      "text"
+    ],
+    "com.apple.appleseed.FeedbackAssistant": [
+      "text",
+      "image"
+    ],
+    "com.apple.ScriptEditor2": [
+      "code",
+      "text"
+    ],
+    "com.apple.Automator": [
+      "code",
+      "text"
     ],
     "com.apple.Notes": [
       "text",
@@ -423,6 +805,62 @@
       "text",
       "file"
     ],
+    "com.microsoft.teams2": [
+      "text",
+      "image",
+      "file"
+    ],
+    "com.microsoft.Word": [
+      "text",
+      "file",
+      "image"
+    ],
+    "com.microsoft.Outlook": [
+      "text",
+      "url",
+      "file"
+    ],
+    "com.microsoft.onenote.mac": [
+      "text",
+      "image",
+      "file"
+    ],
+    "org.mozilla.thunderbird": [
+      "text",
+      "url",
+      "file"
+    ],
+    "com.evernote.Evernote": [
+      "text",
+      "image",
+      "file"
+    ],
+    "com.grammarly.ProjectLlama": [
+      "text"
+    ],
+    "Mattermost.Desktop": [
+      "text",
+      "image",
+      "url",
+      "file"
+    ],
+    "com.teamviewer.TeamViewer": [
+      "url",
+      "text",
+      "file"
+    ],
+    "com.citrix.receiver.nomas": [
+      "file",
+      "url"
+    ],
+    "com.logmein.GoToMeeting": [
+      "text",
+      "url"
+    ],
+    "io.aircall.phone": [
+      "text",
+      "url"
+    ],
     "us.zoom.xos": [
       "text",
       "url"
@@ -458,6 +896,22 @@
     "com.apple.garageband10": [
       "file",
       "text"
+    ],
+    "org.audacityteam.audacity": [
+      "file",
+      "text"
+    ],
+    "org.audacityteam.audacity4": [
+      "file",
+      "text"
+    ],
+    "com.obsproject.obs-studio": [
+      "file",
+      "image"
+    ],
+    "fr.handbrake.HandBrake": [
+      "file",
+      "image"
     ],
     "com.ableton.live": [
       "file",
@@ -517,6 +971,10 @@
       "file",
       "url"
     ],
+    "org.m0k.transmission": [
+      "file",
+      "url"
+    ],
     "com.adobe.Acrobat": [
       "file",
       "text"
@@ -537,6 +995,16 @@
       "file",
       "text"
     ],
+    "org.zotero.zotero": [
+      "text",
+      "file",
+      "url"
+    ],
+    "net.sourceforge.skim-app.skim": [
+      "file",
+      "text",
+      "image"
+    ],
     "pl.maketheweb.cleanshotx": [
       "image",
       "file"
@@ -553,14 +1021,23 @@
       "text",
       "url"
     ],
+    "com.knollsoft.Hookshot": [
+      "text"
+    ],
     "com.runningwithcrayons.Alfred": [
       "text",
       "url"
+    ],
+    "com.knollsoft.Rectangle": [
+      "text"
     ],
     "com.1password.1password": [
       "text"
     ],
     "com.bitwarden.desktop": [
+      "text"
+    ],
+    "org.keepassxc.keepassxc": [
       "text"
     ],
     "com.getdropbox.dropbox": [
@@ -636,11 +1113,39 @@
       "file",
       "text"
     ],
+    "com.utmapp.UTM": [
+      "file",
+      "text"
+    ],
     "com.docker.docker": [
       "code",
       "text"
     ],
+    "com.orbstack.Orbstack": [
+      "code",
+      "text",
+      "file"
+    ],
+    "io.rancherdesktop.app": [
+      "code",
+      "text",
+      "file"
+    ],
+    "org.wireshark.Wireshark": [
+      "code",
+      "text",
+      "file"
+    ],
+    "com.proxyman.NSProxy": [
+      "code",
+      "text",
+      "url"
+    ],
     "com.nssurge.surge-mac": [
+      "url",
+      "text"
+    ],
+    "com.nordvpn.macos": [
       "url",
       "text"
     ],
@@ -678,9 +1183,46 @@
       "image",
       "text"
     ],
+    "org.libreoffice.script": [
+      "text",
+      "file",
+      "image"
+    ],
     "com.tableplus.TablePlus": [
       "code",
       "text"
+    ],
+    "org.jkiss.dbeaver.core.product": [
+      "code",
+      "text",
+      "file"
+    ],
+    "org.openoffice.script": [
+      "text",
+      "file",
+      "image"
+    ],
+    "com.jamfsoftware.Composer": [
+      "file",
+      "text"
+    ],
+    "com.google.WebDesigner": [
+      "code",
+      "text",
+      "image"
+    ],
+    "com.Google.GoogleEarthPro": [
+      "image",
+      "url"
+    ],
+    "com.microsoft.powershell": [
+      "code",
+      "text"
+    ],
+    "com.microsoft.rdc.macos": [
+      "url",
+      "text",
+      "file"
     ],
     "com.sequelpro.SequelPro": [
       "code",
