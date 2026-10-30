@@ -1238,6 +1238,154 @@
     ],
     "com.tinyapp.TableTool": [
       "text"
+    ],
+    "dev.kdrag0n.MacVirt": [
+      "code",
+      "text",
+      "file"
+    ],
+    "com.exafunction.windsurfNext": [
+      "code",
+      "text"
+    ],
+    "co.anysphere.cursor.nightly": [
+      "code",
+      "text"
+    ],
+    "com.jetbrains.air": [
+      "code",
+      "text"
+    ],
+    "com.apple.SFSymbols": [
+      "color",
+      "image"
+    ],
+    "com.apple.DigitalColorMeter": [
+      "color",
+      "image"
+    ],
+    "com.apple.GenerativePlaygroundApp": [
+      "image",
+      "text"
+    ],
+    "com.apple.journal": [
+      "text",
+      "image"
+    ],
+    "com.apple.mobilephone": [
+      "text",
+      "url"
+    ],
+    "com.apple.stocks": [
+      "url",
+      "text"
+    ],
+    "com.apple.helpviewer": [
+      "text",
+      "url"
+    ],
+    "com.apple.TextEdit": [
+      "text",
+      "code"
+    ],
+    "com.apple.iBooksX": [
+      "text",
+      "file"
+    ],
+    "com.apple.Stickies": [
+      "text",
+      "image"
+    ],
+    "com.apple.calculator": [
+      "text"
+    ],
+    "com.apple.Home": [
+      "text"
+    ],
+    "com.apple.VoiceMemos": [
+      "file",
+      "text"
+    ],
+    "org.whispersystems.signal-desktop": [
+      "text",
+      "image"
+    ],
+    "net.whatsapp.WhatsApp": [
+      "text",
+      "image",
+      "url"
+    ],
+    "com.skype.skype": [
+      "text",
+      "image",
+      "url"
+    ],
+    "com.automattic.beeper.desktop": [
+      "text",
+      "image",
+      "url"
+    ],
+    "org.p0deje.Maccy": [
+      "text",
+      "image"
+    ],
+    "codes.rambo.AirBuddy": [
+      "text",
+      "image"
+    ],
+    "com.daisydiskapp.DaisyDisk": [
+      "file",
+      "image"
+    ],
+    "com.hegenberg.BetterTouchTool": [
+      "text"
+    ],
+    "org.torproject.torbrowser": [
+      "url",
+      "text"
+    ],
+    "net.freemacsoft.AppCleaner": [
+      "file"
+    ],
+    "io.balena.etcher": [
+      "file",
+      "image"
+    ],
+    "com.torusknot.SourceTreeNotMAS": [
+      "code",
+      "text"
+    ],
+    "com.gitup.GitUp": [
+      "code",
+      "text"
+    ],
+    "com.github.githubapp": [
+      "code",
+      "text",
+      "file"
+    ],
+    "com.microsoft.to-do-mac": [
+      "text"
+    ],
+    "com.microsoft.copilot-mac": [
+      "text",
+      "code",
+      "image",
+      "url",
+      "file"
+    ],
+    "com.setapp.DesktopClient": [
+      "text",
+      "url"
+    ],
+    "dev.fka.textream": [
+      "text",
+      "code"
+    ],
+    "com.apple.freeform": [
+      "color",
+      "image",
+      "text"
     ]
   },
   "prefixPatterns": {

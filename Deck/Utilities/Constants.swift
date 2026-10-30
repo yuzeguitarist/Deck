@@ -71,9 +71,9 @@ enum Const {
     static let settingWidth: CGFloat = {
         // Use wider window for English/German due to longer text
         let languageCode = Locale.preferredLanguages.first?.lowercased() ?? ""
-        return (languageCode.hasPrefix("en") || languageCode.hasPrefix("de")) ? 720.0 : 600.0
+        return (languageCode.hasPrefix("en") || languageCode.hasPrefix("de")) ? 840.0 : 780.0
     }()
-    static let settingHeight: CGFloat = 500.0
+    static let settingHeight: CGFloat = 580.0
     
     // Spacing
     static let space4: CGFloat = 4.0
