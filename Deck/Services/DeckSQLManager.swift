@@ -4652,6 +4652,14 @@ extension DeckSQLManager {
             try db.run("PRAGMA shrink_memory")
             return true
         }
+        // Drop the reader's faulted map after a query, then restore the same
+        // 128MB ceiling. Steady-state mmap limit is unchanged.
+        syncOnDBReadQueue {
+            guard let readerDb = self.readerDb else { return }
+            try? readerDb.run("PRAGMA mmap_size = 0")
+            try? readerDb.run("PRAGMA mmap_size = 134217728")
+            try? readerDb.run("PRAGMA shrink_memory")
+        }
     }
 }
 

@@ -1225,9 +1225,7 @@ final class DeckDataStore {
                 paginationCursor = nextCursor
             }
             results.removeAll(keepingCapacity: false)
-            if !searchResultOrder.isEmpty {
-                await sqlManager.shrinkMemory()
-            }
+            await sqlManager.shrinkMemory()
             if isKeywordSearch, log.isEnabled(.debug) {
                 let preview = results.prefix(10).compactMap { $0.id }.map(String.init).joined(separator: ", ")
                 if !preview.isEmpty {
