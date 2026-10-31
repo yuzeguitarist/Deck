@@ -1509,6 +1509,7 @@ final class DeckDataStore {
                         ids = prioritizeHitIDs(ids, titles: titleById, keyword: keyword, useRegex: useRegex)
                         searchResultOrder = ids
                         results = await materializeSearchItems(Array(ids.prefix(Const.pageSize)))
+                        sqlManager.bounceWriterMap()
                         }
                     } else if !candidateRows.isEmpty {
                         // Re-rank using SearchService for better fuzzy matching.
