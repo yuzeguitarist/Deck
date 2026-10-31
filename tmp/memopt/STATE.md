@@ -2,12 +2,11 @@
 
 - worktree：`/Users/jerry/Desktop/开发/Deck/Deck-memopt-50`
 - 分支：`mem-opt-50`
-- 基点 commit：`0b9798d6b74da3eca2999dba49161d42fe82103a`（本地 main，2026-10-30，比 origin/main 的 2026-10-24 新）
-- 原工作区 `/Users/jerry/Desktop/开发/Deck/Deck` 仍在 `main`，未改动
-- 当前轮次：0（基线已完成，优化尚未开始）
-- 保留：0
+- 基点 commit：`0b9798d6b74da3eca2999dba49161d42fe82103a`
+- 原工作区仍在 `main`，未改动
+- 当前轮次：1 / 50
+- 保留：1
 - 回滚：0
-- 累计内存收益：相对基线尚未保留任何改动
+- 累计：模糊搜索物理足迹 30.39 → 28.14 MiB（-2.25 MiB，-7.4%），堆 13.48 → 11.27 MiB（-16.4%）
 
-测量方法与原始数字见 `tmp/memopt/BASELINE.md`。
-验收报告见 `tmp/memopt/REPORT.md`。
+下一轮从这组新中位数继续比。

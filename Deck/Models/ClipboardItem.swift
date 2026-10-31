@@ -177,6 +177,10 @@ final class ClipboardItem: Identifiable, Equatable {
     let pasteboardType: PasteboardType
     @ObservationIgnored
     private var inlineData: Data
+    /// When true, `inlineData` is empty and the payload bytes are `searchText` UTF-8.
+    /// This avoids keeping a second copy of plain-text clipboard bytes.
+    @ObservationIgnored
+    private var inlineDataIsSearchText = false
     let previewData: Data?
     let blobPath: String?
     private(set) var timestamp: Int64
@@ -187,6 +191,10 @@ final class ClipboardItem: Identifiable, Equatable {
     var searchText: String {
         didSet {
             guard searchText != oldValue else { return }
+            if inlineDataIsSearchText {
+                inlineData = Data(oldValue.utf8)
+                inlineDataIsSearchText = false
+            }
             searchTextVersion &+= 1
             base64ImageChecked = false
             cachedBase64Image = nil
@@ -963,7 +971,7 @@ final class ClipboardItem: Identifiable, Equatable {
         itemType: ClipItemType? = nil
     ) {
         self.pasteboardType = pasteboardType
-        self.inlineData = data
+        self.inlineData = Data()
         self.previewData = previewData
         self.uniqueId = uniqueId ?? data.sha256Hex
         self.timestamp = timestamp
@@ -988,6 +996,7 @@ final class ClipboardItem: Identifiable, Equatable {
         }
 
         self.itemType = itemType ?? detectItemType()
+        self.adoptPayloadData(data)
     }
 
     convenience init(parsedPayload payload: ParsedPayload, sourceAnchor: SourceAnchor? = nil) {
@@ -1021,7 +1030,25 @@ final class ClipboardItem: Identifiable, Equatable {
     }
 
     var data: Data {
-        inlineData
+        storedPayloadData()
+    }
+
+    private func storedPayloadData() -> Data {
+        if inlineDataIsSearchText {
+            return Data(searchText.utf8)
+        }
+        return inlineData
+    }
+
+    /// Keep plain-text payloads that are exactly the search text UTF-8 as one string.
+    private func adoptPayloadData(_ data: Data) {
+        if !searchText.isEmpty, data == Data(searchText.utf8) {
+            inlineData = Data()
+            inlineDataIsSearchText = true
+        } else {
+            inlineData = data
+            inlineDataIsSearchText = false
+        }
     }
 
     var hasFullData: Bool {
@@ -1035,23 +1062,23 @@ final class ClipboardItem: Identifiable, Equatable {
     /// Load and cache full data when needed (for non-blob items).
     func loadFullData() -> Data? {
         if dataIsFull {
-            return inlineData
+            return storedPayloadData()
         }
 
         dataLock.lock()
         defer { dataLock.unlock() }
 
         if dataIsFull {
-            return inlineData
+            return storedPayloadData()
         }
 
         if let loaded = fullDataLoader?() {
-            inlineData = loaded
+            adoptPayloadData(loaded)
             dataIsFull = true
             return loaded
         }
 
-        return inlineData
+        return storedPayloadData()
     }
     
     convenience init?(with pasteboard: NSPasteboard, pasteboardItem: NSPasteboardItem? = nil) {
