@@ -1417,14 +1417,41 @@ final class DeckDataStore {
                         // Hard cap to avoid multi-second scans that spike CPU / energy.
                         let scanLimit = min(Const.pageSize * 100, 2000)
                         let batchSize = Const.pageSize * 2
+                        if mode != .fuzzy && SearchService.shared.looksLikeRegex(keyword) {
+                            var cursor: DeckSQLManager.RowCursor? = nil
+                            var allRows: [Row] = []
+                            allRows.reserveCapacity(min(scanLimit, batchSize))
+                            while allRows.count < scanLimit {
+                                guard !Task.isCancelled else { return [] }
+                                let remaining = scanLimit - allRows.count
+                                let limit = min(batchSize, remaining)
+                                let batchRows = await sqlManager.fetchListPage(
+                                    filter: allFilter,
+                                    limit: limit,
+                                    cursor: cursor
+                                )
+                                guard !batchRows.isEmpty else { break }
+                                allRows.append(contentsOf: batchRows)
+                                cursor = sqlManager.cursor(from: batchRows.last)
+                                if batchRows.count < limit || cursor == nil { break }
+                                await Task.yield()
+                            }
+                            results = await runInMemorySearchRows(
+                                query: keyword,
+                                rows: allRows,
+                                mode: mode,
+                                useRegex: useRegex
+                            )
+                        } else {
                         var cursor: DeckSQLManager.RowCursor? = nil
-                        var allRows: [Row] = []
-                        allRows.reserveCapacity(min(scanLimit, batchSize))
+                        var scanned = 0
+                        var ranks: [SearchRank] = []
+                        ranks.reserveCapacity(min(scanLimit, 256))
 
-                        while allRows.count < scanLimit {
+                        while scanned < scanLimit {
                             guard !Task.isCancelled else { return [] }
 
-                            let remaining = scanLimit - allRows.count
+                            let remaining = scanLimit - scanned
                             let limit = min(batchSize, remaining)
                             let batchRows = await sqlManager.fetchListPage(
                                 filter: allFilter,
@@ -1433,19 +1460,33 @@ final class DeckDataStore {
                             )
 
                             guard !batchRows.isEmpty else { break }
-                            allRows.append(contentsOf: batchRows)
+                            let snapshots = mapRowsToSearchSnapshots(batchRows)
+                            ranks.append(contentsOf: SearchService.shared.collectRanks(
+                                query: keyword,
+                                within: snapshots,
+                                mode: mode
+                            ))
+                            scanned += batchRows.count
 
                             cursor = sqlManager.cursor(from: batchRows.last)
                             if batchRows.count < limit || cursor == nil { break }
                             await Task.yield()
                         }
 
-                        results = await runInMemorySearchRows(
-                            query: keyword,
-                            rows: allRows,
-                            mode: mode,
-                            useRegex: useRegex
-                        )
+                        let orderedUniqueIds = SearchService.shared.orderedUniqueIds(from: ranks, mode: mode)
+                        var idByUnique: [String: Int64] = [:]
+                        var titleById: [Int64: String] = [:]
+                        idByUnique.reserveCapacity(ranks.count)
+                        titleById.reserveCapacity(ranks.count)
+                        for rank in ranks {
+                            idByUnique[rank.uniqueId] = rank.rowId
+                            titleById[rank.rowId] = rank.title
+                        }
+                        var ids = orderedUniqueIds.compactMap { idByUnique[$0] }
+                        ids = prioritizeHitIDs(ids, titles: titleById, keyword: keyword, useRegex: useRegex)
+                        searchResultOrder = ids
+                        results = await materializeSearchItems(Array(ids.prefix(Const.pageSize)))
+                        }
                     } else if !candidateRows.isEmpty {
                         // Re-rank using SearchService for better fuzzy matching.
                         results = await runInMemorySearchRows(
