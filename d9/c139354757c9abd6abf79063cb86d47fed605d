@@ -1,0 +1,23 @@
+tmp/memopt/rounds/11.md
+  s_f9e7b659495203::t_664593ae9d7684 1-11
+tmp/memopt/STATE.md
+  s_f9e7b659495203::t_66a05188d8d16c 6-7,9-10,12
+tmp/memopt/REPORT.md
+  s_f9e7b659495203::t_2d4dab96665bbf 5-6,8,12-24,28,30-49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "d9c139354757c9abd6abf79063cb86d47fed605d",
+  "prompts": {},
+  "sessions": {
+    "s_f9e7b659495203": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "d5b1df79-09df-463c-9777-99e7f555bca1",
+        "model": "grok-4.7-xhigh"
+      },
+      "human_author": "Yuze Pan <145409865+yuzeguitarist@users.noreply.github.com>"
+    }
+  }
+}
