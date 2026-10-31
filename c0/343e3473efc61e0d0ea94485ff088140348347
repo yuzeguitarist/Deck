@@ -1,0 +1,24 @@
+tmp/memopt/REPORT.md
+  s_f9e7b659495203::t_b970264116bc21 8
+  s_f9e7b659495203::t_8e9c7f8aaf3ff2 66
+tmp/memopt/STATE.md
+  s_f9e7b659495203::t_ffdf53fd9f9135 7,9
+tmp/memopt/rounds/30.md
+  s_f9e7b659495203::t_3586ffae199de2 1-9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "c0343e3473efc61e0d0ea94485ff088140348347",
+  "prompts": {},
+  "sessions": {
+    "s_f9e7b659495203": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "d5b1df79-09df-463c-9777-99e7f555bca1",
+        "model": "grok-4.7-xhigh"
+      },
+      "human_author": "Yuze Pan <145409865+yuzeguitarist@users.noreply.github.com>"
+    }
+  }
+}
