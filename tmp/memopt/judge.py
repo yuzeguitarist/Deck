@@ -60,18 +60,25 @@ for name, old in base.items():
                 f"{name} 延迟 {old_lat:.2f} ms -> {new_lat:.2f} ms（{lat_ratio * 100:+.1f}%，极差 {lat_spread:.2f} ms）"
             )
 
-    for metric, label in (("phys_after", "物理足迹"), ("phys_peak", "峰值物理足迹")):
+    for metric, label in (
+        ("phys_after", "物理足迹"),
+        ("phys_peak", "峰值物理足迹"),
+        ("malloc_in_use", "堆占用"),
+        ("rss_after", "RSS"),
+        ("rss_peak", "峰值 RSS"),
+    ):
         old_value = old[metric]
         new_value = new[metric]
         spread = max(old[f"{metric}_runs"]) - min(old[f"{metric}_runs"])
+        threshold = max(spread, old_value * 0.01)
         delta = old_value - new_value
         ratio = delta / old_value if old_value else 0
-        if new_value > old_value + spread:
+        if new_value > old_value + threshold:
             problems.append(
-                f"{name} {label} 上升 {mib(old_value):.2f} -> {mib(new_value):.2f} MiB（超过极差 {mib(spread):.2f} MiB）"
+                f"{name} {label} 上升 {mib(old_value):.2f} -> {mib(new_value):.2f} MiB（超过噪声 {mib(threshold):.2f} MiB）"
             )
         runs = new[f"{metric}_runs"]
-        beyond_noise = delta > spread and ratio >= 0.01
+        beyond_noise = delta > threshold
         consistent = all(run <= old_value for run in runs)
         if beyond_noise and consistent:
             wins.append(

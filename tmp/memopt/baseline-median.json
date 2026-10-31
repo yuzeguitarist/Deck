@@ -15,6 +15,21 @@
       "rss_after": 85950464,
       "rss_peak": 85950464,
       "malloc_in_use": 6705424,
+      "malloc_in_use_runs": [
+        6703264,
+        6709840,
+        6705424
+      ],
+      "rss_after_runs": [
+        85786624,
+        85950464,
+        86130688
+      ],
+      "rss_peak_runs": [
+        85786624,
+        85950464,
+        86130688
+      ],
       "sqlite_mem": 0,
       "latency_ms_median": 253.478083,
       "latency_ms_runs": [
@@ -44,6 +59,21 @@
       "rss_after": 91668480,
       "rss_peak": 91668480,
       "malloc_in_use": 3177072,
+      "malloc_in_use_runs": [
+        3177072,
+        3167264,
+        3179232
+      ],
+      "rss_after_runs": [
+        91521024,
+        91668480,
+        91848704
+      ],
+      "rss_peak_runs": [
+        91521024,
+        91668480,
+        91848704
+      ],
       "sqlite_mem": 0,
       "latency_ms_median": 4.950208,
       "latency_ms_runs": [
@@ -73,6 +103,21 @@
       "rss_after": 104579072,
       "rss_peak": 104579072,
       "malloc_in_use": 14132064,
+      "malloc_in_use_runs": [
+        14132064,
+        14138576,
+        14131472
+      ],
+      "rss_after_runs": [
+        104579072,
+        104660992,
+        101662720
+      ],
+      "rss_peak_runs": [
+        104579072,
+        104660992,
+        104349696
+      ],
       "sqlite_mem": 0,
       "latency_ms_median": 64.957709,
       "latency_ms_runs": [
@@ -102,6 +147,21 @@
       "rss_after": 105037824,
       "rss_peak": 105037824,
       "malloc_in_use": 3377808,
+      "malloc_in_use_runs": [
+        3377808,
+        3384320,
+        3377216
+      ],
+      "rss_after_runs": [
+        105037824,
+        105119744,
+        102137856
+      ],
+      "rss_peak_runs": [
+        105037824,
+        105119744,
+        102137856
+      ],
       "sqlite_mem": 0,
       "latency_ms_median": 0.47525,
       "latency_ms_runs": [
@@ -131,6 +191,21 @@
       "rss_after": 105037824,
       "rss_peak": 105037824,
       "malloc_in_use": 14134816,
+      "malloc_in_use_runs": [
+        14134128,
+        14141920,
+        14134816
+      ],
+      "rss_after_runs": [
+        105037824,
+        105136128,
+        102137856
+      ],
+      "rss_peak_runs": [
+        105037824,
+        105136128,
+        102137856
+      ],
       "sqlite_mem": 0,
       "latency_ms_median": 78.991875,
       "latency_ms_runs": [
@@ -160,6 +235,21 @@
       "rss_after": 105250816,
       "rss_peak": 105250816,
       "malloc_in_use": 3519056,
+      "malloc_in_use_runs": [
+        3519056,
+        3525632,
+        3518464
+      ],
+      "rss_after_runs": [
+        105250816,
+        105316352,
+        102334464
+      ],
+      "rss_peak_runs": [
+        105250816,
+        105316352,
+        102334464
+      ],
       "sqlite_mem": 0,
       "latency_ms_median": 14.73375,
       "latency_ms_runs": [
@@ -189,6 +279,21 @@
       "rss_after": 130170880,
       "rss_peak": 130187264,
       "malloc_in_use": 8973168,
+      "malloc_in_use_runs": [
+        8973168,
+        8978208,
+        8972128
+      ],
+      "rss_after_runs": [
+        134463488,
+        130170880,
+        127352832
+      ],
+      "rss_peak_runs": [
+        134496256,
+        130187264,
+        127385600
+      ],
       "sqlite_mem": 0,
       "latency_ms_median": 18.403083,
       "latency_ms_runs": [
@@ -218,6 +323,21 @@
       "rss_after": 115048448,
       "rss_peak": 115064832,
       "malloc_in_use": 3854096,
+      "malloc_in_use_runs": [
+        3853856,
+        3858896,
+        3854096
+      ],
+      "rss_after_runs": [
+        119324672,
+        115048448,
+        112214016
+      ],
+      "rss_peak_runs": [
+        119324672,
+        115064832,
+        112230400
+      ],
       "sqlite_mem": 0,
       "latency_ms_median": 2.993583,
       "latency_ms_runs": [
@@ -247,6 +367,21 @@
       "rss_after": 132972544,
       "rss_peak": 132972544,
       "malloc_in_use": 14729872,
+      "malloc_in_use_runs": [
+        14729872,
+        14741824,
+        14719360
+      ],
+      "rss_after_runs": [
+        137445376,
+        132972544,
+        130138112
+      ],
+      "rss_peak_runs": [
+        137445376,
+        132972544,
+        130138112
+      ],
       "sqlite_mem": 0,
       "latency_ms_median": 114.8545,
       "latency_ms_runs": [
@@ -276,6 +411,21 @@
       "rss_after": 149585920,
       "rss_peak": 186302464,
       "malloc_in_use": 5600032,
+      "malloc_in_use_runs": [
+        5600032,
+        5611984,
+        5588240
+      ],
+      "rss_after_runs": [
+        154075136,
+        149585920,
+        146751488
+      ],
+      "rss_peak_runs": [
+        190791680,
+        186302464,
+        183468032
+      ],
       "sqlite_mem": 0,
       "latency_ms_median": 131.910875,
       "latency_ms_runs": [
