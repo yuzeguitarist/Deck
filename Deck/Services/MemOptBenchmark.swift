@@ -392,6 +392,7 @@ private func runUISearch(store: DeckDataStore, keyword: String, mode: SearchMode
     if !finished {
         throw BenchError("search timed out for \(keyword) mode=\(mode.rawValue)")
     }
+    malloc_zone_pressure_relief(malloc_default_zone(), 0)
     let snap = MemoryProbe.sample()
     PanelMemoryHold.shared.sample = snap
     if let sampler = PanelMemoryHold.shared.sampler {
@@ -562,6 +563,9 @@ private func measure(
     sampler.start()
     let (latency, canonical, count) = try await body()
     let peak = sampler.stop(floor: before)
+    if PanelMemoryHold.shared.sample == nil {
+        malloc_zone_pressure_relief(malloc_default_zone(), 0)
+    }
     let after = MemoryProbe.sample()
     let held = PanelMemoryHold.shared.sample
     let heldPeakPhys = PanelMemoryHold.shared.peakPhys
