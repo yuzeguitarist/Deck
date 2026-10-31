@@ -1,0 +1,298 @@
+{
+  "item_count": 1500,
+  "embedding_count": 1500,
+  "persistence_sha256": "36301bff10fef989ca1c30d47dfdfeae5f259bd274c4788534a400357b9b3d4e",
+  "persistence_stable": true,
+  "scenarios": [
+    {
+      "name": "load",
+      "canonical_sha256": "58db6246ee72fbe6a0fd11648c1db256235ac311f378a803839529bedf5f4ea2",
+      "canonical_stable": true,
+      "result_count": 624,
+      "phys_after": 19284976,
+      "phys_peak": 19284976,
+      "phys_before": 14287784,
+      "rss_after": 85950464,
+      "rss_peak": 85950464,
+      "malloc_in_use": 6705424,
+      "sqlite_mem": 0,
+      "latency_ms_median": 253.478083,
+      "latency_ms_runs": [
+        253.919167,
+        253.478083,
+        252.7985
+      ],
+      "phys_after_runs": [
+        19088344,
+        19284976,
+        19448816
+      ],
+      "phys_peak_runs": [
+        19088344,
+        19284976,
+        19448816
+      ]
+    },
+    {
+      "name": "exact",
+      "canonical_sha256": "d12ae43e94dcd3f222f67f823d10a996ff317033e69dd697002d5e532e1a624d",
+      "canonical_stable": true,
+      "result_count": 30,
+      "phys_after": 19334128,
+      "phys_peak": 19334128,
+      "phys_before": 19301360,
+      "rss_after": 91668480,
+      "rss_peak": 91668480,
+      "malloc_in_use": 3177072,
+      "sqlite_mem": 0,
+      "latency_ms_median": 4.950208,
+      "latency_ms_runs": [
+        4.502,
+        4.950208,
+        5.48675
+      ],
+      "phys_after_runs": [
+        19153880,
+        19334128,
+        19497968
+      ],
+      "phys_peak_runs": [
+        19153880,
+        19334128,
+        19497968
+      ]
+    },
+    {
+      "name": "fuzzy",
+      "canonical_sha256": "f0cfcfcdb3bb386a85ac062e2711204315dbc1367dc939da66ecb71c65eb1742",
+      "canonical_stable": true,
+      "result_count": 1447,
+      "phys_after": 31867912,
+      "phys_peak": 31867912,
+      "phys_before": 19334128,
+      "rss_after": 104579072,
+      "rss_peak": 104579072,
+      "malloc_in_use": 14132064,
+      "sqlite_mem": 0,
+      "latency_ms_median": 64.957709,
+      "latency_ms_runs": [
+        65.001208,
+        64.957709,
+        64.174083
+      ],
+      "phys_after_runs": [
+        31867912,
+        31982624,
+        31179760
+      ],
+      "phys_peak_runs": [
+        31867912,
+        31982624,
+        31671280
+      ]
+    },
+    {
+      "name": "mixed",
+      "canonical_sha256": "879f59c857664051e46683cdbce7cfa1ef89ed8d2f559f0c02d4f2c73affeb0c",
+      "canonical_stable": true,
+      "result_count": 30,
+      "phys_after": 32064520,
+      "phys_peak": 32064520,
+      "phys_before": 31966216,
+      "rss_after": 105037824,
+      "rss_peak": 105037824,
+      "malloc_in_use": 3377808,
+      "sqlite_mem": 0,
+      "latency_ms_median": 0.47525,
+      "latency_ms_runs": [
+        0.47525,
+        0.4215,
+        0.530834
+      ],
+      "phys_after_runs": [
+        32064520,
+        32179232,
+        31392752
+      ],
+      "phys_peak_runs": [
+        32064520,
+        32179232,
+        31392752
+      ]
+    },
+    {
+      "name": "mixed_fuzzy",
+      "canonical_sha256": "f0cfcfcdb3bb386a85ac062e2711204315dbc1367dc939da66ecb71c65eb1742",
+      "canonical_stable": true,
+      "result_count": 1447,
+      "phys_after": 32064520,
+      "phys_peak": 32080904,
+      "phys_before": 32064520,
+      "rss_after": 105037824,
+      "rss_peak": 105037824,
+      "malloc_in_use": 14134816,
+      "sqlite_mem": 0,
+      "latency_ms_median": 78.991875,
+      "latency_ms_runs": [
+        78.991875,
+        77.400333,
+        79.354917
+      ],
+      "phys_after_runs": [
+        32064520,
+        32195616,
+        31392752
+      ],
+      "phys_peak_runs": [
+        32080904,
+        32195616,
+        31409136
+      ]
+    },
+    {
+      "name": "regex",
+      "canonical_sha256": "879f59c857664051e46683cdbce7cfa1ef89ed8d2f559f0c02d4f2c73affeb0c",
+      "canonical_stable": true,
+      "result_count": 30,
+      "phys_after": 32228360,
+      "phys_peak": 32244744,
+      "phys_before": 32064520,
+      "rss_after": 105250816,
+      "rss_peak": 105250816,
+      "malloc_in_use": 3519056,
+      "sqlite_mem": 0,
+      "latency_ms_median": 14.73375,
+      "latency_ms_runs": [
+        14.302625,
+        14.73375,
+        14.810833
+      ],
+      "phys_after_runs": [
+        32228360,
+        32326688,
+        31540208
+      ],
+      "phys_peak_runs": [
+        32244744,
+        32343072,
+        31556592
+      ]
+    },
+    {
+      "name": "semantic_en",
+      "canonical_sha256": "c3b03b321e9d3db936e9e41b2477e41c1c7991692ee3211577703dbd7b7d4f5d",
+      "canonical_stable": true,
+      "result_count": 800,
+      "phys_after": 33621048,
+      "phys_peak": 33670200,
+      "phys_before": 32228360,
+      "rss_after": 130170880,
+      "rss_peak": 130187264,
+      "malloc_in_use": 8973168,
+      "sqlite_mem": 0,
+      "latency_ms_median": 18.403083,
+      "latency_ms_runs": [
+        18.825458,
+        17.824,
+        18.403083
+      ],
+      "phys_after_runs": [
+        37930016,
+        33621048,
+        33031176
+      ],
+      "phys_peak_runs": [
+        37979168,
+        33670200,
+        33080328
+      ]
+    },
+    {
+      "name": "semantic_zh",
+      "canonical_sha256": "f8902eeca857db950951955e6e06038b13dd50784588c7af27ceef3532d26a2a",
+      "canonical_stable": true,
+      "result_count": 25,
+      "phys_after": 33735736,
+      "phys_peak": 33784888,
+      "phys_before": 33621048,
+      "rss_after": 115048448,
+      "rss_peak": 115064832,
+      "malloc_in_use": 3854096,
+      "sqlite_mem": 0,
+      "latency_ms_median": 2.993583,
+      "latency_ms_runs": [
+        2.993583,
+        3.027916,
+        2.913416
+      ],
+      "phys_after_runs": [
+        38028320,
+        33735736,
+        33129480
+      ],
+      "phys_peak_runs": [
+        38044704,
+        33784888,
+        33178632
+      ]
+    },
+    {
+      "name": "extreme",
+      "canonical_sha256": "f0cfcfcdb3bb386a85ac062e2711204315dbc1367dc939da66ecb71c65eb1742",
+      "canonical_stable": true,
+      "result_count": 1447,
+      "phys_after": 33932368,
+      "phys_peak": 33932368,
+      "phys_before": 33735736,
+      "rss_after": 132972544,
+      "rss_peak": 132972544,
+      "malloc_in_use": 14729872,
+      "sqlite_mem": 0,
+      "latency_ms_median": 114.8545,
+      "latency_ms_runs": [
+        114.8545,
+        117.413333,
+        112.77475
+      ],
+      "phys_after_runs": [
+        38372384,
+        33932368,
+        33342496
+      ],
+      "phys_peak_runs": [
+        38372384,
+        33932368,
+        33342496
+      ]
+    },
+    {
+      "name": "maintain",
+      "canonical_sha256": "91bb720d0df350055e59adcea2c1095597660a97e1ffa2a728fe873621acda1f",
+      "canonical_stable": true,
+      "result_count": 0,
+      "phys_after": 37291088,
+      "phys_peak": 95274088,
+      "phys_before": 33915960,
+      "rss_after": 149585920,
+      "rss_peak": 186302464,
+      "malloc_in_use": 5600032,
+      "sqlite_mem": 0,
+      "latency_ms_median": 131.910875,
+      "latency_ms_runs": [
+        131.910875,
+        131.550708,
+        132.596125
+      ],
+      "phys_after_runs": [
+        41763896,
+        37291088,
+        36701216
+      ],
+      "phys_peak_runs": [
+        99746896,
+        95274088,
+        94667808
+      ]
+    }
+  ]
+}

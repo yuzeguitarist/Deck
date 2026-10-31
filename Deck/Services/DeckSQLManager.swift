@@ -1530,6 +1530,11 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
     }
     
     private nonisolated func getStoragePath() -> String {
+        if let root = MemOptIsolation.storageRoot {
+            stopSecurityScopedAccess()
+            return (root as NSString).appendingPathComponent("Deck")
+        }
+
         var basePath: String
 
         if DeckUserDefaults.useCustomStorage {

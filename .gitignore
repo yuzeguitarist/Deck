@@ -110,6 +110,9 @@ __pycache__/
 # DeckClip (Rust CLI)
 deckclip/target/
 
+# Local Release build for the memory benchmark
+.memopt-dd/
+
 # source code git
 Deck/.git
 Deck/.gitignore
