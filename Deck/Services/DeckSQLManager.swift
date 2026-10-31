@@ -4661,6 +4661,17 @@ extension DeckSQLManager {
         invalidateSearchCache()
     }
 
+    /// Drop pages the writer faulted during a semantic query, then put the
+    /// 128MB ceiling back. Other searches do not do this.
+    func bounceWriterMap() {
+        syncOnDBQueue {
+            guard let db = self.db else { return }
+            try? db.run("PRAGMA mmap_size = 0")
+            try? db.run("PRAGMA mmap_size = 134217728")
+            try? db.run("PRAGMA shrink_memory")
+        }
+    }
+
     func shrinkMemory() async {
         _ = await withDBAsync {
             guard let db = self.db else { return false }
