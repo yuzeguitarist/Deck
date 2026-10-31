@@ -23,6 +23,7 @@ worktree：`/Users/jerry/Desktop/开发/Deck/Deck-memopt-50`
 | 6 | mmap 128MB → 8MB | 维护 RSS -18.27 MiB（-12.8%），但小查询堆上升约 0.15 MiB，不单独保留 |
 | 7 | 8MB mmap + 4MB 页缓存 | 维护 RSS -35.36 MiB（-24.7%），但多个场景堆上升约 0.3 MiB，回滚 |
 | 8 | 去掉只读 SQLite 连接 | 精确 RSS -5.28 MiB，但并发搜索延迟 +10.23 ms，回滚 |
+| 9 | 读连接 mmap 降到 8MB | 堆上升、正则变慢，无足够内存收益，回滚 |
 
 ## 累计（相对原始基线）
 
