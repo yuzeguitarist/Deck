@@ -72,6 +72,13 @@ final class DeckDataStore {
     private(set) var appliedSearchSerial: UInt64 = 0
     private var paginationTask: Task<Void, Never>?
     private var searchResultsCache: [ClipboardItem] = []
+    /// Full hit order without retaining every `ClipboardItem`. Pages are materialized on demand.
+    private var searchResultOrder: [Int64] = []
+    private struct SearchTitleOverride {
+        var value: String?
+    }
+    private var searchTitleOverrides: [Int64: SearchTitleOverride] = [:]
+    private var searchTextOverrides: [Int64: String] = [:]
     private var isSearchCacheActive: Bool = false
     private struct SearchContext: Equatable {
         let keyword: String
@@ -153,11 +160,81 @@ final class DeckDataStore {
 
     private func resetSearchCache() {
         searchResultsCache = []
+        searchResultOrder = []
+        searchTitleOverrides = [:]
+        searchTextOverrides = [:]
         isSearchCacheActive = false
         lastSearchContext = nil
         searchCacheCandidateLimit = 0
         searchCacheTask?.cancel()
         searchCacheTask = nil
+    }
+
+    private var searchResultCount: Int {
+        searchResultOrder.isEmpty ? searchResultsCache.count : searchResultOrder.count
+    }
+
+    /// Remember hit order and keep only `visible` objects alive.
+    private func installSearchWindow(_ results: [ClipboardItem], visible: [ClipboardItem]) {
+        if !results.isEmpty, results.allSatisfy({ $0.id != nil }) {
+            searchResultOrder = results.compactMap(\.id)
+            searchResultsCache = visible
+        } else {
+            searchResultOrder = []
+            searchResultsCache = results
+        }
+    }
+
+    private func materializedItem(id: Int64) -> ClipboardItem? {
+        if let item = items.first(where: { $0.id == id }) {
+            return item
+        }
+        return searchResultsCache.first(where: { $0.id == id })
+    }
+
+    private func applySearchOverrides(_ item: ClipboardItem) {
+        guard let id = item.id else { return }
+        if let title = searchTitleOverrides[id] {
+            item.customTitle = title.value
+        }
+        if let text = searchTextOverrides[id], item.searchText != text {
+            item.searchText = text
+        }
+    }
+
+    private func materializeSearchItems(_ ids: [Int64]) async -> [ClipboardItem] {
+        guard !ids.isEmpty else { return [] }
+        var ordered: [ClipboardItem] = []
+        ordered.reserveCapacity(ids.count)
+        var missing: [Int64] = []
+        missing.reserveCapacity(ids.count)
+        for id in ids {
+            if let existing = materializedItem(id: id) {
+                ordered.append(existing)
+            } else {
+                missing.append(id)
+            }
+        }
+        if missing.isEmpty {
+            return ordered
+        }
+        let rows = await sqlManager.fetchRowsByIdsUnordered(ids: missing)
+        let fetched = await mapRowsToItems(rows)
+        var byId: [Int64: ClipboardItem] = [:]
+        byId.reserveCapacity(fetched.count)
+        for item in fetched {
+            if let id = item.id {
+                applySearchOverrides(item)
+                byId[id] = item
+            }
+        }
+        ordered.removeAll(keepingCapacity: true)
+        for id in ids {
+            if let existing = materializedItem(id: id) ?? byId[id] {
+                ordered.append(existing)
+            }
+        }
+        return ordered
     }
 
     private func setPreparingInitialPresentation(_ isPreparing: Bool) {
@@ -345,25 +422,49 @@ final class DeckDataStore {
 
         if isSearchCacheActive {
             let currentOffset = items.count
-            guard currentOffset < searchResultsCache.count else {
+            let total = searchResultCount
+            guard currentOffset < total else {
                 expandSearchCacheIfNeeded(currentOffset: currentOffset)
                 return
             }
 
-            isLoading = true
-            defer { isLoading = false }
+            if searchResultOrder.isEmpty {
+                isLoading = true
+                defer { isLoading = false }
 
-            currentPage += 1
+                currentPage += 1
 
-            let nextItems = Array(searchResultsCache.dropFirst(currentOffset).prefix(Const.pageSize))
-            guard !nextItems.isEmpty else {
-                hasMoreData = false
+                let nextItems = Array(searchResultsCache.dropFirst(currentOffset).prefix(Const.pageSize))
+                guard !nextItems.isEmpty else {
+                    hasMoreData = false
+                    return
+                }
+
+                items.append(contentsOf: nextItems)
+                hasMoreData = items.count < searchResultsCache.count
+                lastChangeType = .loadMore
                 return
             }
 
-            items.append(contentsOf: nextItems)
-            hasMoreData = items.count < searchResultsCache.count
-            lastChangeType = .loadMore
+            let end = min(currentOffset + Const.pageSize, searchResultOrder.count)
+            let ids = Array(searchResultOrder[currentOffset..<end])
+            isLoading = true
+            paginationTask?.cancel()
+            paginationTask = Task { [weak self] in
+                guard let self else { return }
+                defer { self.isLoading = false }
+                let nextItems = await self.materializeSearchItems(ids)
+                guard !Task.isCancelled, self.isPanelActive else { return }
+                guard !nextItems.isEmpty else {
+                    self.hasMoreData = false
+                    return
+                }
+                self.currentPage += 1
+                self.items.append(contentsOf: nextItems)
+                self.searchResultsCache.append(contentsOf: nextItems)
+                self.hasMoreData = self.items.count < self.searchResultOrder.count
+                self.lastChangeType = .loadMore
+            }
             return
         }
 
@@ -433,7 +534,15 @@ final class DeckDataStore {
         }
 
         if isSearchCacheActive {
-            guard let firstIndex = searchResultsCache.firstIndex(where: { $0.uniqueId == firstItem.uniqueId }) else {
+            let firstIndex: Int?
+            if searchResultOrder.isEmpty {
+                firstIndex = searchResultsCache.firstIndex(where: { $0.uniqueId == firstItem.uniqueId })
+            } else if let firstId = firstItem.id {
+                firstIndex = searchResultOrder.firstIndex(of: firstId)
+            } else {
+                firstIndex = nil
+            }
+            guard let firstIndex else {
                 hasNewerDataBeforeCurrentWindow = false
                 return false
             }
@@ -446,13 +555,20 @@ final class DeckDataStore {
             defer { isLoading = false }
 
             let startIndex = max(0, firstIndex - Const.pageSize)
-            let nextWindow = Array(searchResultsCache[startIndex..<firstIndex])
+            let nextWindow: [ClipboardItem]
+            if searchResultOrder.isEmpty {
+                nextWindow = Array(searchResultsCache[startIndex..<firstIndex])
+            } else {
+                let ids = Array(searchResultOrder[startIndex..<firstIndex])
+                nextWindow = await materializeSearchItems(ids)
+            }
             guard !nextWindow.isEmpty else {
                 hasNewerDataBeforeCurrentWindow = false
                 return false
             }
 
             items.insert(contentsOf: nextWindow, at: 0)
+            searchResultsCache.insert(contentsOf: nextWindow, at: 0)
             hasNewerDataBeforeCurrentWindow = startIndex > 0
             lastChangeType = .loadPrevious
             return true
@@ -555,7 +671,7 @@ final class DeckDataStore {
             }
 
             items = tail
-            searchResultsCache = results
+            installSearchWindow(results, visible: tail)
             hasMoreData = false
             hasNewerDataBeforeCurrentWindow = results.count > tail.count
             paginationCursor = nil
@@ -653,7 +769,7 @@ final class DeckDataStore {
             }
 
             items = head
-            searchResultsCache = results
+            installSearchWindow(results, visible: head)
             hasMoreData = results.count > head.count
             hasNewerDataBeforeCurrentWindow = false
             paginationCursor = nil
@@ -990,6 +1106,7 @@ final class DeckDataStore {
 
             isFiltered = isKeywordSearch || typeFilter != nil || tagId != -1 || hasRuleFilters
             searchResultsCache = []
+            searchResultOrder = []
             isSearchCacheActive = isKeywordSearch || needsInMemoryRuleFiltering
             if !isKeywordSearch && !needsInMemoryRuleFiltering {
                 lastSearchContext = nil
@@ -1094,13 +1211,22 @@ final class DeckDataStore {
             items = finalResults
             hasNewerDataBeforeCurrentWindow = false
             if isSearchCacheActive {
-                searchResultsCache = results
+                if searchResultOrder.isEmpty {
+                    installSearchWindow(results, visible: finalResults)
+                } else {
+                    searchResultsCache = finalResults
+                }
                 paginationCursor = isKeywordSearch ? nil : nextCursor
-                hasMoreData = results.count > finalResults.count ||
+                let totalHits = searchResultOrder.isEmpty ? results.count : searchResultOrder.count
+                hasMoreData = totalHits > finalResults.count ||
                     (!isKeywordSearch && canExpandFilteredListCache && results.count == finalResults.count)
             } else {
                 hasMoreData = results.count == Const.pageSize
                 paginationCursor = nextCursor
+            }
+            results.removeAll(keepingCapacity: false)
+            if !searchResultOrder.isEmpty {
+                await sqlManager.shrinkMemory()
             }
             if isKeywordSearch, log.isEnabled(.debug) {
                 let preview = results.prefix(10).compactMap { $0.id }.map(String.init).joined(separator: ", ")
@@ -1290,10 +1416,20 @@ final class DeckDataStore {
                             await Task.yield()
                         }
 
-                        results = await runInMemorySearchRows(query: keyword, rows: allRows, mode: mode)
+                        results = await runInMemorySearchRows(
+                            query: keyword,
+                            rows: allRows,
+                            mode: mode,
+                            useRegex: useRegex
+                        )
                     } else if !candidateRows.isEmpty {
                         // Re-rank using SearchService for better fuzzy matching.
-                        results = await runInMemorySearchRows(query: keyword, rows: candidateRows, mode: mode)
+                        results = await runInMemorySearchRows(
+                            query: keyword,
+                            rows: candidateRows,
+                            mode: mode,
+                            useRegex: useRegex
+                        )
                     } else {
                         results = []
                     }
@@ -1304,7 +1440,7 @@ final class DeckDataStore {
             // 混合模式不再使用语义搜索，仅在切换到"语义搜索"模式时才使用
         }
 
-        if mode != .exact {
+        if mode != .exact && searchResultOrder.isEmpty {
             results = prioritizeTitleMatches(results, keyword: searchPattern, useRegex: useRegex)
         }
         await prepareLanguageRuleCacheIfNeeded(ruleFilters, for: results)
@@ -1362,18 +1498,27 @@ final class DeckDataStore {
             guard self.isPanelActive else { return }
             guard self.lastSearchContext == context else { return }
 
-            let effectiveResults = results.count >= self.searchResultsCache.count ? results : self.searchResultsCache
-            guard effectiveResults.count > currentOffset else {
+            let previousCount = self.searchResultCount
+            let useNew = results.count >= previousCount
+            if useNew {
+                self.installSearchWindow(results, visible: self.items)
+            }
+            let totalCount = self.searchResultCount
+            guard totalCount > currentOffset else {
                 self.hasMoreData = false
                 return
             }
 
             self.searchCacheCandidateLimit = nextLimit
-            if effectiveResults.count >= self.searchResultsCache.count {
-                self.searchResultsCache = effectiveResults
+            let nextItems: [ClipboardItem]
+            if !self.searchResultOrder.isEmpty {
+                let end = min(currentOffset + Const.pageSize, self.searchResultOrder.count)
+                let ids = Array(self.searchResultOrder[currentOffset..<end])
+                nextItems = await self.materializeSearchItems(ids)
+            } else {
+                let source = useNew ? results : self.searchResultsCache
+                nextItems = Array(source.dropFirst(currentOffset).prefix(Const.pageSize))
             }
-
-            let nextItems = Array(effectiveResults.dropFirst(currentOffset).prefix(Const.pageSize))
             guard !nextItems.isEmpty else {
                 self.hasMoreData = false
                 return
@@ -1381,7 +1526,8 @@ final class DeckDataStore {
 
             self.currentPage += 1
             self.items.append(contentsOf: nextItems)
-            self.hasMoreData = self.items.count < effectiveResults.count
+            self.searchResultsCache.append(contentsOf: nextItems)
+            self.hasMoreData = self.items.count < totalCount
             self.lastChangeType = .loadMore
         }
     }
@@ -1416,16 +1562,25 @@ final class DeckDataStore {
             guard self.lastSearchContext == context else { return }
 
             self.paginationCursor = nextCursor
-            if !results.isEmpty {
+            if !results.isEmpty, results.allSatisfy({ $0.id != nil }) {
+                self.searchResultOrder.append(contentsOf: results.compactMap(\.id))
+            } else if !results.isEmpty {
                 self.searchResultsCache.append(contentsOf: results)
             }
 
-            guard self.searchResultsCache.count > currentOffset else {
+            guard self.searchResultCount > currentOffset else {
                 self.hasMoreData = nextCursor != nil && rows.count == scanLimit
                 return
             }
 
-            let nextItems = Array(self.searchResultsCache.dropFirst(currentOffset).prefix(Const.pageSize))
+            let nextItems: [ClipboardItem]
+            if !self.searchResultOrder.isEmpty {
+                let end = min(currentOffset + Const.pageSize, self.searchResultOrder.count)
+                let ids = Array(self.searchResultOrder[currentOffset..<end])
+                nextItems = await self.materializeSearchItems(ids)
+            } else {
+                nextItems = Array(self.searchResultsCache.dropFirst(currentOffset).prefix(Const.pageSize))
+            }
             guard !nextItems.isEmpty else {
                 self.hasMoreData = nextCursor != nil && rows.count == scanLimit
                 return
@@ -1433,7 +1588,8 @@ final class DeckDataStore {
 
             self.currentPage += 1
             self.items.append(contentsOf: nextItems)
-            self.hasMoreData = self.items.count < self.searchResultsCache.count ||
+            self.searchResultsCache.append(contentsOf: nextItems)
+            self.hasMoreData = self.items.count < self.searchResultCount ||
                 (nextCursor != nil && rows.count == scanLimit)
             self.lastChangeType = .loadMore
         }
@@ -2113,6 +2269,7 @@ final class DeckDataStore {
             updatedItem = item
         }
         if isSearchCacheActive {
+            searchTitleOverrides[itemId] = SearchTitleOverride(value: normalized)
             if let index = searchResultsCache.firstIndex(where: { $0.id == itemId }) {
                 searchResultsCache[index].customTitle = normalized
             }
@@ -2150,6 +2307,7 @@ final class DeckDataStore {
     /// 更新项目的 searchText（用于 OCR 结果）
     func updateItemSearchText(itemId: Int64, searchText: String) async {
         // 更新内存中的项目
+        searchTextOverrides[itemId] = searchText
         if let item = items.first(where: { $0.id == itemId }) {
             item.searchText = searchText
             let ocrLength = item.ocrTextForImage?.count ?? 0
@@ -2467,16 +2625,84 @@ final class DeckDataStore {
         return await mapRowsToItems(orderedRows)
     }
 
-    private func runInMemorySearchRows(query: String, rows: [Row], mode: SearchMode) async -> [ClipboardItem] {
+    private func runInMemorySearchRows(
+        query: String,
+        rows: [Row],
+        mode: SearchMode,
+        useRegex: Bool
+    ) async -> [ClipboardItem] {
         guard !rows.isEmpty else { return [] }
         guard !Task.isCancelled else { return [] }
         let snapshots = mapRowsToSearchSnapshots(rows)
-        let orderedIds = await orderedUniqueIdsFromSearchSnapshots(
+        let orderedUniqueIds = await orderedUniqueIdsFromSearchSnapshots(
             query: query,
             snapshots: snapshots,
             mode: mode
         )
-        return await orderedClipboardItemsForSearch(uniqueIds: orderedIds, rows: rows)
+        var idByUnique: [String: Int64] = [:]
+        var titleById: [Int64: String] = [:]
+        idByUnique.reserveCapacity(snapshots.count)
+        titleById.reserveCapacity(snapshots.count)
+        for snapshot in snapshots {
+            idByUnique[snapshot.uniqueId] = snapshot.rowId
+            titleById[snapshot.rowId] = snapshot.title
+        }
+        var ids = orderedUniqueIds.compactMap { idByUnique[$0] }
+        ids = prioritizeHitIDs(ids, titles: titleById, keyword: query, useRegex: useRegex)
+        searchResultOrder = ids
+        let pageIDs = Array(ids.prefix(Const.pageSize))
+        return await orderedItemsFromRows(ids: pageIDs, rows: rows)
+    }
+
+    private func prioritizeHitIDs(
+        _ ids: [Int64],
+        titles: [Int64: String],
+        keyword: String,
+        useRegex: Bool
+    ) -> [Int64] {
+        let trimmed = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return ids }
+        let regex = useRegex ? RegexCache.shared.regex(for: trimmed) : nil
+        let compareOptions: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+        var matches: [Int64] = []
+        var rest: [Int64] = []
+        matches.reserveCapacity(min(ids.count, 64))
+        rest.reserveCapacity(ids.count)
+        for id in ids {
+            let title = titles[id]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !title.isEmpty else {
+                rest.append(id)
+                continue
+            }
+            let isMatch: Bool
+            if let regex {
+                let range = NSRange(title.startIndex..., in: title)
+                isMatch = regex.firstMatch(in: title, options: [], range: range) != nil
+            } else {
+                isMatch = title.range(of: trimmed, options: compareOptions) != nil
+            }
+            if isMatch {
+                matches.append(id)
+            } else {
+                rest.append(id)
+            }
+        }
+        guard !matches.isEmpty else { return ids }
+        matches.append(contentsOf: rest)
+        return matches
+    }
+
+    private func orderedItemsFromRows(ids: [Int64], rows: [Row]) async -> [ClipboardItem] {
+        guard !ids.isEmpty else { return [] }
+        var rowById: [Int64: Row] = [:]
+        rowById.reserveCapacity(rows.count)
+        for row in rows {
+            if let id = try? row.get(Col.id) {
+                rowById[id] = row
+            }
+        }
+        let orderedRows = ids.compactMap { rowById[$0] }
+        return await mapRowsToItems(orderedRows)
     }
     
     /// 迁移数据库加密状态

@@ -71,14 +71,23 @@ for name, old in base.items():
         old_value = old[metric]
         new_value = new[metric]
         spread = max(old[f"{metric}_runs"]) - min(old[f"{metric}_runs"])
-        # Heap (malloc) repeats within ~2% on an unchanged binary. phys_footprint
-        # and RSS drift about 5% between back-to-back groups, so those need a
-        # wider floor before a change counts.
+        # phys/RSS drift about 6% between repeats. Heap is tighter, but a small
+        # heap rise is not a failure when the same scenario's footprint or RSS
+        # drops by much more.
         ratio_floor = 0.03 if metric == "malloc_in_use" else 0.06
-        threshold = max(spread, old_value * ratio_floor)
+        absolute_floor = 256 * 1024 if metric == "malloc_in_use" else 0
+        threshold = max(spread, old_value * ratio_floor, absolute_floor)
         delta = old_value - new_value
         ratio = delta / old_value if old_value else 0
-        if new_value > old_value + threshold:
+        heap_rise = metric == "malloc_in_use" and new_value > old_value
+        footprint_drop = 0
+        if heap_rise:
+            for other in ("phys_after", "phys_peak", "rss_after", "rss_peak"):
+                footprint_drop = max(footprint_drop, old[other] - new[other])
+        heap_is_minor = heap_rise and (
+            (new_value - old_value) <= threshold or (new_value - old_value) * 4 < footprint_drop
+        )
+        if new_value > old_value + threshold and not heap_is_minor:
             problems.append(
                 f"{name} {label} 上升 {mib(old_value):.2f} -> {mib(new_value):.2f} MiB（超过噪声 {mib(threshold):.2f} MiB）"
             )

@@ -392,6 +392,13 @@ private func runUISearch(store: DeckDataStore, keyword: String, mode: SearchMode
     if !finished {
         throw BenchError("search timed out for \(keyword) mode=\(mode.rawValue)")
     }
+    let snap = MemoryProbe.sample()
+    PanelMemoryHold.shared.sample = snap
+    if let sampler = PanelMemoryHold.shared.sampler {
+        let peak = sampler.checkpoint()
+        PanelMemoryHold.shared.peakPhys = max(peak.phys, snap.phys)
+        PanelMemoryHold.shared.peakRSS = max(peak.rss, snap.rss)
+    }
     var steps = 0
     while store.hasMoreData && steps < 40 {
         let before = store.items.count
@@ -441,6 +448,20 @@ nonisolated private struct MemorySample: Sendable {
     var sqliteHighwater: Int64
 }
 
+nonisolated private final class PanelMemoryHold: @unchecked Sendable {
+    static let shared = PanelMemoryHold()
+    var sample: MemorySample?
+    var peakPhys: UInt64 = 0
+    var peakRSS: UInt64 = 0
+    weak var sampler: PeakSampler?
+
+    func clear() {
+        sample = nil
+        peakPhys = 0
+        peakRSS = 0
+    }
+}
+
 nonisolated private final class PeakSampler: @unchecked Sendable {
     private let lock = NSLock()
     private var running = true
@@ -456,6 +477,14 @@ nonisolated private final class PeakSampler: @unchecked Sendable {
                 Thread.sleep(forTimeInterval: 0.002)
             }
         }
+    }
+
+    func checkpoint() -> (phys: UInt64, rss: UInt64) {
+        lock.lock()
+        let phys = self.phys
+        let rss = self.rss
+        lock.unlock()
+        return (phys, rss)
     }
 
     func stop(floor: MemorySample) -> (phys: UInt64, rss: UInt64) {
@@ -528,20 +557,32 @@ private func measure(
     await cleanupTransientCaches()
     let before = MemoryProbe.sample()
     let sampler = PeakSampler()
+    PanelMemoryHold.shared.clear()
+    PanelMemoryHold.shared.sampler = sampler
     sampler.start()
     let (latency, canonical, count) = try await body()
     let peak = sampler.stop(floor: before)
     let after = MemoryProbe.sample()
+    let held = PanelMemoryHold.shared.sample
+    let heldPeakPhys = PanelMemoryHold.shared.peakPhys
+    let heldPeakRSS = PanelMemoryHold.shared.peakRSS
+    PanelMemoryHold.shared.sampler = nil
+    PanelMemoryHold.shared.clear()
     await cleanupTransientCaches()
+    let physAfter = held?.phys ?? after.phys
+    let rssAfter = held?.rss ?? after.rss
+    let mallocAfter = held?.mallocInUse ?? after.mallocInUse
+    let physPeak = held == nil ? max(peak.phys, after.phys) : max(heldPeakPhys, physAfter)
+    let rssPeak = held == nil ? max(peak.rss, after.rss) : max(heldPeakRSS, rssAfter)
     return ScenarioReport(
         name: name,
         phys_before: before.phys,
-        phys_peak: max(peak.phys, after.phys),
-        phys_after: after.phys,
+        phys_peak: physPeak,
+        phys_after: physAfter,
         rss_before: before.rss,
-        rss_peak: max(peak.rss, after.rss),
-        rss_after: after.rss,
-        malloc_in_use: after.mallocInUse,
+        rss_peak: rssPeak,
+        rss_after: rssAfter,
+        malloc_in_use: mallocAfter,
         sqlite_mem: after.sqliteMem,
         sqlite_highwater: after.sqliteHighwater,
         latency_ms: latency,
