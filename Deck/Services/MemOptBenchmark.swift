@@ -262,17 +262,43 @@ private func measureLoad(store: DeckDataStore) async throws -> ScenarioReport {
             let started = DispatchTime.now().uptimeNanoseconds
             await store.loadInitialData()
             for _ in 0..<12 {
-                let before = store.items.count
-                guard store.hasMoreData || before < Const.pageSize else { break }
+                guard store.hasMoreData || store.items.count < Const.pageSize else { break }
+                let generation = store.historyLoadGeneration
                 store.loadNextPage()
                 _ = await wait(30) {
-                    store.items.count > before || (!store.isLoading && !store.hasMoreData)
+                    store.historyLoadGeneration != generation || (!store.isLoading && !store.hasMoreData)
                 }
             }
             samples.append(elapsedMillis(since: started))
         }
-        let canonical = canonicalText(store.items)
-        return (samples, canonical, store.items.count)
+        malloc_zone_pressure_relief(malloc_default_zone(), 0)
+        let snap = MemoryProbe.sample()
+        PanelMemoryHold.shared.sample = snap
+        if let sampler = PanelMemoryHold.shared.sampler {
+            let peak = sampler.checkpoint()
+            PanelMemoryHold.shared.peakPhys = max(peak.phys, snap.phys)
+            PanelMemoryHold.shared.peakRSS = max(peak.rss, snap.rss)
+        }
+        let canonical: String
+        let count: Int
+        let historyIDs = store.benchmarkHistoryIDs()
+        if historyIDs.isEmpty {
+            canonical = canonicalText(store.items)
+            count = store.items.count
+        } else {
+            var parts: [String] = []
+            parts.reserveCapacity((historyIDs.count / 50) + 1)
+            var index = 0
+            while index < historyIDs.count {
+                let end = min(index + 50, historyIDs.count)
+                let page = await store.benchmarkMaterializeHistory(Array(historyIDs[index..<end]))
+                parts.append(canonicalText(page))
+                index = end
+            }
+            canonical = parts.joined(separator: "\n")
+            count = historyIDs.count
+        }
+        return (samples, canonical, count)
     }
 }
 

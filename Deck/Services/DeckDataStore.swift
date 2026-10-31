@@ -36,6 +36,10 @@ final class DeckDataStore {
     var items: [ClipboardItem] = []
     @ObservationIgnored
     private var recentItemsCache: [ClipboardItem] = []
+    /// Ids of the main-list prefix loaded so far, newest first. `items` only
+    /// keeps the tail window; scrolling up rematerializes the front.
+    private var historyLoadedIDs: [Int64] = []
+    private(set) var historyLoadGeneration: UInt64 = 0
     private(set) var totalCount: Int = 0
     private(set) var currentPage: Int = 0
     @ObservationIgnored
@@ -161,6 +165,7 @@ final class DeckDataStore {
     private func resetSearchCache() {
         searchResultsCache = []
         searchResultOrder = []
+        historyLoadedIDs = []
         searchTitleOverrides = [:]
         searchTextOverrides = [:]
         isSearchCacheActive = false
@@ -200,6 +205,16 @@ final class DeckDataStore {
         if let text = searchTextOverrides[id], item.searchText != text {
             item.searchText = text
         }
+    }
+
+    /// Ids of the loaded main-list prefix, newest first. Empty when the visible
+    /// `items` array already is that prefix.
+    func benchmarkHistoryIDs() -> [Int64] {
+        historyLoadedIDs.count > items.count ? historyLoadedIDs : []
+    }
+
+    func benchmarkMaterializeHistory(_ ids: [Int64]) async -> [ClipboardItem] {
+        await materializeSearchItems(ids)
     }
 
     private func materializeSearchItems(_ ids: [Int64]) async -> [ClipboardItem] {
@@ -281,6 +296,7 @@ final class DeckDataStore {
         guard isPanelActive else { return }
 
         items = loaded
+        historyLoadedIDs = loaded.compactMap(\.id)
         hasMoreData = rows.count == pageLimit
         hasNewerDataBeforeCurrentWindow = false
         lastChangeType = .reset
@@ -473,10 +489,14 @@ final class DeckDataStore {
         let filter = isFiltered ? currentFilter : nil
         
         paginationTask?.cancel()
+        isLoading = true
         paginationTask = Task { [weak self] in
             guard let self else { return }
             self.isLoading = true
-            defer { self.isLoading = false }
+            defer {
+                self.isLoading = false
+                self.historyLoadGeneration &+= 1
+            }
             
             let nextPage = self.currentPage + 1
             self.currentPage = nextPage
@@ -516,6 +536,12 @@ final class DeckDataStore {
             }
 
             items.append(contentsOf: newItems)
+            historyLoadedIDs.append(contentsOf: newItems.compactMap(\.id))
+            let historyWindow = initialPresentationPageSize + Const.pageSize
+            if !isFiltered && currentRuleFilters.isEmpty && items.count > historyWindow {
+                items.removeFirst(items.count - historyWindow)
+                hasNewerDataBeforeCurrentWindow = true
+            }
             hasMoreData = fetchedCount == Const.pageSize
             lastChangeType = .loadMore
         }
