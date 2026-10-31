@@ -1513,6 +1513,12 @@ final class DeckSQLManager: NSObject, @unchecked Sendable {
                 scheduleSemanticEmbeddingBackfillIfNeeded()
 
                 log.info("Database initialized at: \(dbPath)")
+                // Schema and integrity checks fault the writer map. Drop those
+                // pages once, then put the 128MB ceiling back. Later searches
+                // do not unmap the writer.
+                try? db?.run("PRAGMA mmap_size = 0")
+                try? db?.run("PRAGMA mmap_size = 134217728")
+                try? db?.run("PRAGMA shrink_memory")
                 Self.isInitialized = true
                 lastInitFailureAt = nil
             }
