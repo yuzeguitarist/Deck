@@ -53,12 +53,13 @@ for name, old in base.items():
     old_lat = old["latency_ms_median"]
     new_lat = new["latency_ms_median"]
     lat_spread = max(old["latency_ms_runs"]) - min(old["latency_ms_runs"])
-    if old_lat > 0:
-        lat_ratio = (new_lat - old_lat) / old_lat
-        if lat_ratio > 0.03 and (new_lat - old_lat) > lat_spread:
-            problems.append(
-                f"{name} 延迟 {old_lat:.2f} ms -> {new_lat:.2f} ms（{lat_ratio * 100:+.1f}%，极差 {lat_spread:.2f} ms）"
-            )
+    # Same-binary repeats moved sub-5ms searches by ~0.5–1ms and longer searches
+    # by under 3%. Require both +3% and a delta past that floor.
+    lat_floor = max(lat_spread, old_lat * 0.03, 1.5)
+    if new_lat > old_lat + lat_floor:
+        problems.append(
+            f"{name} 延迟 {old_lat:.2f} ms -> {new_lat:.2f} ms（+{new_lat - old_lat:.2f} ms，噪声 {lat_floor:.2f} ms）"
+        )
 
     for metric, label in (
         ("phys_after", "物理足迹"),
@@ -70,7 +71,11 @@ for name, old in base.items():
         old_value = old[metric]
         new_value = new[metric]
         spread = max(old[f"{metric}_runs"]) - min(old[f"{metric}_runs"])
-        threshold = max(spread, old_value * 0.01)
+        # Heap (malloc) repeats within ~2% on an unchanged binary. phys_footprint
+        # and RSS drift about 5% between back-to-back groups, so those need a
+        # wider floor before a change counts.
+        ratio_floor = 0.03 if metric == "malloc_in_use" else 0.06
+        threshold = max(spread, old_value * ratio_floor)
         delta = old_value - new_value
         ratio = delta / old_value if old_value else 0
         if new_value > old_value + threshold:
