@@ -1270,6 +1270,9 @@ final class DeckDataStore {
             }
             results.removeAll(keepingCapacity: false)
             await sqlManager.shrinkMemory()
+            if mode != .semantic {
+                SemanticSearchService.shared.releaseEmbeddingsNow()
+            }
             if isKeywordSearch, log.isEnabled(.debug) {
                 let preview = results.prefix(10).compactMap { $0.id }.map(String.init).joined(separator: ", ")
                 if !preview.isEmpty {
