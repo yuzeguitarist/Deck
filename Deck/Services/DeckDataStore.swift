@@ -555,7 +555,7 @@ final class DeckDataStore {
 
             items.append(contentsOf: newItems)
             historyLoadedIDs.append(contentsOf: newItems.compactMap(\.id))
-            let historyWindow = initialPresentationPageSize + Const.pageSize
+            let historyWindow = initialPresentationPageSize
             if !isFiltered && currentRuleFilters.isEmpty && items.count > historyWindow {
                 items.removeFirst(items.count - historyWindow)
                 hasNewerDataBeforeCurrentWindow = true
