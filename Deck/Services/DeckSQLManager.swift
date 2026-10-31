@@ -473,7 +473,11 @@ extension DeckSQLManager {
             do {
                 log.info("Running VACUUM (maintenance): \(reason)")
                 try db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                // The steady 20MB cache stays for searches. VACUUM only needs
+                // a small cache; restore the steady size before returning.
+                try db.execute("PRAGMA cache_size = -256")
                 try db.execute("VACUUM")
+                try db.execute("PRAGMA cache_size = -20000")
                 // VACUUM faults the writer map for the whole file. Drop that
                 // map and restore the same 128MB ceiling. Search connections
                 // are left alone.
