@@ -217,6 +217,24 @@ final class DeckDataStore {
         await materializeSearchItems(ids)
     }
 
+    /// How many results the last search or list load logically has.
+    func benchmarkLogicalCount() -> Int {
+        if !searchResultOrder.isEmpty { return searchResultOrder.count }
+        return items.count
+    }
+
+    /// One page of the logical result list, without appending it to `items`.
+    func benchmarkMaterializeLogicalRange(_ range: Range<Int>) async -> [ClipboardItem] {
+        if !searchResultOrder.isEmpty {
+            let upper = min(range.upperBound, searchResultOrder.count)
+            let lower = min(max(range.lowerBound, 0), upper)
+            return await materializeSearchItems(Array(searchResultOrder[lower..<upper]))
+        }
+        let upper = min(range.upperBound, items.count)
+        let lower = min(max(range.lowerBound, 0), upper)
+        return Array(items[lower..<upper])
+    }
+
     private func materializeSearchItems(_ ids: [Int64]) async -> [ClipboardItem] {
         guard !ids.isEmpty else { return [] }
         var ordered: [ClipboardItem] = []

@@ -329,9 +329,8 @@ private func measureSearch(
                 samples.append(millis)
             }
         }
-        try await runUISearch(store: store, keyword: keyword, mode: mode)
-        let canonical = canonicalText(store.items)
-        return (samples, canonical, store.items.count)
+        let (canonical, count) = try await runUISearch(store: store, keyword: keyword, mode: mode)
+        return (samples, canonical, count)
     }
 }
 
@@ -369,8 +368,8 @@ private func measureExtreme(store: DeckDataStore, expectedFuzzy: String) async t
             }
         }
         let millis = elapsedMillis(since: started)
-        try await runUISearch(store: store, keyword: "alphneedle", mode: .mixed)
-        return ([millis], canonicalText(store.items), store.items.count)
+        let (canonical, count) = try await runUISearch(store: store, keyword: "alphneedle", mode: .mixed)
+        return ([millis], canonical, count)
     }
     if report.canonical_sha256 != expectedFuzzy {
         throw BenchError("extreme mixed_fuzzy diverged from serial mixed_fuzzy")
@@ -396,8 +395,8 @@ private func measureMaintain(
         let millis = elapsedMillis(since: started)
         return ([millis], "maintain", 0)
     }
-    try await runUISearch(store: store, keyword: "alphaneedle", mode: .exact)
-    let exact = SHA256Hex(canonicalText(store.items))
+    let (exactText, _) = try await runUISearch(store: store, keyword: "alphaneedle", mode: .exact)
+    let exact = SHA256Hex(exactText)
     if exact != expectedExact {
         throw BenchError("maintain changed exact search bytes")
     }
@@ -405,7 +404,7 @@ private func measureMaintain(
 }
 
 @MainActor
-private func runUISearch(store: DeckDataStore, keyword: String, mode: SearchMode) async throws {
+private func runUISearch(store: DeckDataStore, keyword: String, mode: SearchMode) async throws -> (String, Int) {
     store.setPanelActive(true)
     store.search(
         keyword: keyword,
@@ -426,18 +425,20 @@ private func runUISearch(store: DeckDataStore, keyword: String, mode: SearchMode
         PanelMemoryHold.shared.peakPhys = max(peak.phys, snap.phys)
         PanelMemoryHold.shared.peakRSS = max(peak.rss, snap.rss)
     }
-    var steps = 0
-    while store.hasMoreData && steps < 40 {
-        let before = store.items.count
-        store.loadNextPage()
-        _ = await wait(30) {
-            store.items.count > before || (!store.isLoading && !store.hasMoreData)
+    let total = store.benchmarkLogicalCount()
+    var parts: [String] = []
+    var produced = 0
+    var index = 0
+    while index < total {
+        let end = min(index + 50, total)
+        let page = await store.benchmarkMaterializeLogicalRange(index..<end)
+        if !page.isEmpty {
+            parts.append(canonicalText(page))
+            produced += page.count
         }
-        if store.items.count == before {
-            break
-        }
-        steps += 1
+        index = end
     }
+    return (parts.joined(separator: "\n"), produced)
 }
 
 // MARK: - Measurement
