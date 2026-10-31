@@ -474,6 +474,12 @@ extension DeckSQLManager {
                 log.info("Running VACUUM (maintenance): \(reason)")
                 try db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
                 try db.execute("VACUUM")
+                // VACUUM faults the writer map for the whole file. Drop that
+                // map and restore the same 128MB ceiling. Search connections
+                // are left alone.
+                try db.execute("PRAGMA mmap_size = 0")
+                try db.execute("PRAGMA mmap_size = 134217728")
+                try db.execute("PRAGMA shrink_memory")
                 return true
             } catch {
                 return false
