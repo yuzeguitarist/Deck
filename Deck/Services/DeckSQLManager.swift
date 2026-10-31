@@ -476,12 +476,11 @@ extension DeckSQLManager {
                 // The steady 20MB cache stays for searches. VACUUM only needs
                 // a small cache; restore the steady size before returning.
                 try db.execute("PRAGMA cache_size = -256")
+                // Keep the 128MB ceiling for searches. While VACUUM rewrites
+                // the file, don't hold that map; restore the ceiling after.
+                try db.execute("PRAGMA mmap_size = 0")
                 try db.execute("VACUUM")
                 try db.execute("PRAGMA cache_size = -20000")
-                // VACUUM faults the writer map for the whole file. Drop that
-                // map and restore the same 128MB ceiling. Search connections
-                // are left alone.
-                try db.execute("PRAGMA mmap_size = 0")
                 try db.execute("PRAGMA mmap_size = 134217728")
                 try db.execute("PRAGMA shrink_memory")
                 return true
