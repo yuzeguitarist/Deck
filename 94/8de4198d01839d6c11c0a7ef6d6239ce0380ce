@@ -1,0 +1,24 @@
+tmp/memopt/judge.py
+  s_f9e7b659495203::t_4363753788f9ec 63-69
+  s_f9e7b659495203::t_27b18c95e9fa8d 73,76,78,81
+tmp/memopt/median.py
+  s_f9e7b659495203::t_2d8c3c2745a1c2 36-38
+tmp/memopt/baseline-median.json
+  s_f9e7b659495203::t_ca0002f6cf043e 18-32,62-76,106-120,150-164,194-208,238-252,282-296,326-340,370-384,414-428
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "948de4198d01839d6c11c0a7ef6d6239ce0380ce",
+  "prompts": {},
+  "sessions": {
+    "s_f9e7b659495203": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "d5b1df79-09df-463c-9777-99e7f555bca1",
+        "model": "grok-4.7-xhigh"
+      },
+      "human_author": "Yuze Pan <145409865+yuzeguitarist@users.noreply.github.com>"
+    }
+  }
+}
