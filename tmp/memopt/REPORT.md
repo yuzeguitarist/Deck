@@ -21,6 +21,7 @@ worktree：`/Users/jerry/Desktop/开发/Deck/Deck-memopt-50`
 | 4 | 小写文本缓存缩到 1MB / 200 条 | 模糊堆 -1.32 MiB（-11.7%），但模糊延迟 +7.64 ms，回滚 |
 | 5 | 小写缓存改存 Swift String | 模糊堆没有超过噪声的下降，回滚 |
 | 6 | mmap 128MB → 8MB | 维护 RSS -18.27 MiB（-12.8%），但小查询堆上升约 0.15 MiB，不单独保留 |
+| 7 | 8MB mmap + 4MB 页缓存 | 维护 RSS -35.36 MiB（-24.7%），但多个场景堆上升约 0.3 MiB，回滚 |
 
 ## 累计（相对原始基线）
 
